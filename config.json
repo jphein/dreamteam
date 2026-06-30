@@ -1,0 +1,32 @@
+{
+  "_comment": "dreamteam tunables. All hooks/scripts read this via jq with the same defaults baked in, so it works even if this file is absent. Calibrated to the VERIFIED 2026-06-30 OOM postmortem on katana (32 GB RAM / 32 GB swap): 59 distinct Claude procs at OOM time, TWO simultaneous balloons (3.7 GB + 3.4 GB), 17.2 GB resident; baseline ~200-280 MB/agent.",
+
+  "memory": {
+    "maxAgents": 30,
+    "perAgentMB": 400,
+    "hostReserveMB": 6000,
+    "balloonReserveMB": 8000,
+    "minAvailableMB": 8000,
+    "scopeToDreamteam": false,
+    "_notes": {
+      "maxAgents": "SYSTEM-WIDE cap (mem-gate counts ALL claude procs via pgrep, not just this team). 59 ran on 06-30 across multiple sessions — a per-team cap can't see the aggregate; this can.",
+      "perAgentMB": "Planning RSS for a NEW agent. Verified baseline at OOM time was ~200-280 MB; live-active with context ~350-430 MB. 400 splits the two. (The earlier 600 was a cgroup-peak-incl-cache artifact — corrected.)",
+      "balloonReserveMB": "Headroom kept free for runaway agents. 06-30 had TWO concurrent balloons (3.7 + 3.4 GB) — hence 8 GB, not 4. The single biggest driver of the kill alongside raw count.",
+      "scopeToDreamteam": "false = GLOBAL safety net on every agent spawn (recommended — 06-30 spanned multiple sessions). true = only acts when a team marker is active (state/active)."
+    }
+  },
+
+  "reuse": {
+    "enforce": true,
+    "_notes": {
+      "enforce": "true = reuse-gate BLOCKS a fresh spawn when an idle teammate can take the task (reuse via SendMessage = zero new RAM + warm context). Override per-spawn with 'FRESH-SPAWN: <reason>' in the prompt. false = disable the gate entirely."
+    }
+  },
+
+  "scope": {
+    "memoryHigh": "20G",
+    "memoryMax": "24G",
+    "memorySwapMax": "8G",
+    "_notes": "systemd-run --scope caps for launch-dreamteam.sh. MemoryHigh = throttle (reclaim pressure); MemoryMax = hard kill within the team's cgroup; MemorySwapMax bounds swap so the team can't drive the host's swap to 0. Size to leave the GUI/host a few GB."
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "name": "dreamteam",
+  "version": "1.0.0",
+  "description": "Spawn named, memory-guarded parallel agent teams in isolated worktrees, coordinated via SendMessage. Adds reuse-before-spawn routing, memory-aware admission control (pre-spawn gate), cgroup containment, and automatic crash recovery to prevent the OOM cascades that a count-only cap cannot.",
+  "author": { "name": "JP", "email": "jp@jphein.com" },
+  "keywords": ["agents", "orchestration", "dreamteam", "overnight", "oom-guard"]
+}

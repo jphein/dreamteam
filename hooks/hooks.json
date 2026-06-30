@@ -1,0 +1,57 @@
+{
+  "description": "Dreamteam OOM + reuse guardrails. PreToolUse(Agent|Task) = reuse-before-spawn gate THEN memory admission gate (either exit 2 blocks). PostToolUse(Agent|Task) = footprint accounting. SessionStart = crash residue recovery. SessionEnd = clean-shutdown marker clear.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/reuse-gate.sh\"",
+            "timeout": 6000
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/mem-gate.sh\"",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/spawn-accounting.sh\"",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/crash-audit.sh\"",
+            "timeout": 8000
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/cleanup-marker.sh\"",
+            "timeout": 5000
+          }
+        ]
+      }
+    ]
+  }
+}

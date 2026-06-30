@@ -1,0 +1,72 @@
+# dreamteam (plugin)
+
+Converts the dreamteam **skill** into a full **plugin** so the OOM-prevention logic is
+*enforced by the harness*, not just *described in prose the model can talk past*.
+
+Born from the 2026-06-30 postmortem: a 25-PR overnight merge cascade ran ~40 Claude
+agents in one Ghostty cgroup; one ballooned to 3.7 GB; 32 GB swap hit 0; the kernel
+OOM-killer thrashed for ~30 min and the whole session was lost. The old `~30 agent`
+cap was a *count* with no memory backing — and ~40 were running.
+
+## What's a hook vs. what's a script (read this first)
+
+Claude Code hooks are **event-driven only** — there is **no "post-crash" hook event**.
+So the guardrails map to the harness like this:
+
+| Guardrail | Real mechanism | Why |
+|---|---|---|
+| Reuse-before-spawn | **`PreToolUse` hook** (matcher `Agent\|Task`), `exit 2` blocks | Reuse an idle teammate (zero new RAM) before creating a new agent |
+| Pre-spawn memory gate | **`PreToolUse` hook** (matcher `Agent\|Task`), `exit 2` blocks | Agent spawns are tool calls; a true, deterministic admission gate |
+| Post-crash recovery | **`SessionStart` hook** detecting crash *residue* (stale marker) | No "crash" event fires; we detect that SessionEnd never cleared the marker |
+
+**No polling watchdog** (JP's call): a mid-flight balloon is contained *structurally* by
+the systemd-scope `MemoryMax` cap (see `launch-dreamteam.sh`) — the team's own cgroup
+hard-kills a runaway at its ceiling, so the host survives without a poller. `PostToolUse`
+logs the cumulative footprint to `state/dreamteam.log` for visibility.
+
+## File tree
+
+```
+dreamteam/
+├── .claude-plugin/plugin.json     manifest
+├── hooks/hooks.json               wires the 4 hook events → scripts
+├── config.json                    tunables (per-agent MB, reserves, reuse enforce, scope caps)
+├── scripts/
+│   ├── mem-gate.sh                ★ PreToolUse gate — blocks a spawn with no headroom
+│   ├── reuse-gate.sh              ★ PreToolUse gate — blocks a spawn when an idle teammate fits
+│   ├── idle-agents.sh             idle-agent oracle + context-affinity scorer
+│   ├── crash-audit.sh             SessionStart — surfaces the recovery checklist
+│   ├── spawn-accounting.sh        PostToolUse — cumulative footprint log
+│   ├── cleanup-marker.sh          SessionEnd — clears the active marker (clean exit)
+│   ├── mem-budget.sh              shared budget calculator (also /dreamteam-status)
+│   ├── launch-dreamteam.sh        systemd-scope + tmux -L isolated launcher
+│   └── tmux-layout.sh             move agent panes into their own window
+├── commands/
+│   ├── dreamteam.md               /dreamteam — guarded launch
+│   ├── dreamteam-status.md        /dreamteam-status — budget + footprint snapshot
+│   └── dreamteam-roster.md        /dreamteam-roster — idle agents ranked by context fit
+├── skills/dreamteam/SKILL.md      the existing skill (moved here verbatim + §3 prose adds)
+└── state/                         runtime: active marker, HANDOFF.md, dreamteam.log
+```
+
+## Defense in depth
+
+1. **Reuse** (`reuse-gate.sh`): assign an idle teammate (zero new RAM, warm context) before
+   spawning. The cheapest lever — last night's kill was 59 procs; every spawn avoided helps.
+2. **Admission** (`mem-gate.sh`): can't spawn past the live memory budget. Prevents the cause.
+3. **Containment** (`launch-dreamteam.sh`): team runs in a `MemoryMax`-capped cgroup on its
+   own tmux server → a runaway is hard-capped within the team; host + JP's session survive.
+4. **Recovery** (`crash-audit.sh`): next session auto-surfaces "check worktrees for
+   uncommitted work, reconcile the merge cascade, resume from item N."
+
+## Install (after review — these hooks BLOCK spawns and can KILL processes)
+
+```bash
+cp -r dreamteam ~/.claude/plugins/dreamteam
+chmod +x ~/.claude/plugins/dreamteam/scripts/*.sh
+# register in the plugin config / restart Claude Code so hooks load
+```
+
+OS-level companions (see the postmortem §4): configure `systemd-oomd` (PSI+cgroup-aware,
+fixes the Waydroid victim-poisoning), re-tune `earlyoom`, and cut the 32 GB swap. Those
+make any future OOM a clean 2-second kill instead of a 30-min thrash.

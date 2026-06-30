@@ -1,0 +1,522 @@
+<title>Dream Team · candela</title>
+
+<!--
+  ════════════════════════════════════════════════════════════════════════
+  DREAM TEAM DASHBOARD — Artifact template for the candela overnight team.
+  Authored for the Artifact tool: NO <!doctype>/<html>/<head>/<body> here —
+  the publisher wraps this fragment. Everything is inline (CSP blocks CDNs).
+  Suggested Artifact favicon param: 🕯️
+  ────────────────────────────────────────────────────────────────────────
+  DATA CONTRACT (window.DREAMTEAM_DATA) — produced by scripts/dashboard-data.sh:
+    generatedAt : ISO-8601 string (with TZ offset)
+    host, team  : strings
+    waydroidRunning : bool
+    memory: { totalMb, usedMb, availableMb, swapTotalMb, swapUsedMb,
+              agentTotalRssMb, perAgentMb, hostReserveMb, balloonReserveMb,
+              minAvailableMb, maxAgents, budget, cap, liveAgents, room,
+              thresholds: { redBelowMb, orangeBelowMb, yellowBelowMb } }
+    tier   : "Green" | "Yellow" | "Orange" | "Red"
+    agents : [ { name, status:"active|idle|dead", task, worktree, branch,
+                 agentId, pid, rssMb } ]
+    prs    : [ { number, title, author, branch, ci:"success|failure|pending|none",
+                 state, url } ]
+    timeline: { shipped:[{label,ref,at}], inFlight:[{label,status,url}],
+                pending:[{label}] }
+  ────────────────────────────────────────────────────────────────────────
+  TO REFRESH: re-run dashboard-data.sh and re-deploy. The 12s in-page loop
+  re-renders the injected snapshot and advances clocks; it cannot fetch
+  (CSP), so live numbers change only when the orchestrator re-publishes.
+  Easiest path:  dashboard-data.sh --inject <this-template>  > out.html
+  ════════════════════════════════════════════════════════════════════════
+-->
+
+<style>
+  :root {
+    --ground:#0e0b1a; --ground-2:#121029; --panel:#181327; --panel-2:#1f1834;
+    --line:#2b2347; --line-soft:#231d3a;
+    --ink:#ece6da; --ink-dim:#bcb2d6; --muted:#8d83a8;
+    --gold:#f2b84e; --gold-soft:#caa24e; --ember:#e8743b;
+    --violet:#a98bff; --violet-deep:#7c5cff;
+    --good:#5ed79a; --warn:#ecc94b; --tight:#ef8a3c; --crit:#f25767;
+    --good-bg:rgba(94,215,154,.13); --warn-bg:rgba(236,201,75,.13);
+    --tight-bg:rgba(239,138,60,.14); --crit-bg:rgba(242,87,103,.15);
+    --shadow:0 1px 0 rgba(255,255,255,.03), 0 18px 40px -24px rgba(0,0,0,.8);
+    --serif:"Iowan Old Style","Palatino Linotype",Palatino,"URW Palladio L",Georgia,serif;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,Ubuntu,"Helvetica Neue",Arial,sans-serif;
+    --mono:"JetBrains Mono","SF Mono",ui-monospace,"Cascadia Code","DejaVu Sans Mono",Menlo,Consolas,monospace;
+    --r:14px; --r-sm:9px;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --ground:#efe8d8; --ground-2:#e8dfca; --panel:#fbf7ee; --panel-2:#f4ecda;
+      --line:#ddcfb2; --line-soft:#e7ddc6;
+      --ink:#2a2236; --ink-dim:#4a4159; --muted:#776c86;
+      --gold:#b9801a; --gold-soft:#9a7415; --ember:#c4561f;
+      --violet:#6243d6; --violet-deep:#5436c0;
+      --good:#1f9d57; --warn:#9a7415; --tight:#c25c1c; --crit:#cf3344;
+      --good-bg:rgba(31,157,87,.12); --warn-bg:rgba(154,116,21,.13);
+      --tight-bg:rgba(194,92,28,.12); --crit-bg:rgba(207,51,68,.12);
+      --shadow:0 1px 0 rgba(255,255,255,.6), 0 14px 30px -22px rgba(60,40,10,.5);
+    }
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; font-family:var(--sans); color:var(--ink);
+    background:
+      radial-gradient(1100px 520px at 50% -160px, rgba(242,184,78,.10), transparent 60%),
+      radial-gradient(800px 600px at 110% 10%, rgba(124,92,255,.08), transparent 55%),
+      var(--ground);
+    -webkit-font-smoothing:antialiased; line-height:1.5;
+    padding:clamp(14px,3vw,34px); min-height:100vh;
+  }
+  .wrap { max-width:1180px; margin:0 auto; }
+
+  /* ── header band ───────────────────────────────────────────── */
+  header.band {
+    display:flex; flex-wrap:wrap; align-items:center; gap:18px 22px;
+    padding:18px 22px; border:1px solid var(--line); border-radius:var(--r);
+    background:linear-gradient(180deg,var(--panel-2),var(--panel)); box-shadow:var(--shadow);
+    position:relative; overflow:hidden;
+  }
+  header.band::before {
+    content:""; position:absolute; inset:0;
+    background:radial-gradient(220px 120px at 38px 50%, rgba(242,184,78,.14), transparent 70%);
+    pointer-events:none;
+  }
+  .sigil { display:flex; align-items:center; gap:14px; position:relative; }
+  .candle { width:30px; height:46px; position:relative; flex:none; }
+  .candle .stick {
+    position:absolute; bottom:0; left:9px; width:12px; height:26px; border-radius:3px;
+    background:linear-gradient(180deg,#f3ead2,#cbb98c); box-shadow:inset 0 0 0 1px rgba(0,0,0,.12);
+  }
+  @media (prefers-color-scheme:dark){ .candle .stick{ background:linear-gradient(180deg,#2b2440,#1c1730); box-shadow:inset 0 0 0 1px rgba(255,255,255,.05);} }
+  .candle .flame {
+    position:absolute; top:0; left:50%; width:14px; height:22px; margin-left:-7px;
+    background:radial-gradient(closest-side at 50% 68%, #fff3c4, #f2b84e 55%, #e8743b 88%, transparent);
+    border-radius:50% 50% 50% 50% / 62% 62% 38% 38%;
+    transform-origin:50% 100%; filter:drop-shadow(0 0 9px rgba(242,184,78,.7));
+    animation:flicker 2.6s ease-in-out infinite;
+  }
+  .candle .halo {
+    position:absolute; top:-8px; left:50%; width:42px; height:42px; margin-left:-21px;
+    background:radial-gradient(closest-side, rgba(242,184,78,.28), transparent 70%);
+    animation:breathe 3.4s ease-in-out infinite;
+  }
+  @keyframes flicker {
+    0%,100%{ transform:scaleY(1) skewX(0deg); opacity:1; }
+    25%{ transform:scaleY(1.07) skewX(-2.5deg); opacity:.92; }
+    50%{ transform:scaleY(.95) skewX(1.5deg); opacity:1; }
+    75%{ transform:scaleY(1.04) skewX(2deg); opacity:.95; }
+  }
+  @keyframes breathe { 0%,100%{opacity:.65;} 50%{opacity:1;} }
+  .titles h1 {
+    margin:0; font-family:var(--serif); font-weight:600; letter-spacing:.2px;
+    font-size:clamp(1.25rem,2.4vw,1.7rem); text-wrap:balance;
+  }
+  .titles h1 .sub { color:var(--gold); font-style:italic; }
+  .titles .meta { color:var(--muted); font-size:.82rem; margin-top:2px; }
+  .titles .meta b { color:var(--ink-dim); font-weight:600; }
+  .band .spacer { flex:1 1 40px; }
+  .band .clockwrap { text-align:right; display:flex; flex-direction:column; gap:6px; align-items:flex-end; }
+  .clock { font-family:var(--mono); font-size:.9rem; color:var(--ink-dim); font-variant-numeric:tabular-nums; }
+  .ageline { font-size:.72rem; color:var(--muted); }
+  .ageline.stale { color:var(--warn); }
+
+  /* big tier badge */
+  .tierbadge {
+    display:inline-flex; align-items:center; gap:10px; padding:9px 15px;
+    border-radius:999px; font-family:var(--serif); font-weight:600; font-size:1rem;
+    border:1px solid currentColor; letter-spacing:.3px;
+  }
+  .tierbadge .dot { width:11px; height:11px; border-radius:50%; background:currentColor; box-shadow:0 0 10px currentColor; }
+  .tierbadge small { font-family:var(--sans); font-weight:500; font-size:.72rem; opacity:.85; letter-spacing:0; }
+  .tier-Green{ color:var(--good); background:var(--good-bg); }
+  .tier-Yellow{ color:var(--warn); background:var(--warn-bg); }
+  .tier-Orange{ color:var(--tight); background:var(--tight-bg); }
+  .tier-Red{ color:var(--crit); background:var(--crit-bg); animation:pulse 1.5s ease-in-out infinite; }
+  @keyframes pulse { 0%,100%{box-shadow:0 0 0 0 rgba(242,87,103,.0);} 50%{box-shadow:0 0 0 6px rgba(242,87,103,.18);} }
+
+  /* ── tile row ──────────────────────────────────────────────── */
+  .tiles { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin:16px 0; }
+  @media (max-width:820px){ .tiles{ grid-template-columns:repeat(2,1fr);} }
+  @media (max-width:460px){ .tiles{ grid-template-columns:1fr;} }
+  .tile {
+    border:1px solid var(--line); border-radius:var(--r); padding:14px 16px;
+    background:var(--panel); box-shadow:var(--shadow);
+  }
+  .tile .k { font-size:.7rem; text-transform:uppercase; letter-spacing:.09em; color:var(--muted); }
+  .tile .v { font-family:var(--serif); font-size:1.7rem; margin-top:3px; font-variant-numeric:tabular-nums; }
+  .tile .v small { font-family:var(--sans); font-size:.8rem; color:var(--muted); font-weight:400; }
+  .tile .sub2 { font-size:.74rem; color:var(--muted); margin-top:2px; }
+
+  /* gauge */
+  .gauge { margin-top:9px; height:9px; border-radius:6px; background:var(--ground-2); position:relative; overflow:hidden; border:1px solid var(--line-soft); }
+  .gauge > i { position:absolute; left:0; top:0; bottom:0; border-radius:6px; transition:width .6s cubic-bezier(.2,.7,.2,1); }
+  .gauge .mark { position:absolute; top:-3px; bottom:-3px; width:2px; background:var(--ink-dim); opacity:.55; }
+  .gauge .mark.crit { background:var(--crit); opacity:.8; }
+  .gaugekey { display:flex; justify-content:space-between; font-size:.66rem; color:var(--muted); margin-top:5px; font-variant-numeric:tabular-nums; }
+
+  /* ── grid ──────────────────────────────────────────────────── */
+  .grid { display:grid; grid-template-columns:1.5fr 1fr; gap:14px; align-items:start; }
+  @media (max-width:900px){ .grid{ grid-template-columns:1fr; } }
+  section.card {
+    border:1px solid var(--line); border-radius:var(--r); background:var(--panel);
+    box-shadow:var(--shadow); overflow:hidden;
+  }
+  .card > h2 {
+    margin:0; padding:13px 17px; font-family:var(--serif); font-weight:600; font-size:1.02rem;
+    border-bottom:1px solid var(--line-soft); display:flex; align-items:center; gap:9px;
+    background:linear-gradient(180deg,var(--panel-2),transparent);
+  }
+  .card > h2 .count { margin-left:auto; font-family:var(--mono); font-size:.78rem; color:var(--muted); font-weight:400; }
+  .card .body { padding:6px 6px 10px; }
+  .card .pad { padding:14px 17px; }
+
+  .scrollx { overflow-x:auto; }
+  table { width:100%; border-collapse:collapse; font-size:.83rem; }
+  th { text-align:left; font-size:.66rem; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); font-weight:600; padding:8px 11px; border-bottom:1px solid var(--line-soft); white-space:nowrap; }
+  td { padding:9px 11px; border-bottom:1px solid var(--line-soft); vertical-align:middle; }
+  tr:last-child td { border-bottom:none; }
+  tbody tr:hover { background:rgba(124,92,255,.06); }
+  td.mono, .mono { font-family:var(--mono); font-variant-numeric:tabular-nums; }
+  td .name { font-weight:600; }
+  td .path { color:var(--muted); font-size:.76rem; max-width:230px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:inline-block; vertical-align:bottom; }
+  a { color:var(--violet); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+
+  /* pills */
+  .pill { display:inline-flex; align-items:center; gap:6px; padding:2px 9px; border-radius:999px; font-size:.72rem; font-weight:600; border:1px solid transparent; white-space:nowrap; }
+  .pill::before { content:""; width:7px; height:7px; border-radius:50%; background:currentColor; }
+  .pill.active,.pill.success{ color:var(--good); background:var(--good-bg); border-color:rgba(94,215,154,.3); }
+  .pill.idle,.pill.pending{ color:var(--warn); background:var(--warn-bg); border-color:rgba(236,201,75,.3); }
+  .pill.dead,.pill.failure{ color:var(--crit); background:var(--crit-bg); border-color:rgba(242,87,103,.3); }
+  .pill.none{ color:var(--muted); background:var(--line-soft); border-color:var(--line); }
+  .pill.none::before{ background:var(--muted); }
+
+  /* memory budget waterfall */
+  .formula { display:flex; flex-direction:column; gap:7px; font-size:.82rem; }
+  .frow { display:flex; align-items:center; gap:10px; }
+  .frow .lbl { color:var(--muted); flex:1; }
+  .frow .num { font-family:var(--mono); font-variant-numeric:tabular-nums; color:var(--ink-dim); }
+  .frow.total { border-top:1px dashed var(--line); padding-top:8px; margin-top:2px; }
+  .frow.total .lbl { color:var(--ink); font-weight:600; }
+  .frow.total .num { color:var(--gold); font-weight:700; font-size:1.05rem; }
+  .frow .num.neg { color:var(--tight); }
+
+  /* tier ladder */
+  .ladder { display:flex; flex-direction:column; gap:8px; }
+  .rung { display:grid; grid-template-columns:auto 1fr; gap:4px 12px; padding:10px 12px; border-radius:var(--r-sm); border:1px solid var(--line-soft); background:var(--ground-2); opacity:.62; transition:opacity .3s, border-color .3s; }
+  .rung.on { opacity:1; border-color:currentColor; box-shadow:inset 3px 0 0 currentColor; }
+  .rung .lvl { font-family:var(--serif); font-weight:600; }
+  .rung .rng { font-family:var(--mono); font-size:.74rem; align-self:center; text-align:right; }
+  .rung .act { grid-column:1/-1; font-size:.76rem; color:var(--muted); }
+  .rung.on .act { color:var(--ink-dim); }
+  .rung.lvl-Green{ color:var(--good);} .rung.lvl-Yellow{ color:var(--warn);} .rung.lvl-Orange{ color:var(--tight);} .rung.lvl-Red{ color:var(--crit);}
+
+  /* timeline */
+  .tl { display:flex; flex-direction:column; gap:16px; }
+  .tlgroup .gh { font-size:.68rem; text-transform:uppercase; letter-spacing:.09em; color:var(--muted); margin-bottom:7px; display:flex; align-items:center; gap:7px; }
+  .tlgroup .gh .gdot { width:8px; height:8px; border-radius:50%; }
+  .tlitems { display:flex; flex-direction:column; gap:6px; border-left:2px solid var(--line); padding-left:13px; margin-left:3px; }
+  .tlitem { font-size:.82rem; position:relative; }
+  .tlitem::before { content:""; position:absolute; left:-19px; top:6px; width:8px; height:8px; border-radius:50%; background:var(--line); border:2px solid var(--panel); }
+  .tlitem.shipped::before{ background:var(--good);} .tlitem.inflight::before{ background:var(--gold);} .tlitem.pending::before{ background:var(--muted);}
+  .tlitem .when { font-family:var(--mono); font-size:.7rem; color:var(--muted); }
+  .tlitem .st { font-size:.72rem; color:var(--gold); }
+
+  .empty { padding:18px; text-align:center; color:var(--muted); font-style:italic; font-size:.84rem; }
+  .waydroid-warn { margin:14px 0 0; padding:11px 15px; border-radius:var(--r-sm); border:1px solid rgba(239,138,60,.4); background:var(--tight-bg); color:var(--tight); font-size:.82rem; display:none; align-items:center; gap:9px; }
+  .waydroid-warn.show { display:flex; }
+
+  footer.foot { margin-top:18px; padding:14px 6px; display:flex; flex-wrap:wrap; gap:10px 18px; align-items:center; justify-content:space-between; color:var(--muted); font-size:.74rem; }
+  footer .legend { display:flex; flex-wrap:wrap; gap:12px; }
+  footer .legend span { display:inline-flex; align-items:center; gap:5px; }
+  footer .legend i { width:9px; height:9px; border-radius:50%; }
+  .btn {
+    font:inherit; font-size:.76rem; color:var(--ink-dim); background:var(--panel-2);
+    border:1px solid var(--line); border-radius:999px; padding:5px 13px; cursor:pointer;
+    display:inline-flex; align-items:center; gap:6px;
+  }
+  .btn:hover { border-color:var(--gold); color:var(--gold); }
+  .btn:focus-visible, a:focus-visible, .rung:focus-visible { outline:2px solid var(--violet); outline-offset:2px; }
+  .refresh-ring { width:13px; height:13px; }
+  .refresh-ring circle { fill:none; stroke-width:2.4; }
+  .refresh-ring .bg { stroke:var(--line); } .refresh-ring .fg { stroke:var(--gold); stroke-linecap:round; transition:stroke-dashoffset 1s linear; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .candle .flame, .candle .halo, .tier-Red, .refresh-ring .fg { animation:none !important; transition:none !important; }
+  }
+</style>
+
+<div class="wrap">
+  <header class="band">
+    <div class="sigil">
+      <div class="candle" aria-hidden="true">
+        <span class="halo"></span><span class="flame"></span><span class="stick"></span>
+      </div>
+      <div class="titles">
+        <h1>Dream Team <span class="sub">· candela</span></h1>
+        <div class="meta" id="hdr-meta">host <b>—</b> · team <b>—</b></div>
+      </div>
+    </div>
+    <div class="spacer"></div>
+    <div id="tier-slot" aria-live="polite"></div>
+    <div class="clockwrap">
+      <div class="clock" id="clock">—</div>
+      <div class="ageline" id="ageline" aria-live="polite">data —</div>
+      <button class="btn" id="refresh-btn" type="button" title="Re-render the current snapshot">
+        <svg class="refresh-ring" viewBox="0 0 16 16" aria-hidden="true"><circle class="bg" cx="8" cy="8" r="6"/><circle class="fg" id="ring-fg" cx="8" cy="8" r="6"/></svg>
+        <span>refresh view</span>
+      </button>
+    </div>
+  </header>
+
+  <div class="tiles" id="tiles"></div>
+  <div class="waydroid-warn" id="waydroid" role="status">🜁 Waydroid is RUNNING — it eats RAM and poisons OOM victim selection. <b>waydroid session stop</b> before a large wave.</div>
+
+  <div class="grid">
+    <div style="display:flex; flex-direction:column; gap:14px;">
+      <section class="card">
+        <h2>🎭 Agent roster <span class="count" id="agent-count"></span></h2>
+        <div class="body scrollx"><table id="agent-table"><thead><tr>
+          <th>Agent</th><th>Status</th><th>Current task</th><th>Branch</th><th>Worktree</th><th>PID</th><th>RSS</th>
+        </tr></thead><tbody id="agent-body"></tbody></table></div>
+      </section>
+
+      <section class="card">
+        <h2>📜 Open pull requests <span class="count" id="pr-count"></span></h2>
+        <div class="body scrollx"><table id="pr-table"><thead><tr>
+          <th>#</th><th>Title</th><th>Author</th><th>Branch</th><th>CI</th>
+        </tr></thead><tbody id="pr-body"></tbody></table></div>
+      </section>
+    </div>
+
+    <div style="display:flex; flex-direction:column; gap:14px;">
+      <section class="card">
+        <h2>🕯️ Memory budget</h2>
+        <div class="pad"><div class="formula" id="budget"></div></div>
+      </section>
+
+      <section class="card">
+        <h2>🌡️ Pressure tiers</h2>
+        <div class="pad"><div class="ladder" id="ladder"></div></div>
+      </section>
+
+      <section class="card">
+        <h2>✦ Progress</h2>
+        <div class="pad"><div class="tl" id="timeline"></div></div>
+      </section>
+    </div>
+  </div>
+
+  <footer class="foot">
+    <div class="legend">
+      <span><i style="background:var(--good)"></i>healthy / merged</span>
+      <span><i style="background:var(--gold)"></i>in-flight</span>
+      <span><i style="background:var(--warn)"></i>idle / pending</span>
+      <span><i style="background:var(--crit)"></i>dead / failed</span>
+    </div>
+    <div>auto-refreshes every 12s · <span class="mono">candela dreamteam</span></div>
+  </footer>
+</div>
+
+<script>
+/* DREAMTEAM_DATA:BEGIN — orchestrator replaces this block (see dashboard-data.sh --inject) */
+window.DREAMTEAM_DATA = {
+  generatedAt: "2026-06-30T09:10:00-07:00",
+  host: "katana", team: "session-0202ecbc", waydroidRunning: false,
+  memory: {
+    totalMb: 32007, usedMb: 11200, availableMb: 19000,
+    swapTotalMb: 8191, swapUsedMb: 0, agentTotalRssMb: 1850,
+    perAgentMb: 600, hostReserveMb: 6000, balloonReserveMb: 4000,
+    minAvailableMb: 8000, maxAgents: 30, budget: 15, cap: 15, liveAgents: 3, room: 12,
+    thresholds: { redBelowMb: 3201, orangeBelowMb: 8000, yellowBelowMb: 12000 }
+  },
+  tier: "Green",
+  agents: [
+    { name:"Cirrus", status:"active", task:"Building the dreamteam Artifact dashboard", worktree:"/home/jp/Projects/candela", branch:"main", agentId:"a-cirrus", pid:250911, rssMb:430 },
+    { name:"Sandman", status:"active", task:"Orchestrating the team", worktree:"/home/jp/Projects/candela", branch:"main", agentId:"a-sandman", pid:240001, rssMb:560 },
+    { name:"Aurora", status:"idle", task:"InstantDB email preview — awaiting next task", worktree:"/home/jp/Projects/candela", branch:"feat/sync-email", agentId:"a-aurora", pid:248220, rssMb:300 }
+  ],
+  prs: [
+    { number:1431, title:"feat(dreamteam): live Artifact dashboard", author:"jp", branch:"feat/dreamteam-dashboard", ci:"pending", state:"OPEN", url:"#" }
+  ],
+  timeline: {
+    shipped: [ { label:"v1.6.0 — Library Nocturne", ref:"v1.6.0", at:"2026-06-29T23:33:00-07:00" } ],
+    inFlight: [ { label:"#1431 dreamteam dashboard", status:"CI pending", url:"#" } ],
+    pending: [ { label:"Finalize dreamteam plugin conversion" }, { label:"OS OOM hardening — shipped, awaiting JP review" } ]
+  }
+};
+/* DREAMTEAM_DATA:END */
+
+(function () {
+  "use strict";
+  var REFRESH_MS = 12000, STALE_MS = 60000;
+  var $ = function (id) { return document.getElementById(id); };
+  function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];}); }
+  /* allow only http(s) links (and the "#" placeholder); blocks javascript:/data: hrefs */
+  function safeUrl(u){ u=String(u==null?"":u); return /^https?:\/\//i.test(u) ? u : ""; }
+  function gb(mb){ mb=+mb||0; return mb>=1024 ? (mb/1024).toFixed(1)+" GB" : Math.round(mb)+" MB"; }
+  function pct(n,d){ d=+d||1; return Math.max(0,Math.min(100,(100*(+n||0)/d))); }
+  function parseT(s){ var t=Date.parse(s); return isNaN(t)?null:t; }
+  function rel(ts){
+    if(ts==null) return "";
+    var d=Math.round((Date.now()-ts)/1000), a=Math.abs(d), suff=d>=0?" ago":" ahead";
+    var v = a<60?a+"s": a<3600?Math.round(a/60)+"m": a<86400?Math.round(a/3600)+"h": Math.round(a/86400)+"d";
+    return v+suff;
+  }
+  var TIERS = {
+    Green:{ blurb:"Spawn freely", act:"Headroom for multiple agents above every reserve." },
+    Yellow:{ blurb:"Spawn cautiously", act:"Prefer reusing idle agents; batch new spawns into waves." },
+    Orange:{ blurb:"Hold spawns", act:"Below the dreamteam floor — reap idle before any new agent." },
+    Red:{ blurb:"Emergency", act:"At the earlyoom SIGTERM line — reap agents + stop Waydroid now." }
+  };
+  var TIER_ORDER = ["Green","Yellow","Orange","Red"];
+
+  function render(){
+    var D = window.DREAMTEAM_DATA || {};
+    var M = D.memory || {}, TH = M.thresholds || {};
+    var gen = parseT(D.generatedAt);
+
+    // header meta
+    $("hdr-meta").innerHTML = "host <b>"+esc(D.host||"—")+"</b> · team <b>"+esc(D.team||"—")+"</b>";
+
+    // tier badge
+    var tier = TIERS[D.tier] ? D.tier : "Green";
+    var tb = TIERS[tier];
+    $("tier-slot").innerHTML =
+      '<span class="tierbadge tier-'+tier+'"><span class="dot"></span>'+esc(tier)+
+      ' tier&nbsp;<small>'+esc(tb.blurb)+'</small></span>';
+
+    // age line
+    var age = $("ageline");
+    if(gen){ var old = (Date.now()-gen)>STALE_MS;
+      age.textContent = "data "+rel(gen)+(old?" · stale — orchestrator hasn't pushed":"");
+      age.classList.toggle("stale", old);
+    } else { age.textContent="data —"; age.classList.remove("stale"); }
+
+    // ── tiles ──
+    var avail=+M.availableMb||0, total=+M.totalMb||1;
+    var floorMark=pct(M.orangeBelowMb||TH.orangeBelowMb, total);
+    var critMark=pct(TH.redBelowMb, total);
+    var fill = avail<(TH.redBelowMb||0)?"var(--crit)": avail<(M.minAvailableMb||TH.orangeBelowMb||0)?"var(--tight)": avail<(TH.yellowBelowMb||0)?"var(--warn)":"var(--good)";
+    var swapPct=pct(M.swapUsedMb,M.swapTotalMb);
+    $("tiles").innerHTML =
+      tile("Available RAM", gb(avail)+' <small>/ '+gb(total)+'</small>',
+        '<div class="gauge"><i style="width:'+pct(avail,total).toFixed(1)+'%;background:'+fill+'"></i>'+
+        '<span class="mark crit" style="left:'+critMark+'%" title="earlyoom SIGTERM line"></span>'+
+        '<span class="mark" style="left:'+floorMark+'%" title="spawn floor"></span></div>'+
+        '<div class="gaugekey"><span>0</span><span>floor '+gb(M.minAvailableMb)+'</span><span>'+gb(total)+'</span></div>') +
+      tile("Agents live", (M.liveAgents!=null?M.liveAgents:"—")+' <small>/ cap '+(M.cap!=null?M.cap:"—")+'</small>',
+        '<div class="sub2">'+(countByStatus(D.agents))+'</div>') +
+      tile("Room this wave", (M.room!=null?M.room:"—")+' <small>more</small>',
+        '<div class="sub2">budget '+(M.budget!=null?M.budget:"—")+' · max '+(M.maxAgents!=null?M.maxAgents:"—")+'</div>') +
+      tile("Swap used", gb(M.swapUsedMb)+' <small>/ '+gb(M.swapTotalMb)+'</small>',
+        '<div class="gauge"><i style="width:'+swapPct.toFixed(1)+'%;background:'+(swapPct>50?"var(--tight)":"var(--violet)")+'"></i></div>'+
+        '<div class="gaugekey"><span>'+swapPct.toFixed(0)+'% used</span><span>8 GB cap</span></div>');
+
+    // waydroid
+    $("waydroid").classList.toggle("show", !!D.waydroidRunning);
+
+    // ── agent roster ──
+    var ag = D.agents||[];
+    $("agent-count").textContent = ag.length ? ag.length+" member"+(ag.length>1?"s":"") : "";
+    $("agent-body").innerHTML = ag.length ? ag.map(function(a){
+      return "<tr>"+
+        '<td><span class="name">'+esc(a.name)+'</span></td>'+
+        '<td>'+pill(a.status, a.status)+'</td>'+
+        '<td>'+esc(a.task||"—")+'</td>'+
+        '<td class="mono">'+esc(a.branch||"—")+'</td>'+
+        '<td><span class="path mono" title="'+esc(a.worktree)+'">'+esc(a.worktree||"—")+'</span></td>'+
+        '<td class="mono">'+esc(a.pid||"—")+'</td>'+
+        '<td class="mono">'+(a.rssMb!=null?gb(a.rssMb):"—")+'</td></tr>';
+    }).join("") : emptyRow(7,"no agents reported");
+
+    // ── memory budget waterfall ──
+    var neg=function(n){return '<span class="num neg">−'+gb(n)+'</span>';};
+    $("budget").innerHTML =
+      frow("available RAM", '<span class="num">'+gb(avail)+'</span>') +
+      frow("− host reserve (GUI/MCP/kernel)", neg(M.hostReserveMb)) +
+      frow("− balloon reserve (1 runaway)", neg(M.balloonReserveMb)) +
+      frow("÷ per-agent footprint", '<span class="num">'+gb(M.perAgentMb)+'</span>') +
+      frowT("agent budget", (M.budget!=null?M.budget:"—")) +
+      frow("capped at maxAgents="+(M.maxAgents!=null?M.maxAgents:"—")+", minus "+(M.liveAgents!=null?M.liveAgents:"—")+" live",
+        '<span class="num">room '+(M.room!=null?M.room:"—")+'</span>');
+
+    // ── tier ladder ──
+    $("ladder").innerHTML = TIER_ORDER.map(function(k){
+      return '<div class="rung lvl-'+k+(k===tier?' on':'')+'" '+(k===tier?'tabindex="0"':'')+'>'+
+        '<span class="lvl">'+k+'</span>'+
+        '<span class="rng">'+tierRange(k,TH,M)+'</span>'+
+        '<span class="act">'+esc(TIERS[k].act)+'</span></div>';
+    }).join("");
+
+    // ── PRs ──
+    var prs=D.prs||[];
+    $("pr-count").textContent = prs.length ? prs.length+" open" : "";
+    $("pr-body").innerHTML = prs.length ? prs.map(function(p){
+      var u = safeUrl(p.url);
+      var t = u ? '<a href="'+esc(u)+'" target="_blank" rel="noopener">'+esc(p.title)+'</a>' : esc(p.title);
+      return "<tr><td class='mono'>#"+esc(p.number)+"</td><td>"+t+"</td><td>"+esc(p.author||"—")+
+        "</td><td class='mono'>"+esc(p.branch||"—")+"</td><td>"+pill(ciLabel(p.ci), p.ci||"none")+"</td></tr>";
+    }).join("") : emptyRow(5,"no open PRs from the team");
+
+    // ── timeline ──
+    var T=D.timeline||{};
+    $("timeline").innerHTML =
+      tlGroup("Shipped","var(--good)", (T.shipped||[]), function(x){
+        return '<div class="tlitem shipped"><div>'+esc(x.label)+'</div>'+
+          '<div class="when">'+esc(x.ref||"")+(x.at?' · '+rel(parseT(x.at)):"")+'</div></div>'; }) +
+      tlGroup("In flight","var(--gold)", (T.inFlight||[]), function(x){
+        var u = safeUrl(x.url);
+        var lab = u ? '<a href="'+esc(u)+'" target="_blank" rel="noopener">'+esc(x.label)+'</a>' : esc(x.label);
+        return '<div class="tlitem inflight"><div>'+lab+'</div>'+(x.status?'<div class="st">'+esc(x.status)+'</div>':"")+'</div>'; }) +
+      tlGroup("Pending","var(--muted)", (T.pending||[]), function(x){
+        return '<div class="tlitem pending"><div>'+esc(x.label)+'</div></div>'; });
+
+    $("clock").textContent = new Date().toLocaleTimeString();
+  }
+
+  // ── render helpers ──
+  function tile(k,v,extra){ return '<div class="tile"><div class="k">'+esc(k)+'</div><div class="v">'+v+'</div>'+(extra||"")+'</div>'; }
+  function frow(l,n){ return '<div class="frow"><span class="lbl">'+esc(l)+'</span>'+n+'</div>'; }
+  function frowT(l,n){ return '<div class="frow total"><span class="lbl">'+esc(l)+'</span><span class="num">'+esc(n)+' agents</span></div>'; }
+  function pill(text,kind){ kind=(kind||"none").toLowerCase(); return '<span class="pill '+esc(kind)+'">'+esc(text)+'</span>'; }
+  function ciLabel(ci){ return {success:"passing",failure:"failing",pending:"running",none:"no checks"}[ci]||ci||"—"; }
+  function emptyRow(cols,msg){ return '<tr><td colspan="'+cols+'" class="empty">'+esc(msg)+'</td></tr>'; }
+  function countByStatus(ag){ ag=ag||[]; var a=0,i=0,d=0; ag.forEach(function(x){ if(x.status==="active")a++; else if(x.status==="idle")i++; else if(x.status==="dead")d++; }); return a+" active · "+i+" idle"+(d?" · "+d+" dead":""); }
+  function tlGroup(title,color,items,fn){
+    var inner = items&&items.length ? items.map(fn).join("") : '<div class="tlitem"><span style="color:var(--muted);font-style:italic">— none —</span></div>';
+    return '<div class="tlgroup"><div class="gh"><span class="gdot" style="background:'+color+'"></span>'+esc(title)+'</div><div class="tlitems">'+inner+'</div></div>';
+  }
+  function tierRange(k,TH,M){
+    var r=TH.redBelowMb, o=M.minAvailableMb||TH.orangeBelowMb, y=TH.yellowBelowMb;
+    if(k==="Green") return "≥ "+gb(y)+" free";
+    if(k==="Yellow") return gb(o)+"–"+gb(y);
+    if(k==="Orange") return gb(r)+"–"+gb(o);
+    return "< "+gb(r)+" free";
+  }
+
+  // ── refresh loop + countdown ring ──
+  var ring=$("ring-fg"), C=2*Math.PI*6; if(ring){ ring.style.strokeDasharray=C.toFixed(2); }
+  var t0=Date.now();
+  function tick(){
+    render();
+    t0=Date.now();
+    if(ring) ring.style.strokeDashoffset="0";
+  }
+  function frame(){
+    // advance the countdown ring + live clock between full renders
+    var elapsed=Date.now()-t0, p=Math.min(1,elapsed/REFRESH_MS);
+    if(ring) ring.style.strokeDashoffset=(C*p).toFixed(2);
+    $("clock").textContent=new Date().toLocaleTimeString();
+    var D=window.DREAMTEAM_DATA||{}, gen=parseT(D.generatedAt);
+    if(gen){ var old=(Date.now()-gen)>STALE_MS; var a=$("ageline");
+      a.textContent="data "+rel(gen)+(old?" · stale — orchestrator hasn't pushed":""); a.classList.toggle("stale",old); }
+  }
+  tick();
+  setInterval(tick, REFRESH_MS);
+  setInterval(frame, 1000);
+  $("refresh-btn").addEventListener("click", tick);
+})();
+</script>
