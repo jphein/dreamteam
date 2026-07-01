@@ -2,14 +2,14 @@
   "_comment": "dreamteam tunables. All hooks/scripts read this via jq with the same defaults baked in, so it works even if this file is absent. Calibrated to the VERIFIED 2026-06-30 OOM postmortem on katana (32 GB RAM / 32 GB swap): 59 distinct Claude procs at OOM time, TWO simultaneous balloons (3.7 GB + 3.4 GB), 17.2 GB resident; baseline ~200-280 MB/agent.",
 
   "memory": {
-    "maxAgents": 30,
+    "maxAgents": 36,
     "perAgentMB": 300,
     "hostReserveMB": 6000,
     "balloonReserveMB": 4000,
     "minAvailableMB": 8000,
     "scopeToDreamteam": false,
     "_notes": {
-      "maxAgents": "SYSTEM-WIDE cap (mem-gate counts ALL claude procs via pgrep, not just this team). 59 ran on 06-30 across multiple sessions — a per-team cap can't see the aggregate; this can.",
+      "maxAgents": "SYSTEM-WIDE cap (mem-gate counts ALL claude procs via pgrep, not just this team). 59 ran on 06-30 across multiple sessions — a per-team cap can't see the aggregate; this can. Raised 30→36 on 2026-07-01 after the cap (not memory) became the binding constraint during a real multi-fleet day (31 procs, budget said 7 more agents fit); the memory budget + 8G floor remain the true guards, and 36 still sits well under the 59-proc disaster load.",
       "perAgentMB": "Planning RSS for a NEW agent. Verified baseline at OOM time was ~200-280 MB; live-active with context ~350-430 MB. Set to 300 (2026-07-01) — the measured baseline, not the padded active figure, because the balloonReserve + earlyoom + cgroup handle spikes and the minAvailableMB floor is the real backstop. This is a THROTTLE (how fast we approach the floor), not a safety limit. (Earlier 600 was a cgroup-peak-incl-cache artifact; 400 over-padded.)",
       "balloonReserveMB": "Headroom kept free for runaway agents. 06-30 had TWO concurrent balloons (3.7 + 3.4 GB = 7.1 GB), unContained (one shared cgroup). Trimmed 8→4 GB on 2026-07-01 (per + balloon together lift the effective cap ~7→~23 on a 17 GB-avail box). The REAL backstop is minAvailableMB (never spawn below the floor) + earlyoom (~10%/~3.2 GB) + the maxAgents count cap — this reserve is a cushion, not the guardrail. For waves beyond ~12 agents, launch via launch-dreamteam.sh so the systemd MemoryMax scope (absent at 06-30) hard-caps the team's cgroup; that is what makes aggressive budgets safe.",
       "scopeToDreamteam": "false = GLOBAL safety net on every agent spawn (recommended — 06-30 spanned multiple sessions). true = only acts when a team marker is active (state/active)."
