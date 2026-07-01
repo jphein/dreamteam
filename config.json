@@ -3,15 +3,15 @@
 
   "memory": {
     "maxAgents": 30,
-    "perAgentMB": 400,
+    "perAgentMB": 300,
     "hostReserveMB": 6000,
-    "balloonReserveMB": 8000,
+    "balloonReserveMB": 4000,
     "minAvailableMB": 8000,
     "scopeToDreamteam": false,
     "_notes": {
       "maxAgents": "SYSTEM-WIDE cap (mem-gate counts ALL claude procs via pgrep, not just this team). 59 ran on 06-30 across multiple sessions — a per-team cap can't see the aggregate; this can.",
-      "perAgentMB": "Planning RSS for a NEW agent. Verified baseline at OOM time was ~200-280 MB; live-active with context ~350-430 MB. 400 splits the two. (The earlier 600 was a cgroup-peak-incl-cache artifact — corrected.)",
-      "balloonReserveMB": "Headroom kept free for runaway agents. 06-30 had TWO concurrent balloons (3.7 + 3.4 GB) — hence 8 GB, not 4. The single biggest driver of the kill alongside raw count.",
+      "perAgentMB": "Planning RSS for a NEW agent. Verified baseline at OOM time was ~200-280 MB; live-active with context ~350-430 MB. Set to 300 (2026-07-01) — the measured baseline, not the padded active figure, because the balloonReserve + earlyoom + cgroup handle spikes and the minAvailableMB floor is the real backstop. This is a THROTTLE (how fast we approach the floor), not a safety limit. (Earlier 600 was a cgroup-peak-incl-cache artifact; 400 over-padded.)",
+      "balloonReserveMB": "Headroom kept free for runaway agents. 06-30 had TWO concurrent balloons (3.7 + 3.4 GB = 7.1 GB), unContained (one shared cgroup). Trimmed 8→4 GB on 2026-07-01 (per + balloon together lift the effective cap ~7→~23 on a 17 GB-avail box). The REAL backstop is minAvailableMB (never spawn below the floor) + earlyoom (~10%/~3.2 GB) + the maxAgents count cap — this reserve is a cushion, not the guardrail. For waves beyond ~12 agents, launch via launch-dreamteam.sh so the systemd MemoryMax scope (absent at 06-30) hard-caps the team's cgroup; that is what makes aggressive budgets safe.",
       "scopeToDreamteam": "false = GLOBAL safety net on every agent spawn (recommended — 06-30 spanned multiple sessions). true = only acts when a team marker is active (state/active)."
     }
   },
