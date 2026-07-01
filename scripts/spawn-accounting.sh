@@ -16,10 +16,16 @@ INPUT="$(cat 2>/dev/null || true)"
 TOOL="$(printf '%s' "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)"
 case "$TOOL" in Agent|Task) ;; *) exit 0 ;; esac
 
-NAGENTS=$(pgrep -fc 'claude/versions' 2>/dev/null || echo 0)
-RSS_KB=$(ps -eo rss,args 2>/dev/null | grep '[c]laude/versions' | awk '{s+=$1} END{print s+0}' || echo 0)
-TOTAL_MB=$(( ${RSS_KB:-0} / 1024 ))
-AVAIL=$(free -m 2>/dev/null | awk '/^Mem:/{print $7}' || echo 0)
+# Robust metric capture. NEVER use `pipe || echo 0`: under `set -o pipefail` a
+# failed/restricted `ps` (as in the hook sandbox) fails the pipe AND fires the
+# fallback — while awk already printed "0" — yielding a multiline "0\n0" that
+# then breaks the arithmetic below. Instead: let awk own the default (it always
+# exits 0), then sanitize each value to bare digits before any math.
+NAGENTS=$(pgrep -fc 'claude/versions' 2>/dev/null); NAGENTS=${NAGENTS//[!0-9]/}; NAGENTS=${NAGENTS:-0}
+RSS_KB=$(ps -eo rss,args 2>/dev/null | awk '/claude\/versions/ && !/awk/ {s+=$1} END{print s+0}')
+RSS_KB=${RSS_KB//[!0-9]/}; RSS_KB=${RSS_KB:-0}
+TOTAL_MB=$(( RSS_KB / 1024 ))
+AVAIL=$(free -m 2>/dev/null | awk '/^Mem:/{print $7}'); AVAIL=${AVAIL//[!0-9]/}; AVAIL=${AVAIL:-0}
 TS=$(date +%FT%T)
 
 echo "$TS post-spawn: agents=${NAGENTS} total_rss=${TOTAL_MB}MB avail=${AVAIL}MiB" >> "$LOG"
