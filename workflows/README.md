@@ -27,15 +27,20 @@ build registers plugin-contributed workflows into the `Workflow({name})` registr
 do — if `name` 404s, fall back to `scriptPath`).
 
 ```js
-// By path (reliable):
+// By path (reliable) — `${CLAUDE_PLUGIN_ROOT}` resolves to the plugin's source dir
+// (/home/jp/Projects/dreamteam, a directory-based marketplace):
 Workflow({
-  scriptPath: "/home/jp/.claude/plugins/cache/local/dreamteam/1.0.0/workflows/merge-cascade.js",
+  scriptPath: `${CLAUDE_PLUGIN_ROOT}/workflows/merge-cascade.js`,
   args: { prs: [123, 124, 125], repo: "techempower-org/candela" }
 })
 
 // By name (if plugin workflows are registered):
 Workflow({ name: "merge-cascade", args: { prs: [123, 124, 125], repo: "techempower-org/candela" } })
 ```
+
+> **Path note.** Prefer `${CLAUDE_PLUGIN_ROOT}` over a literal path — it survives version
+> bumps and machine moves. If a literal is unavoidable, the real cache copy lives at
+> `~/.claude/plugins/cache/dreamteam/dreamteam/1.0.0/workflows/`.
 
 **`args` is passed verbatim** — pass it as a real JSON object, **never** a JSON-encoded
 string (a stringified object reaches the script as one string and `args.prs`/`args.map`

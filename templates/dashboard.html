@@ -1,4 +1,7 @@
 <title>Dream Team · candela</title>
+<!-- Inline candle favicon so the file has an icon when opened standalone.
+     (When published via the Artifact tool, pass favicon:"🕯️" as well.) -->
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><radialGradient id='fl' cx='0.5' cy='0.6' r='0.62'><stop offset='0' stop-color='%23fff6d0'/><stop offset='0.5' stop-color='%23f2b84e'/><stop offset='1' stop-color='%23e8743b'/></radialGradient></defs><circle cx='16' cy='9' r='9' fill='%23f2b84e' opacity='0.18'/><rect x='11.5' y='15' width='9' height='14' rx='2' fill='%23ece0bd'/><rect x='11.5' y='15' width='9' height='14' rx='2' fill='none' stroke='%23c9b585' stroke-width='0.6'/><path d='M16 3.5C12.8 8.4 13.2 11.6 16 13.4 18.8 11.6 19.2 8.4 16 3.5Z' fill='url(%23fl)'/></svg>">
 
 <!--
   ════════════════════════════════════════════════════════════════════════
@@ -89,7 +92,9 @@
     position:absolute; bottom:0; left:9px; width:12px; height:26px; border-radius:3px;
     background:linear-gradient(180deg,#f3ead2,#cbb98c); box-shadow:inset 0 0 0 1px rgba(0,0,0,.12);
   }
-  @media (prefers-color-scheme:dark){ .candle .stick{ background:linear-gradient(180deg,#2b2440,#1c1730); box-shadow:inset 0 0 0 1px rgba(255,255,255,.05);} }
+  /* light theme: darken the wax so the candle stays visible on parchment
+     (default/dark theme keeps the bright cream stick defined above) */
+  @media (prefers-color-scheme:light){ .candle .stick{ background:linear-gradient(180deg,#8a7bd6,#5f4aa8); box-shadow:inset 0 0 0 1px rgba(255,255,255,.25);} }
   .candle .flame {
     position:absolute; top:0; left:50%; width:14px; height:22px; margin-left:-7px;
     background:radial-gradient(closest-side at 50% 68%, #fff3c4, #f2b84e 55%, #e8743b 88%, transparent);
@@ -279,14 +284,14 @@
       <section class="card">
         <h2>🎭 Agent roster <span class="count" id="agent-count"></span></h2>
         <div class="body scrollx"><table id="agent-table"><thead><tr>
-          <th>Agent</th><th>Status</th><th>Current task</th><th>Branch</th><th>Worktree</th><th>PID</th><th>RSS</th>
+          <th scope="col">Agent</th><th scope="col">Status</th><th scope="col">Current task</th><th scope="col">Branch</th><th scope="col">Worktree</th><th scope="col">PID</th><th scope="col">RSS</th>
         </tr></thead><tbody id="agent-body"></tbody></table></div>
       </section>
 
       <section class="card">
         <h2>📜 Open pull requests <span class="count" id="pr-count"></span></h2>
         <div class="body scrollx"><table id="pr-table"><thead><tr>
-          <th>#</th><th>Title</th><th>Author</th><th>Branch</th><th>CI</th>
+          <th scope="col">#</th><th scope="col">Title</th><th scope="col">Author</th><th scope="col">Branch</th><th scope="col">CI</th>
         </tr></thead><tbody id="pr-body"></tbody></table></div>
       </section>
     </div>
@@ -413,7 +418,7 @@ window.DREAMTEAM_DATA = {
         '<div class="sub2">budget '+(M.budget!=null?M.budget:"—")+' · max '+(M.maxAgents!=null?M.maxAgents:"—")+'</div>') +
       tile("Swap used", gb(M.swapUsedMb)+' <small>/ '+gb(M.swapTotalMb)+'</small>',
         '<div class="gauge"><i style="width:'+swapPct.toFixed(1)+'%;background:'+(swapPct>50?"var(--tight)":"var(--violet)")+'"></i></div>'+
-        '<div class="gaugekey"><span>'+swapPct.toFixed(0)+'% used</span><span>8 GB cap</span></div>');
+        '<div class="gaugekey"><span>'+swapPct.toFixed(0)+'% used</span><span>'+gb(M.swapTotalMb)+' cap</span></div>');
 
     // waydroid
     $("waydroid").classList.toggle("show", !!D.waydroidRunning);

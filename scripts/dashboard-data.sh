@@ -21,7 +21,7 @@
 set -uo pipefail
 
 ROOT="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/dreamteam}"
-[ -d "$ROOT" ] || ROOT="$HOME/.claude/plugins/cache/local/dreamteam/1.0.0"
+[ -d "$ROOT" ] || ROOT="$HOME/.claude/plugins/cache/dreamteam/dreamteam/1.0.0"
 CFG="${DREAMTEAM_CONFIG:-$ROOT/config.json}"
 TEAMS_DIR="${DREAMTEAM_TEAMS_DIR:-$HOME/.claude/teams}"
 STATE="${DREAMTEAM_STATE:-$ROOT/state}"
@@ -70,8 +70,8 @@ except Exception: cfg = {}
 def m(k, d):
     try: return int(cfg.get(k, d))
     except Exception: return d
-PER_AGENT = m("perAgentMB", 600);  HOST_RES = m("hostReserveMB", 6000)
-BALLOON   = m("balloonReserveMB", 4000); MIN_AVAIL = m("minAvailableMB", 8000)
+PER_AGENT = m("perAgentMB", 400);  HOST_RES = m("hostReserveMB", 6000)
+BALLOON   = m("balloonReserveMB", 8000); MIN_AVAIL = m("minAvailableMB", 8000)
 MAX_AGENTS= m("maxAgents", 30)
 
 # ── memory (free -m: Mem/Swap rows) ────────────────────────────────────────

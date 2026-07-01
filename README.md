@@ -28,7 +28,8 @@ logs the cumulative footprint to `state/dreamteam.log` for visibility.
 
 ```
 dreamteam/
-├── .claude-plugin/plugin.json     manifest
+├── plugin.json                    manifest (name, version, description)
+├── .claude-plugin/marketplace.json  directory-marketplace metadata
 ├── hooks/hooks.json               wires the 4 hook events → scripts
 ├── config.json                    tunables (per-agent MB, reserves, reuse enforce, scope caps)
 ├── scripts/
@@ -45,6 +46,9 @@ dreamteam/
 │   ├── dreamteam.md               /dreamteam — guarded launch
 │   ├── dreamteam-status.md        /dreamteam-status — budget + footprint snapshot
 │   └── dreamteam-roster.md        /dreamteam-roster — idle agents ranked by context fit
+├── agents/                        named dream-agent types (luna, morpheus, lucid, nebula)
+├── workflows/                     saved Workflow scripts (merge-cascade, overnight, review-sweep)
+├── templates/                     Artifact dashboard HTML template
 ├── skills/dreamteam/SKILL.md      the existing skill (moved here verbatim + §3 prose adds)
 └── state/                         runtime: active marker, HANDOFF.md, dreamteam.log
 ```
@@ -61,11 +65,20 @@ dreamteam/
 
 ## Install (after review — these hooks BLOCK spawns and can KILL processes)
 
+This is a **directory-based marketplace plugin** — the source dir *is* the plugin, so there's
+nothing to copy. Register it once in `~/.claude/settings.json`:
+
+- `extraKnownMarketplaces.dreamteam` → `{ "source": { "source": "directory", "path": "/home/jp/Projects/dreamteam" } }`
+- `enabledPlugins["dreamteam@dreamteam"]` → `true`
+
 ```bash
-cp -r dreamteam ~/.claude/plugins/dreamteam
-chmod +x ~/.claude/plugins/dreamteam/scripts/*.sh
-# register in the plugin config / restart Claude Code so hooks load
+chmod +x scripts/*.sh   # gate + lifecycle scripts must be executable
 ```
+
+Restart Claude Code so the hooks load. Edits to the source dir take effect on the next session
+start — no reinstall. (A cache copy at `~/.claude/plugins/cache/dreamteam/dreamteam/1.0.0` is
+kept as an uninstall safety net, refreshed by `scripts/sync-plugin.sh`; it's not needed for
+development.)
 
 OS-level companions (see the postmortem §4): configure `systemd-oomd` (PSI+cgroup-aware,
 fixes the Waydroid victim-poisoning), re-tune `earlyoom`, and cut the 32 GB swap. Those
