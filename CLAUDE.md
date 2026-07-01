@@ -28,15 +28,24 @@ Registered as `dreamteam@dreamteam` in `~/.claude/settings.json` `extraKnownMark
 
 ## Testing
 
+Full regression suite (each `tests/test-*.sh` is standalone and self-isolating —
+PATH-stubbed `free`/`ps`/`pgrep` + fixture team configs + temp state via the scripts'
+`DREAMTEAM_*` env seams, so no production script is touched):
+
 ```bash
-# Validate all scripts
+bash tests/run.sh          # runs every suite, exits non-zero on any failure
+```
+
+- `tests/test-gates.sh` — mem-gate (RAM-floor block, count-cap block, non-Agent passthrough) + reuse-gate (block on live idle teammate, allow on FRESH-SPAWN / no team). Includes negative controls proving the block-paths aren't vacuous.
+- `tests/test-roster.sh` — roster.sh status classification (lead/idle/dead) against a fixture, the **spawn-accounting line-21 crash regression** (restricted `ps` must not crash the hook), and a **defaults-agreement guard** (dashboard-data.sh vs mem-budget.sh fallback defaults must match — catches the 600/4000 drift class).
+- `tests/test-dashboard.sh` — dashboard-data.sh `--json` output contract (every key dashboard.html reads) + `--inject` render + template standalone sanity.
+
+Quick static checks:
+
+```bash
 for f in scripts/*.sh; do bash -n "$f" && echo "OK: $f"; done
-
-# Check hook config
 python3 -c "import json; json.load(open('hooks/hooks.json')); print('hooks OK')"
-
-# Verify budget calculation
-scripts/mem-budget.sh
+CLAUDE_PLUGIN_ROOT=$PWD scripts/mem-budget.sh   # set CLAUDE_PLUGIN_ROOT so it reads config.json, not baked-in defaults
 ```
 
 ## Key constraints
