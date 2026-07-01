@@ -21,7 +21,9 @@ MODEL="$(jf '.model.display_name')"
 [ -n "$MODEL" ] || MODEL="$(jf '.model.id')"
 MODEL="${MODEL:-?}"
 
-EFF="$(jf '.effort')"
+# .effort is an OBJECT in the live payload ({"level":"max"} — verified 2026-07-01);
+# accept object, plain string, or effortLevel, in that order.
+EFF="$(jf 'if (.effort|type) == "object" then .effort.level else .effort end')"
 [ -n "$EFF" ] || EFF="$(jf '.effortLevel')"
 if [ -z "$EFF" ]; then
   TP="$(jf '.transcript_path')"

@@ -15,11 +15,16 @@ run()  { env -u TMUX -u TMUX_PANE HOME="$TMP" CLAUDE_PLUGIN_ROOT="$TMP" bash "$S
 
 bash -n "$SL" && ok "bash -n statusline.sh" || bad "bash -n statusline.sh"
 
-# 1. Payload effort wins; model + ctx rendered
-OUT=$(echo '{"model":{"display_name":"Fable 5"},"effort":"max","context_window_tokens_used":420000,"context_window_total_tokens":1000000}' | run)
+# 1. Payload effort wins; model + ctx rendered. REAL shape: effort is an OBJECT
+# ({"level":"max"} — live-verified 2026-07-01; a raw jq -r of it once rendered
+# the statusline as three lines).
+OUT=$(echo '{"model":{"display_name":"Fable 5"},"effort":{"level":"max"},"context_window_tokens_used":420000,"context_window_total_tokens":1000000}' | run)
 case "$OUT" in *"Fable 5"*) ok "model from payload";; *) bad "model from payload ($OUT)";; esac
-case "$OUT" in *"effort:max"*) ok "effort from payload field";; *) bad "effort from payload field ($OUT)";; esac
+case "$OUT" in *"effort:max"*) ok "effort from payload object (.effort.level)";; *) bad "effort from payload object ($OUT)";; esac
 case "$OUT" in *"ctx 42%"*) ok "ctx% computed (420k/1M=42%)";; *) bad "ctx% computed ($OUT)";; esac
+[ "$(printf '%s\n' "$OUT" | wc -l)" -eq 1 ] && ok "single-line output (no pretty-printed object)" || bad "single-line output (got: $OUT)"
+OUT=$(echo '{"model":{"display_name":"Fable 5"},"effort":"high"}' | run)
+case "$OUT" in *"effort:high"*) ok "effort as plain string still accepted";; *) bad "effort as plain string ($OUT)";; esac
 
 # 2. Effort falls back to the transcript's /effort stdout line
 printf '{"note":"user ran /effort","stdout":"Set effort level to high (this session only)"}\n' > "$TMP/tr.jsonl"

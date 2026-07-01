@@ -1,5 +1,5 @@
 {
-  "description": "Dreamteam OOM + reuse guardrails. PreToolUse(Agent|Task) = reuse-before-spawn gate THEN memory admission gate (either exit 2 blocks). PostToolUse(Agent|Task) = footprint accounting. SessionStart = crash residue recovery. SessionEnd = clean-shutdown marker clear.",
+  "description": "Dreamteam OOM + reuse guardrails and team-awareness. PreToolUse(Agent|Task) = reuse gate THEN mem gate (either exit 2 blocks); PreToolUse(TaskStop) = check-the-pane reminder. PostToolUse = footprint accounting + pane organizer (async). TeammateIdle/SubagentStop = live roster injection. Pre/PostCompact = HANDOFF snapshot + post-compaction roster re-arm. Task*/Worktree*/SubagentStart = async event log. SessionStart = roster + crash recovery. SessionEnd = marker clear.",
   "hooks": {
     "PreToolUse": [
       {
@@ -45,7 +45,112 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/pane-organizer.sh\"",
-            "timeout": 3000
+            "timeout": 3000,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "TeammateIdle": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/team-events.sh\"",
+            "timeout": 6000
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/team-events.sh\"",
+            "timeout": 6000
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/team-events.sh\"",
+            "timeout": 4000,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "TaskCreated": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/team-events.sh\"",
+            "timeout": 4000,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/team-events.sh\"",
+            "timeout": 4000,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "WorktreeCreate": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/team-events.sh\"",
+            "timeout": 4000,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "WorktreeRemove": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/team-events.sh\"",
+            "timeout": 4000,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/compact-guard.sh\"",
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/compact-guard.sh\"",
+            "timeout": 8000
           }
         ]
       }
