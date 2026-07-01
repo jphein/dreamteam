@@ -40,13 +40,14 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-export DT_CFG="$CFG" DT_TEAMS_DIR="$TEAMS_DIR" DT_STATE="$STATE" \
+export DT_ROOT="$ROOT" DT_CFG="$CFG" DT_TEAMS_DIR="$TEAMS_DIR" DT_STATE="$STATE" \
        DT_REPO="$REPO" DT_TEAM="$TEAM" DT_MODE="$MODE" DT_TEMPLATE="$TEMPLATE"
 
 python3 - <<'PY'
 import json, os, re, glob, socket, subprocess
 from datetime import datetime, timezone
 
+ROOT      = os.environ["DT_ROOT"]
 CFG       = os.environ["DT_CFG"]
 TEAMS_DIR = os.environ["DT_TEAMS_DIR"]
 STATE     = os.environ["DT_STATE"]
@@ -107,11 +108,17 @@ elif avail < orange_below: tier = "Orange"
 elif avail < yellow_below or room <= 0: tier = "Yellow"
 else: tier = "Green"
 
-# ── agent roster (from harness team config) ────────────────────────────────
-def alive_pids(agent_id):
-    if not agent_id: return []
-    out = run(["pgrep","-f","agent-id %s" % agent_id])
-    return [int(x) for x in out.split() if x.isdigit()]
+# ── agent roster (AUTHORITATIVE via scripts/roster.sh) ──────────────────────
+# roster.sh is the SINGLE source of truth for status + liveness (lead/active/
+# idle/dead). Do NOT recompute that precedence here — recomputing it is exactly
+# the drift that produced the stale-roster bug. We only ENRICH each agent with
+# dashboard-only fields: task (config prompt), branch (git), pid+rss (ps).
+# pid_of/pid_rss are display lookups, gated on roster.sh's aliveness verdict —
+# not a second status decision.
+def pid_of(agent_id):
+    if not agent_id: return None
+    pids = [int(x) for x in run(["pgrep","-f","agent-id %s" % agent_id]).split() if x.isdigit()]
+    return pids[0] if pids else None
 
 def pid_rss(pid):
     out = run(["ps","-o","rss=","-p",str(pid)]).strip()
@@ -127,44 +134,45 @@ def task_of(prompt):
     mt = re.search(r"task:\s*\*{0,2}(.+?)(\.\s|\*\*|$)", s, re.I)
     return ((mt.group(1) if mt else s)[:90]).strip() or None
 
-cfgs = []
-if TEAM:
-    p = os.path.join(TEAMS_DIR, TEAM, "config.json")
-    if os.path.exists(p): cfgs = [p]
-if not cfgs and not TEAM:
-    allc = glob.glob(os.path.join(TEAMS_DIR, "*", "config.json"))
-    cfgs = sorted(allc, key=os.path.getmtime, reverse=True)[:1]
+# Ask roster.sh for the roster (pass --team through; else it selects the newest
+# team config — identical selection to the old inline logic).
+roster_cmd = ["bash", os.path.join(ROOT, "scripts", "roster.sh"), "--json"]
+if TEAM: roster_cmd += ["--team", TEAM]
+try: roster = json.loads(run(roster_cmd) or "{}")
+except Exception: roster = {}
+team_name = roster.get("team") or ""
 
-team_name = ""
+# Map agentId -> prompt from the SAME config roster.sh resolved, for task text.
+prompt_by_id = {}
+if team_name:
+    try:
+        for mem_ in json.load(open(os.path.join(TEAMS_DIR, team_name, "config.json"))).get("members", []):
+            prompt_by_id[mem_.get("agentId","")] = mem_.get("prompt","")
+    except Exception: pass
+
+# The dashboard pill contract is active|idle|dead — there is no 'lead' pill
+# (dashboard.html: line-22 contract, .pill.* CSS, countByStatus). Project
+# roster.sh's 'lead' onto 'active' (the orchestrator is the always-on session),
+# preserving the prior output exactly. The lead/idle/dead DECISION still lives
+# solely in roster.sh; this is presentation only.
+STATUS_MAP = {"lead": "active"}
+
 agents = []
-for cfgp in cfgs:
-    team_name = os.path.basename(os.path.dirname(cfgp))
-    try: data = json.load(open(cfgp))
-    except Exception: continue
-    for mem_ in data.get("members", []):
-        aid  = mem_.get("agentId","")
-        is_lead = mem_.get("agentType")=="team-lead"
-        pids = alive_pids(aid)
-        if is_lead:
-            status = "active"          # the orchestrator/main session
-        elif not pids:
-            status = "dead"
-        elif mem_.get("isActive") is True:
-            status = "active"
-        else:
-            status = "idle"
-        pid = pids[0] if pids else None
-        cwd = mem_.get("cwd","")
-        agents.append({
-            "name": mem_.get("name") or aid or "?",
-            "status": status,
-            "task": task_of(mem_.get("prompt","")),
-            "worktree": cwd or None,
-            "branch": branch_of(cwd),
-            "agentId": aid or None,
-            "pid": pid,
-            "rssMb": pid_rss(pid) if pid else None,
-        })
+for a in roster.get("agents", []):
+    aid = a.get("agentId") or ""
+    cwd = a.get("cwd") or ""
+    raw_status = a.get("status")
+    pid = pid_of(aid) if raw_status != "dead" else None
+    agents.append({
+        "name": a.get("name") or aid or "?",
+        "status": STATUS_MAP.get(raw_status, raw_status),
+        "task": task_of(prompt_by_id.get(aid, "")),
+        "worktree": cwd or None,
+        "branch": branch_of(cwd),
+        "agentId": aid or None,
+        "pid": pid,
+        "rssMb": pid_rss(pid) if pid else None,
+    })
 
 # ── pull requests (gh, run inside the repo) ────────────────────────────────
 def ci_state(rollup):
