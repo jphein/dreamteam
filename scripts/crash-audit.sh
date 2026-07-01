@@ -13,6 +13,18 @@ ROOT="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/dreamteam}"
 STATE="${DREAMTEAM_STATE:-$ROOT/state}"
 MARKER="$STATE/active"
 
+# Always inject the last-known roster so the coordinator starts aware of prior agents
+ROSTER="$STATE/agents.json"
+if [ -f "$ROSTER" ] && [ -s "$ROSTER" ]; then
+  ROSTER_LINE=$(jq -r '[.[] | "\(.name)(\(.status))"] | join(" ")' "$ROSTER" 2>/dev/null || true)
+  if [ -n "$ROSTER_LINE" ]; then
+    NAGENTS=$(jq 'length' "$ROSTER" 2>/dev/null || echo 0)
+    echo "dreamteam roster from prior session: ${NAGENTS} agents — ${ROSTER_LINE}"
+    echo "    Verify which are still alive: check tmux panes or spawn-accounting log."
+    echo ""
+  fi
+fi
+
 [ -f "$MARKER" ] || exit 0   # clean — nothing to recover
 
 TEAM=$(jq -r '.team // "unknown"' "$MARKER" 2>/dev/null || echo unknown)
