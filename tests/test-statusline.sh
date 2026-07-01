@@ -11,7 +11,13 @@ trap 'rm -rf "$TMP"' EXIT INT TERM
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); echo "PASS: $1"; }
 bad()  { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
-run()  { env -u TMUX -u TMUX_PANE HOME="$TMP" CLAUDE_PLUGIN_ROOT="$TMP" bash "$SL"; }
+
+# PATH-stub pgrep/free so the live footprint is deterministic (7 procs, 12345 MiB)
+mkdir -p "$TMP/bin"
+printf '#!/bin/bash\necho 7\n' > "$TMP/bin/pgrep"
+printf '#!/bin/bash\necho "Mem: 32000 15000 2000 100 3000 12345"\n' > "$TMP/bin/free"
+chmod +x "$TMP/bin/pgrep" "$TMP/bin/free"
+run()  { env -u TMUX -u TMUX_PANE PATH="$TMP/bin:$PATH" HOME="$TMP" CLAUDE_PLUGIN_ROOT="$TMP" bash "$SL"; }
 
 bash -n "$SL" && ok "bash -n statusline.sh" || bad "bash -n statusline.sh"
 
@@ -45,14 +51,17 @@ case "$OUT" in *"effort:default"*) ok "effort default when no source";; *) bad "
 # 5. ctx omitted when fields missing
 case "$OUT" in *"ctx "*) bad "ctx suppressed when fields absent ($OUT)";; *) ok "ctx suppressed when fields absent";; esac
 
-# 6. Footprint appears for a fresh log, not for a stale one
-mkdir -p "$TMP/state"
-echo "2026-07-01T14:00:00 post-spawn: agents=13 total_rss=4910MB avail=17321MiB" > "$TMP/state/dreamteam.log"
+# 6. Footprint is LIVE (stubbed pgrep/free), labeled "procs" — never the stale
+# log tail (regression: a dead team once rendered as "11 agents"), and never
+# the misleading word "agents" for a system-wide process count.
 OUT=$(echo '{"model":{"display_name":"Fable 5"}}' | run)
-case "$OUT" in *"13 agents"*"17321MiB"*) ok "footprint from fresh dreamteam.log";; *) bad "footprint from fresh log ($OUT)";; esac
-touch -d '10 hours ago' "$TMP/state/dreamteam.log"
-OUT=$(echo '{"model":{"display_name":"Fable 5"}}' | run)
-case "$OUT" in *"agents"*) bad "stale log suppressed ($OUT)";; *) ok "stale (>6h) log suppressed";; esac
+case "$OUT" in *"7 procs"*"12345MiB free"*) ok "live footprint from pgrep+free (7 procs, 12345MiB)";; *) bad "live footprint ($OUT)";; esac
+case "$OUT" in *"agents"*) bad "'agents' label banned in footprint ($OUT)";; *) ok "footprint labeled 'procs', not 'agents'";; esac
+# pgrep failing entirely → footprint suppressed, still exits 0
+printf '#!/bin/bash\nexit 1\n' > "$TMP/bin/pgrep"
+OUT=$(echo '{"model":{"display_name":"Fable 5"}}' | run); RC=$?
+[ "$RC" -eq 0 ] && ok "pgrep failure: exits 0" || bad "pgrep failure exits $RC"
+case "$OUT" in *procs*) bad "footprint suppressed when pgrep fails ($OUT)";; *) ok "footprint suppressed when pgrep fails";; esac
 
 echo "────────────────────────────────────────"
 echo "SUMMARY: $PASS passed, $FAIL failed, $((PASS+FAIL)) total"

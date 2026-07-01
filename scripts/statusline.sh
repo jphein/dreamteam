@@ -42,15 +42,15 @@ case "$USED$TOTAL" in *[!0-9]*|"") ;; *)
   [ "$TOTAL" -gt 0 ] && CTX=" · ctx $(( USED * 100 / TOTAL ))%"
 ;; esac
 
-# Dreamteam footprint — last spawn-accounting line, only if a team ran recently.
+# Dreamteam footprint — LIVE, not the log tail (a logged snapshot goes stale the
+# moment agents exit and once showed a dead team as "11 agents"). pgrep + free
+# are ~10ms, fine for the hot path. Labeled "procs" honestly: this is the
+# system-wide claude process count — the same number the mem-gate budgets
+# against — NOT the dream-team roster (that's roster.sh, too heavy per render).
 DT=""
-LOG="$ROOT/state/dreamteam.log"
-if [ -f "$LOG" ] && [ -n "$(find "$LOG" -mmin -360 2>/dev/null)" ]; then
-  LAST=$(tail -n 1 "$LOG" 2>/dev/null) || true
-  AG=$(printf '%s' "$LAST" | grep -oE 'agents=[0-9]+' | cut -d= -f2) || true
-  AV=$(printf '%s' "$LAST" | grep -oE 'avail=[0-9]+' | cut -d= -f2) || true
-  [ -n "$AG" ] && DT=" · 🕯 ${AG} agents${AV:+ · ${AV}MiB free}"
-fi
+NPROCS=$(pgrep -fc 'claude/versions' 2>/dev/null); NPROCS=${NPROCS//[!0-9]/}
+AVAIL=$(free -m 2>/dev/null | awk '/^Mem:/{print $7}'); AVAIL=${AVAIL//[!0-9]/}
+[ -n "$NPROCS" ] && DT=" · 🕯 ${NPROCS} procs${AVAIL:+ · ${AVAIL}MiB free}"
 
 printf '%s · effort:%s%s%s\n' "$MODEL" "$EFF" "$CTX" "$DT"
 
