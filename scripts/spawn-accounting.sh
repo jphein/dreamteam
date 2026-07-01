@@ -31,6 +31,16 @@ TS=$(date +%FT%T)
 
 echo "$TS post-spawn: agents=${NAGENTS} total_rss=${TOTAL_MB}MB avail=${AVAIL}MiB" >> "$LOG"
 
+# Crash-detection marker for PLAIN sessions. launch-dreamteam.sh writes this for
+# isolated launches, but fleets spawned in ordinary sessions had no marker — so
+# the 2026-07-01 16:06 systemd-oomd kill produced NO crash-audit notice on
+# restart. First spawn writes it; SessionEnd (cleanup-marker.sh) clears it on a
+# clean exit; a survivor at SessionStart = unclean death, recovery checklist fires.
+if [ ! -f "$STATE/active" ]; then
+  CWD="$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)"; CWD="${CWD:-$PWD}"
+  printf '{"team":"%s","repo":"%s","started":"%s"}\n' "session-spawned" "$CWD" "$TS" > "$STATE/active" 2>/dev/null || true
+fi
+
 # Build roster summary from the AUTHORITATIVE harness team config (via roster.sh)
 # — every member with its TRUE status, not just spawns this session saw. roster.sh
 # always exits 0; if it can't resolve a team, .agents is empty → blank line.

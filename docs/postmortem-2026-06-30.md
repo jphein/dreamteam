@@ -60,7 +60,38 @@ of a 30-minute thrash:
 4. **Stop Waydroid before large runs** — `waydroid session stop` (it both consumes
    RAM and poisons victim selection).
 
-## 5. Numbers reference
+## 5. Incident #2 — 2026-07-01 16:06 (same host, plugin active)
+
+The follow-up test nobody ordered. Two fleets (ep3fc research + a candela dream team)
+ran ~30 admitted agents across sessions. `systemd-oomd` killed the shared Ghostty
+scope at **16:06:04** — memory 26.5/33.6 GB and swap 6.0/8.6 GB crossing its 70%
+policy (`journalctl -u systemd-oomd`, verified).
+
+**What worked:** recovery took seconds, not 30 minutes — the swap cut (§4.3, done)
+plus systemd-oomd's cgroup-level kill (§4.1, active by default) behaved exactly as
+predicted. The admission gate blocked new spawns at the floor; sessions restarted
+with recoverable state; the new lifecycle hooks logged real events to T-9s.
+
+**What failed, and the fixes shipped the same day:**
+
+1. *Post-admission growth is invisible to admission control.* candela agents spawn
+   gradle/JVM daemons — child-process memory the claude-proc accounting never sees
+   (~10 GB grew after the last admitted spawn). The morning's balloon-reserve cut
+   (8→4 G) removed exactly the margin that absorbs this → **restored to 8 G**; the
+   reserve's `_notes` now name child toolchains explicitly.
+2. *The degradation tiers had no actor.* The quiesce/shed ladder was prose in the
+   skill; no orchestrator was watching. → `team-events.sh` now appends a live
+   ORANGE/RED tier warning to every TeammateIdle/SubagentStop injection, so every
+   active orchestrator hears memory pressure in-context as it develops.
+3. *No crash marker for plain sessions.* Only `launch-dreamteam.sh` wrote
+   `state/active`, so crash-audit stayed silent after the kill. → `spawn-accounting.sh`
+   now writes the marker on the first spawn of any session; SessionEnd clears it.
+4. *Containment still unused.* The `MemoryMax` scope (§3) only protects fleets that
+   launch through it — both fleets ran in plain sessions sharing one Ghostty cgroup,
+   so oomd's victim was everything at once. Unchanged structurally: use `/dreamteam`
+   (which wraps the launcher) for fleet-scale runs.
+
+## 6. Numbers reference
 
 | Metric | Value (verified from the OOM dump) |
 |---|---|

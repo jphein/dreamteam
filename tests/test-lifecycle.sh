@@ -19,8 +19,12 @@ cat > "$TMP/teams/faketeam/config.json" <<'EOF'
   {"name":"ghost","agentId":"no-such-agent-id-000","isActive":false,"cwd":"/tmp","prompt":"task: haunt"}
 ]}
 EOF
-run_ev() { DREAMTEAM_STATE="$TMP/state" DREAMTEAM_TEAMS_DIR="$TMP/teams" CLAUDE_PLUGIN_ROOT="$ROOT" bash "$ROOT/scripts/team-events.sh"; }
-run_cg() { DREAMTEAM_STATE="$TMP/state" DREAMTEAM_TEAMS_DIR="$TMP/teams" CLAUDE_PLUGIN_ROOT="$ROOT" bash "$ROOT/scripts/compact-guard.sh"; }
+# Stub `free` so the memory-tier check is deterministic: default = plenty (20000 MiB)
+mkdir -p "$TMP/bin"
+printf '#!/bin/bash\necho "Mem: 32000 10000 2000 100 3000 ${FAKE_AVAIL:-20000}"\n' > "$TMP/bin/free"
+chmod +x "$TMP/bin/free"
+run_ev() { DREAMTEAM_STATE="$TMP/state" DREAMTEAM_TEAMS_DIR="$TMP/teams" CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/team-events.sh"; }
+run_cg() { DREAMTEAM_STATE="$TMP/state" DREAMTEAM_TEAMS_DIR="$TMP/teams" CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/compact-guard.sh"; }
 
 for f in team-events compact-guard subagent-statusline; do
   bash -n "$ROOT/scripts/$f.sh" && ok "bash -n $f.sh" || bad "bash -n $f.sh"
@@ -49,6 +53,24 @@ N=$(wc -l < "$TMP/state/events.log")
 [ "$N" -ge 5 ] && ok "events.log has one line per event ($N)" || bad "events.log lines ($N)"
 grep -q '"payloadKeys":\["hook_event_name","teammate_name"\]' "$TMP/state/events.log" && ok "payload keys captured for field discovery" || bad "payload keys captured"
 printf '' | run_ev; [ $? -eq 0 ] && ok "team-events: empty stdin exits 0" || bad "team-events empty stdin"
+
+# team-events: memory-tier actor (incident-#2 fix) — green is silent, ORANGE and
+# RED fire at floor*1.5 and floor (default floor 8000)
+OUT=$(echo '{"hook_event_name":"TeammateIdle","teammate_name":"luna"}' | run_ev)
+case "$OUT" in *TIER*) bad "green: no tier warning expected ($OUT)";; *) ok "green avail: no tier warning";; esac
+OUT=$(echo '{"hook_event_name":"TeammateIdle","teammate_name":"luna"}' | FAKE_AVAIL=10000 run_ev)
+case "$OUT" in *"ORANGE TIER"*) ok "10000MiB avail → ORANGE (quiesce) warning";; *) bad "ORANGE tier ($OUT)";; esac
+OUT=$(echo '{"hook_event_name":"SubagentStop","agent_id":"x"}' | FAKE_AVAIL=5000 run_ev)
+case "$OUT" in *"RED TIER"*"shutdown_request"*) ok "5000MiB avail → RED (shed) warning";; *) bad "RED tier ($OUT)";; esac
+
+# spawn-accounting: first spawn writes the crash marker (incident-#2 fix);
+# a second spawn must not overwrite it
+OUT=$(echo '{"tool_name":"Agent","tool_input":{"name":"t"},"cwd":"/tmp/proj"}' | DREAMTEAM_STATE="$TMP/state" CLAUDE_PLUGIN_ROOT="$ROOT" bash "$ROOT/scripts/spawn-accounting.sh")
+[ -f "$TMP/state/active" ] && ok "first spawn writes state/active crash marker" || bad "crash marker not written"
+grep -q '"repo":"/tmp/proj"' "$TMP/state/active" && ok "marker records cwd as repo" || bad "marker repo field"
+M1=$(cat "$TMP/state/active")
+echo '{"tool_name":"Agent","tool_input":{"name":"t2"},"cwd":"/elsewhere"}' | DREAMTEAM_STATE="$TMP/state" CLAUDE_PLUGIN_ROOT="$ROOT" bash "$ROOT/scripts/spawn-accounting.sh" >/dev/null
+[ "$(cat "$TMP/state/active")" = "$M1" ] && ok "second spawn does not overwrite marker" || bad "marker overwritten"
 
 # compact-guard: PreCompact writes snapshot + systemMessage
 OUT=$(echo '{"hook_event_name":"PreCompact","trigger":"auto","cwd":"'"$ROOT"'"}' | run_cg)

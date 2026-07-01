@@ -55,15 +55,33 @@ roster_line() {
     | jq -r 'if (.agents|length) > 0 then [.agents[] | "\(.name)(\(.status))"] | join(" ") else "" end' 2>/dev/null || true
 }
 
+# Memory-tier check — gives the skill's degradation tiers an ACTOR. Before the
+# 2026-07-01 16:06 oomd kill, admitted agents grew ~10GB of build-tool memory
+# while no orchestrator was watching /dreamteam-status; the tiers were prose.
+# TeammateIdle/SubagentStop fire constantly during fleet work, so piggybacking
+# the tier warning here means every active orchestrator hears it in-context.
+tier_note() {
+  local avail floor cfg
+  cfg="${DREAMTEAM_CONFIG:-$ROOT/config.json}"
+  floor=$(jq -r '.memory.minAvailableMB // 8000' "$cfg" 2>/dev/null); floor=${floor//[!0-9]/}; floor=${floor:-8000}
+  avail=$(free -m 2>/dev/null | awk '/^Mem:/{print $7}'); avail=${avail//[!0-9]/}
+  [ -n "$avail" ] || return 0
+  if [ "$avail" -lt "$floor" ]; then
+    printf ' 🚨 RED TIER: %sMiB avail < %sMiB floor — CHECKPOINT NOW (commit+push WIP), then shutdown_request newest/lowest-priority agents until pressure clears.' "$avail" "$floor"
+  elif [ "$avail" -lt $(( floor * 3 / 2 )) ]; then
+    printf ' ⚠ ORANGE TIER: %sMiB avail — quiesce: no new tasks, let in-flight agents finish + merge, investigate any balloon (incl. gradle/build daemons).' "$avail"
+  fi
+}
+
 case "$EVENT" in
   TeammateIdle)
-    R="$(roster_line)"
-    jq -n --arg msg "🕯 dreamteam: ${WHO:-a teammate} is IDLE — reusable via SendMessage (zero new RAM, warm context). Roster: ${R:-n/a}" \
+    R="$(roster_line)"; T="$(tier_note)"
+    jq -n --arg msg "🕯 dreamteam: ${WHO:-a teammate} is IDLE — reusable via SendMessage (zero new RAM, warm context). Roster: ${R:-n/a}${T}" \
       '{"systemMessage": $msg}'
     ;;
   SubagentStop)
-    R="$(roster_line)"
-    jq -n --arg msg "🕯 dreamteam: ${WHO:-an agent} stopped. Roster: ${R:-n/a}" \
+    R="$(roster_line)"; T="$(tier_note)"
+    jq -n --arg msg "🕯 dreamteam: ${WHO:-an agent} stopped. Roster: ${R:-n/a}${T}" \
       '{"systemMessage": $msg}'
     ;;
   *) : ;;   # log-only events
