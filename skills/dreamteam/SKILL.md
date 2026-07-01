@@ -72,6 +72,9 @@ The orchestrator is **Sandman** — the one who brings the dreams. Uses Davis vo
 6.5 Agents tab      ALWAYS move agent panes to a separate "agents" tmux window
                     (see § Separate agents window). Only exception: a single
                     agent producing inline output for JP.
+6.6 Wake CI         Agents will push branches? Run `realm wol wake familiar`
+                    immediately after spawning — familiar (candela/storyvox) sleeps
+                    idle and queues jobs forever until woken.
 6.7 Roster          Write scratch/<team>/roster.md (MANDATORY — survives compaction)
 7. Orchestrate      Monitor via SendMessage. Relay JP's questions by name.
                     Never go silent — JP should always know what's happening.
@@ -338,6 +341,7 @@ Task: <specific scope — what to do, which files, what output>
 
 Constraints:
 - Stay in scope. Report out-of-scope findings to orchestrator via SendMessage.
+- Never full-read files over 1000 lines. Grep for the symbol first, then Read with offset/limit.
 - Compile/test before reporting.
 - Selective `git add <file>` only — never `-A` or `.` (hook blocks).
 - Commit in your worktree with conventional commit message.
@@ -899,3 +903,12 @@ the transcript; this entry is the short, searchable index that points back to it
 - **agent-orchestration.md** has the full voice/speech details, prompt templates, and communication patterns. Cross-reference it for speech tool usage, heartbeat patterns, and error escalation.
 - **General-purpose agents only** — they need Bash/Edit/gh. Explore/Plan agents lack these.
 - **Salvage protocol when collisions happen anyway** — if you discover agents collided in the orchestrator's worktree: (1) shut all agents down with `shutdown_request` to stop further churn, (2) `git stash push -u` with a dated label to preserve all uncommitted work, (3) inspect each commit on each branch (`git log <branch> ^origin/main`) — work may have committed before the collision and only needs pushing, (4) for unpushed work, split the stash diff by file and apply each portion in a fresh isolated worktree off origin/main, then test + commit + push + PR per agent. Do not rebase or cherry-pick across collided branches — start clean.
+
+## Context Hygiene
+
+The orchestrator's context is the team's scarcest resource — a compaction can wipe the live roster and merge state mid-run. Protect it (full analysis: candela `scratch/compaction-analysis.md`):
+
+- **Never full-read files in a project's CLAUDE.md "Large files" list** (candela: EnginePlayer, SettingsScreen, SettingsRepositoryUiImpl, AudiobookView, UiContracts, StoryvoxNavHost). Grep for the symbol first, then Read with `offset`/`limit` — one full `SettingsScreen.kt` read ≈ 47K tokens. A candela PreToolUse hook now warns on this automatically.
+- **Delegate broad file exploration to subagents** — they compact independently and return a summary; a 4,000-line read in the orchestrator burns the shared window for good.
+- **CI waits use ONE `run_in_background` call** (`until gh run view $ID --json status --jq .status | grep -q completed; do sleep 30; done`) — never inline-repeat `gh run view`/`gh run list`; each poll leaves JSON in context permanently.
+- **Orchestrator keeps summaries; agents write detail to `scratch/<team>/<agent>.md`** and SendMessage summary + path, never the full findings inline.
