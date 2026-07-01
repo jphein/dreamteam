@@ -15,7 +15,7 @@
 #                                          #    templates/dashboard.html)
 #
 # Then deploy the --inject output via the Artifact tool (favicon: 🕯️).
-# PRs come from `gh pr list` run in $DREAMTEAM_REPO (default ~/Projects/candela).
+# PRs come from `gh pr list` run in $DREAMTEAM_REPO (default: the cwd).
 # "pending" timeline items are read from $ROOT/state/pending.txt (one per line)
 # if present — the orchestrator can drop notes there; otherwise it's empty.
 set -uo pipefail
@@ -24,7 +24,10 @@ ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 CFG="${DREAMTEAM_CONFIG:-$ROOT/config.json}"
 TEAMS_DIR="${DREAMTEAM_TEAMS_DIR:-$HOME/.claude/teams}"
 STATE="${DREAMTEAM_STATE:-$ROOT/state}"
-REPO="${DREAMTEAM_REPO:-$HOME/Projects/candela}"
+# Consumer repo for PRs/tags: env override, else the cwd — the orchestrator runs
+# from the repo it's orchestrating (was a candela hardcode; flagged in the
+# 2026-07-01 audit as project-specific for a generic plugin).
+REPO="${DREAMTEAM_REPO:-$PWD}"
 TEMPLATE_DEFAULT="$ROOT/templates/dashboard.html"
 
 TEAM=""; MODE="json"; TEMPLATE="$TEMPLATE_DEFAULT"

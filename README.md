@@ -3,7 +3,7 @@
 Converts the dreamteam **skill** into a full **plugin** so the OOM-prevention logic is
 *enforced by the harness*, not just *described in prose the model can talk past*.
 
-Born from the 2026-06-30 postmortem: a 25-PR overnight merge cascade ran ~40 Claude
+Born from the [2026-06-30 postmortem](docs/postmortem-2026-06-30.md): a 25-PR overnight merge cascade ran ~40 Claude
 agents in one Ghostty cgroup; one ballooned to 3.7 GB; 32 GB swap hit 0; the kernel
 OOM-killer thrashed for ~30 min and the whole session was lost. The old `~30 agent`
 cap was a *count* with no memory backing — and ~40 were running.
@@ -80,6 +80,6 @@ start — no reinstall. (A cache copy at `~/.claude/plugins/cache/dreamteam/drea
 kept as an uninstall safety net, refreshed by `scripts/sync-plugin.sh`; it's not needed for
 development.)
 
-OS-level companions (see the postmortem §4): configure `systemd-oomd` (PSI+cgroup-aware,
+OS-level companions (see [postmortem §4](docs/postmortem-2026-06-30.md)): configure `systemd-oomd` (PSI+cgroup-aware,
 fixes the Waydroid victim-poisoning), re-tune `earlyoom`, and cut the 32 GB swap. Those
 make any future OOM a clean 2-second kill instead of a 30-min thrash.
