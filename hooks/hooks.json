@@ -16,6 +16,16 @@
             "timeout": 5000
           }
         ]
+      },
+      {
+        "matcher": "TaskStop",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/sendmessage-reminder.sh\"",
+            "timeout": 3000
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -26,6 +36,16 @@
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/spawn-accounting.sh\"",
             "timeout": 5000
+          }
+        ]
+      },
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/pane-organizer.sh\"",
+            "timeout": 3000
           }
         ]
       }
