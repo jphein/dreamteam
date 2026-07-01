@@ -7,7 +7,7 @@ Claude Code plugin for memory-gated parallel agent orchestration. Spawns named d
 - `plugin.json` — manifest (name, version, description)
 - `config.json` — tunables (perAgentMB, balloonReserveMB, hostReserveMB, maxAgents)
 - `hooks/hooks.json` — PreToolUse gates (reuse → mem-gate chain), PostToolUse accounting, SessionStart/End lifecycle
-- `scripts/` — gate scripts, budget calculator, dashboard data generator, shared lib
+- `scripts/` — gate scripts, budget calculator, dashboard data generator, statusline (wired via user settings `statusLine`), shared lib
 - `skills/dreamteam/SKILL.md` — full orchestration skill (~900 lines)
 - `agents/` — custom agent type definitions (luna, morpheus, lucid, nebula)
 - `commands/` — slash commands (dreamteam, dreamteam-status, dreamteam-roster)
