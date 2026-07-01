@@ -17,12 +17,15 @@ Claude Code plugin for memory-gated parallel agent orchestration. Spawns named d
 
 ## Development
 
-Edit files directly — the plugin cache is symlinked here:
-```
-~/.claude/plugins/cache/local/dreamteam/1.0.0 -> ~/Projects/dreamteam
+Edit source files here, then sync to the plugin cache:
+```bash
+scripts/sync-plugin.sh
 ```
 
-Changes take effect on next Claude Code session start (hooks reload at SessionStart).
+Plugin cache (real copy, safe to uninstall): `~/.claude/plugins/cache/dreamteam/dreamteam/1.0.0`
+Registered as `dreamteam@dreamteam` marketplace (modeled after mempalace).
+Marketplace metadata: `.claude-plugin/marketplace.json`.
+Changes take effect after sync + next Claude Code session start.
 
 ## Testing
 

@@ -1,0 +1,18 @@
+{
+  "name": "dreamteam",
+  "owner": {
+    "name": "JP",
+    "email": "jp@jphein.com"
+  },
+  "plugins": [
+    {
+      "name": "dreamteam",
+      "source": ".",
+      "description": "Memory-gated parallel agent orchestration with named dream agents in isolated worktrees",
+      "version": "1.0.0",
+      "author": {
+        "name": "JP"
+      }
+    }
+  ]
+}
