@@ -41,6 +41,10 @@ if [ ! -f "$STATE/active" ]; then
   printf '{"team":"%s","repo":"%s","started":"%s"}\n' "session-spawned" "$CWD" "$TS" > "$STATE/active" 2>/dev/null || true
 fi
 
+# Automatic containment (incident-2 fix): attach agent procs to the capped
+# dreamteam-agents.scope so a runaway team is oomd's victim, not the host.
+bash "$ROOT/scripts/scope-attach.sh" 2>/dev/null || true
+
 # Build roster summary from the AUTHORITATIVE harness team config (via roster.sh)
 # — every member with its TRUE status, not just spawns this session saw. roster.sh
 # always exits 0; if it can't resolve a team, .agents is empty → blank line.

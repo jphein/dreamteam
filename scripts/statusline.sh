@@ -50,7 +50,10 @@ case "$USED$TOTAL" in *[!0-9]*|"") ;; *)
 DT=""
 NPROCS=$(pgrep -fc 'claude/versions' 2>/dev/null); NPROCS=${NPROCS//[!0-9]/}
 AVAIL=$(free -m 2>/dev/null | awk '/^Mem:/{print $7}'); AVAIL=${AVAIL//[!0-9]/}
-[ -n "$NPROCS" ] && DT=" · 🕯 ${NPROCS} procs${AVAIL:+ · ${AVAIL}MiB free}"
+# 🛡 = the auto-containment scope is live (agent procs are memory-capped)
+SHIELD=""
+systemctl --user is-active --quiet dreamteam-agents.scope 2>/dev/null && SHIELD=" 🛡"
+[ -n "$NPROCS" ] && DT=" · 🕯 ${NPROCS} procs${SHIELD}${AVAIL:+ · ${AVAIL}MiB free}"
 
 printf '%s · effort:%s%s%s\n' "$MODEL" "$EFF" "$CTX" "$DT"
 

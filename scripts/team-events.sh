@@ -75,6 +75,10 @@ tier_note() {
 
 case "$EVENT" in
   TeammateIdle)
+    # Containment sweep: idle events fire constantly during fleet work, so any
+    # agent that slipped past its spawn-time attach gets caught here (cheap —
+    # scope-attach only busctl's pids not already in the scope).
+    bash "$ROOT/scripts/scope-attach.sh" 2>/dev/null || true
     R="$(roster_line)"; T="$(tier_note)"
     jq -n --arg msg "🕯 dreamteam: ${WHO:-a teammate} is IDLE — reusable via SendMessage (zero new RAM, warm context). Roster: ${R:-n/a}${T}" \
       '{"systemMessage": $msg}'

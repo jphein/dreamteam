@@ -24,6 +24,7 @@
     "memoryHigh": "20G",
     "memoryMax": "24G",
     "memorySwapMax": "8G",
-    "_notes": "systemd-run --scope caps for launch-dreamteam.sh. MemoryHigh = throttle (reclaim pressure); MemoryMax = hard kill within the team's cgroup; MemorySwapMax bounds swap so the team can't drive the host's swap to 0. Size to leave the GUI/host a few GB."
+    "autoAttach": true,
+    "_notes": "Caps for BOTH containment paths: launch-dreamteam.sh (whole-session scope) and scope-attach.sh (autoAttach=true: every spawn attaches all live agent procs on the host into dreamteam-agents.scope via AttachProcessesToUnit — added after the 2026-07-01 16:06 oomd kill, when unscoped fleets shared the Ghostty cgroup and the kill took everything). MemoryHigh = throttle; MemoryMax = hard kill inside the agents' cgroup (orchestrators stay outside and survive); MemorySwapMax bounds the team's swap. Size to leave the GUI/host a few GB."
   }
 }

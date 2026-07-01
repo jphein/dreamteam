@@ -86,10 +86,18 @@ with recoverable state; the new lifecycle hooks logged real events to T-9s.
 3. *No crash marker for plain sessions.* Only `launch-dreamteam.sh` wrote
    `state/active`, so crash-audit stayed silent after the kill. → `spawn-accounting.sh`
    now writes the marker on the first spawn of any session; SessionEnd clears it.
-4. *Containment still unused.* The `MemoryMax` scope (§3) only protects fleets that
-   launch through it — both fleets ran in plain sessions sharing one Ghostty cgroup,
-   so oomd's victim was everything at once. Unchanged structurally: use `/dreamteam`
-   (which wraps the launcher) for fleet-scale runs.
+4. *Containment was opt-in, and nobody opted in.* The `MemoryMax` scope (§3) only
+   protected fleets launched via `launch-dreamteam.sh` — both fleets ran in plain
+   sessions sharing one Ghostty cgroup, so oomd's victim was everything at once.
+   → **`scope-attach.sh` (shipped same day): containment is now automatic.** Every
+   spawn (and every TeammateIdle sweep) attaches all live agent procs on the host
+   into `dreamteam-agents.scope` (MemoryHigh/Max/SwapMax from config, `Delegate=yes`
+   — required for `AttachProcessesToUnit`) via the systemd user manager. Orchestrators
+   stay outside and survive a scope kill. Children spawned after attach (gradle/JVM
+   daemons — the actual killers) inherit the cgroup; daemons already detached before
+   attach are the one prospective-only gap. Live-verified 2026-07-01 16:26: 11 agents
+   from two plain-session fleets attached, 24G cap active. `/dreamteam` + the launcher
+   remain the belt-and-braces path (own tmux server, whole-session scope).
 
 ## 6. Numbers reference
 

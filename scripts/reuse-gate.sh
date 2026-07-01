@@ -20,7 +20,9 @@ TOOL="$(printf '%s' "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)"
 case "$TOOL" in Agent|Task) ;; *) exit 0 ;; esac
 
 # Master switch (default on). Disable via config: reuse.enforce=false
-ENFORCE=$(jq -r '.reuse.enforce // true' "$CFG" 2>/dev/null || echo true)
+# NOTE: not `// true` — jq's // treats false as empty, so the old form made
+# enforce=false unreachable (same bug class caught in scope-attach by tests).
+ENFORCE=$(jq -r 'if .reuse.enforce == false then "false" else "true" end' "$CFG" 2>/dev/null || echo true)
 [ "$ENFORCE" = "false" ] && exit 0
 
 PROMPT="$(printf '%s' "$INPUT" | jq -r '.tool_input.prompt // ""' 2>/dev/null || true)"
