@@ -3,13 +3,14 @@
 #
 # 1. Logs footprint to dreamteam.log (disk record)
 # 2. Emits live agent count + memory to stdout JSON (injected into Claude's context)
-# 3. Records agent name from tool result into roster state file
+# 3. Appends the TRUE team roster (from roster.sh, which reads the authoritative
+#    harness team config) to that message. The old lossy state/agents.json roster
+#    file is RETIRED — it only saw new spawns and never marked idle/dead.
 set -uo pipefail
 
 ROOT="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/dreamteam}"
 STATE="${DREAMTEAM_STATE:-$ROOT/state}"
 LOG="$STATE/dreamteam.log"
-ROSTER="$STATE/agents.json"
 mkdir -p "$STATE"
 
 INPUT="$(cat 2>/dev/null || true)"
@@ -30,24 +31,11 @@ TS=$(date +%FT%T)
 
 echo "$TS post-spawn: agents=${NAGENTS} total_rss=${TOTAL_MB}MB avail=${AVAIL}MiB" >> "$LOG"
 
-# Extract agent name/id from tool result if present
-AGENT_NAME=$(printf '%s' "$INPUT" | jq -r '.tool_result.name // .tool_input.name // empty' 2>/dev/null || true)
-AGENT_ID=$(printf '%s' "$INPUT" | jq -r '.tool_result.agentId // .tool_result.task_id // empty' 2>/dev/null || true)
-AGENT_DESC=$(printf '%s' "$INPUT" | jq -r '.tool_input.description // empty' 2>/dev/null || true)
-
-# Update roster state file (append or update by name)
-if [ -n "$AGENT_NAME" ]; then
-  [ -f "$ROSTER" ] || echo '[]' > "$ROSTER"
-  jq --arg name "$AGENT_NAME" --arg id "$AGENT_ID" --arg desc "$AGENT_DESC" --arg ts "$TS" \
-    '[ .[] | select(.name != $name) ] + [{"name": $name, "id": $id, "desc": $desc, "spawned": $ts, "status": "active"}]' \
-    "$ROSTER" > "$ROSTER.tmp" 2>/dev/null && mv "$ROSTER.tmp" "$ROSTER" || true
-fi
-
-# Build roster summary
-ROSTER_LINE=""
-if [ -f "$ROSTER" ]; then
-  ROSTER_LINE=$(jq -r '[.[] | "\(.name)(\(.status))"] | join(" ")' "$ROSTER" 2>/dev/null || true)
-fi
+# Build roster summary from the AUTHORITATIVE harness team config (via roster.sh)
+# — every member with its TRUE status, not just spawns this session saw. roster.sh
+# always exits 0; if it can't resolve a team, .agents is empty → blank line.
+ROSTER_LINE=$(bash "$ROOT/scripts/roster.sh" --json 2>/dev/null \
+  | jq -r 'if (.agents|length) > 0 then [.agents[] | "\(.name)(\(.status))"] | join(" ") else "" end' 2>/dev/null || true)
 
 # Emit to stdout as JSON — PostToolUse hooks use systemMessage to inject into Claude's context
 MSG="dreamteam: ${NAGENTS} agents | ${TOTAL_MB}MB RSS | ${AVAIL}MB free | ${ROSTER_LINE}"
