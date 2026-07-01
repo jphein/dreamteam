@@ -4,7 +4,7 @@
 # Usage: mem-budget.sh            # human summary
 #        mem-budget.sh --max      # just the integer MAX_AGENTS (for scripting)
 set -uo pipefail
-ROOT="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/dreamteam}"
+ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 CFG="${DREAMTEAM_CONFIG:-$ROOT/config.json}"
 # shellcheck source=/dev/null
 [ -f "$ROOT/scripts/lib.sh" ] && . "$ROOT/scripts/lib.sh"

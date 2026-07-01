@@ -8,7 +8,7 @@
 # NOTE: an OOM kill / terminal loss does NOT fire SessionEnd — which is exactly
 # the point: the marker survives an unclean exit and crash-audit detects it.
 set -uo pipefail
-ROOT="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/dreamteam}"
+ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 STATE="${DREAMTEAM_STATE:-$ROOT/state}"
 rm -f "$STATE/active"
 exit 0

@@ -20,8 +20,10 @@
 #   in-process team subagents, so it would mark every teammate dead).
 #   HOT PATH: this is called from spawn-accounting.sh (PostToolUse, fires on every
 #   spawn), so we take ONE `ps -ww -eo pid,args` snapshot (-ww = unlimited width,
-#   so a long cmdline never truncates the agent-id off the end) and test all
-#   members against it in a single pass — not a pgrep per member.
+#   so a long cmdline never truncates the agent-id off the end) and match each
+#   member to its pid in a single pass — not a pgrep per member. --json emits that
+#   matched pid per agent (int, or null when dead/lead), so downstream consumers
+#   (dashboard-data.sh) never need a second pgrep.
 #
 # STATUS: lead (team-lead) · active (isActive:true & alive) · idle (alive &
 #   !active — REUSABLE via SendMessage) · dead (!alive).
@@ -67,9 +69,18 @@ def ps_snapshot():
         return ""
 SNAP = ps_snapshot()
 
-def alive(agent_id):
-    # the full `agent-id <id>` (id carries @session-…, so ids can't prefix-collide)
-    return bool(agent_id) and ("agent-id %s" % agent_id) in SNAP
+def pid_for(agent_id):
+    # first pid whose args carry the full `agent-id <id>` token (id carries
+    # @session-…, so ids can't prefix-collide). None ⇒ no live process ⇒ dead.
+    if not agent_id:
+        return None
+    needle = "agent-id %s" % agent_id
+    for line in SNAP.splitlines():
+        if needle in line:
+            head = line.split(None, 1)[0]
+            if head.isdigit():
+                return int(head)
+    return None
 
 team_name = ""
 agents = []
@@ -83,13 +94,15 @@ for cfgp in cfgs:
     for m in data.get("members", []):
         aid = m.get("agentId", "")
         if m.get("agentType") == "team-lead":
-            status = "lead"
-        elif not alive(aid):
-            status = "dead"
-        elif m.get("isActive") is True:
-            status = "active"
+            status, pid = "lead", None
         else:
-            status = "idle"
+            pid = pid_for(aid)
+            if pid is None:
+                status = "dead"
+            elif m.get("isActive") is True:
+                status = "active"
+            else:
+                status = "idle"
         counts[status] = counts.get(status, 0) + 1
         agents.append({
             "name": m.get("name") or aid or "?",
@@ -97,6 +110,7 @@ for cfgp in cfgs:
             "agentId": aid or None,
             "cwd": m.get("cwd") or None,
             "agentType": m.get("agentType") or None,
+            "pid": pid,
         })
 
 if fmt == "json":

@@ -12,7 +12,7 @@
 # "FRESH-SPAWN: <reason>" in the prompt when a new agent is genuinely required
 # (new worktree, independent parallel work, idle agent's context is wrong).
 set -uo pipefail
-ROOT="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/dreamteam}"
+ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 CFG="${DREAMTEAM_CONFIG:-$ROOT/config.json}"
 
 INPUT="$(cat 2>/dev/null || true)"

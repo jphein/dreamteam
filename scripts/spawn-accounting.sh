@@ -8,7 +8,7 @@
 #    file is RETIRED — it only saw new spawns and never marked idle/dead.
 set -uo pipefail
 
-ROOT="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/dreamteam}"
+ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 STATE="${DREAMTEAM_STATE:-$ROOT/state}"
 LOG="$STATE/dreamteam.log"
 mkdir -p "$STATE"

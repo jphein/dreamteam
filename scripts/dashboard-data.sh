@@ -20,8 +20,7 @@
 # if present — the orchestrator can drop notes there; otherwise it's empty.
 set -uo pipefail
 
-ROOT="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/dreamteam}"
-[ -d "$ROOT" ] || ROOT="$HOME/.claude/plugins/cache/dreamteam/dreamteam/1.0.0"
+ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 CFG="${DREAMTEAM_CONFIG:-$ROOT/config.json}"
 TEAMS_DIR="${DREAMTEAM_TEAMS_DIR:-$HOME/.claude/teams}"
 STATE="${DREAMTEAM_STATE:-$ROOT/state}"
@@ -110,16 +109,10 @@ else: tier = "Green"
 
 # ── agent roster (AUTHORITATIVE via scripts/roster.sh) ──────────────────────
 # roster.sh is the SINGLE source of truth for status + liveness (lead/active/
-# idle/dead). Do NOT recompute that precedence here — recomputing it is exactly
-# the drift that produced the stale-roster bug. We only ENRICH each agent with
-# dashboard-only fields: task (config prompt), branch (git), pid+rss (ps).
-# pid_of/pid_rss are display lookups, gated on roster.sh's aliveness verdict —
-# not a second status decision.
-def pid_of(agent_id):
-    if not agent_id: return None
-    pids = [int(x) for x in run(["pgrep","-f","agent-id %s" % agent_id]).split() if x.isdigit()]
-    return pids[0] if pids else None
-
+# idle/dead) AND the matched pid. Do NOT recompute any of that here — that drift
+# produced the stale-roster bug. We only ENRICH each agent with dashboard-only
+# fields: task (config prompt), branch (git), rssMb (ps, keyed on roster's pid).
+# No pgrep / status logic remains in this file.
 def pid_rss(pid):
     out = run(["ps","-o","rss=","-p",str(pid)]).strip()
     return int(out)//1024 if out.isdigit() else None
@@ -162,7 +155,7 @@ for a in roster.get("agents", []):
     aid = a.get("agentId") or ""
     cwd = a.get("cwd") or ""
     raw_status = a.get("status")
-    pid = pid_of(aid) if raw_status != "dead" else None
+    pid = a.get("pid")            # authoritative — from roster.sh's single ps snapshot
     agents.append({
         "name": a.get("name") or aid or "?",
         "status": STATUS_MAP.get(raw_status, raw_status),

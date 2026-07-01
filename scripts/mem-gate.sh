@@ -11,7 +11,7 @@
 # reserve is non-negotiable: 06-30 had TWO agents balloon at once (3.7 + 3.4 GB).
 set -uo pipefail
 
-ROOT="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/dreamteam}"
+ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 CFG="${DREAMTEAM_CONFIG:-$ROOT/config.json}"
 STATE="${DREAMTEAM_STATE:-$ROOT/state}"
 # shellcheck source=/dev/null

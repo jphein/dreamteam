@@ -11,7 +11,7 @@
 #
 # Usage: launch-dreamteam.sh [team-name] [repo-path]
 set -uo pipefail
-ROOT="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/dreamteam}"
+ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 CFG="${DREAMTEAM_CONFIG:-$ROOT/config.json}"
 STATE="${DREAMTEAM_STATE:-$ROOT/state}"; mkdir -p "$STATE"
 TEAM="${1:-dream}"; REPO="${2:-$PWD}"
