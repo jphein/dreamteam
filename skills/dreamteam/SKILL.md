@@ -46,9 +46,10 @@ The orchestrator is **Sandman** — the one who brings the dreams. Uses Davis vo
 ```
 0. Pre-flight       Orchestrator MUST be inside tmux — else the whole team dies
                     with the terminal. `echo ${TMUX:-NOT-IN-TMUX}` — see below.
-0.1 Mem pre-flight  Memory-aware admission control. `free -m` + budget formula:
-                    MAX = min(30, (avail − 6G host − 8G balloon) / 400MB). Aborts if
-                    RAM tight. The plugin's mem-gate ENFORCES this at every spawn.
+0.1 Mem pre-flight  Memory-aware admission control. Run `/dreamteam-status` for the
+                    live budget (tunables live in config.json, not here). Shape:
+                    MAX = min(count cap, (avail − host − balloon) / perAgent). The
+                    plugin's mem-gate ENFORCES it at every spawn regardless.
 0.2 Reuse first     Before spawning, `/dreamteam-roster "<task>"` — assign an idle
                     teammate (zero new RAM, warm context) over a fresh agent. The
                     reuse-gate ENFORCES this; fresh spawn needs FRESH-SPAWN: <reason>.
@@ -69,13 +70,16 @@ The orchestrator is **Sandman** — the one who brings the dreams. Uses Davis vo
                     DO NOT pass `isolation: "worktree"` — it silently fails.
                     Every prompt MUST embed the absolute worktree path, the spec
                     path + section number (if a spec exists), and the palace nudge.
-6.5 Agents tab      ALWAYS move agent panes to a separate "agents" tmux window
-                    (see § Separate agents window). Only exception: a single
-                    agent producing inline output for JP.
+6.5 Agents tab      The pane-organizer hook AUTO-moves each new agent pane into a
+                    separate "agents" window (async, per spawn). VERIFY it happened;
+                    the manual move is a fallback (see § Separate agents window).
+                    Exception: an inline-output agent (set DREAMTEAM_INLINE_PANE=1).
 6.6 Wake CI         Agents will push branches? Run `realm wol wake familiar`
                     immediately after spawning — familiar (candela/storyvox) sleeps
                     idle and queues jobs forever until woken.
-6.7 Roster          Write scratch/<team>/roster.md (MANDATORY — survives compaction)
+6.7 Roster          Write scratch/<team>/roster.md — the ASSIGNMENT layer (issue →
+                    branch → task) the auto-injected roster.sh can't hold. Liveness
+                    is automated; this mapping isn't (MANDATORY — survives compaction).
 7. Orchestrate      Monitor via SendMessage. Relay JP's questions by name.
                     Never go silent — JP should always know what's happening.
 ```
@@ -110,7 +114,25 @@ Inside tmux the terminal emulator becomes disposable — freeze it, kill it, res
 
 **Bonus — live team panes (JP loves this; preserve it):** when the orchestrator runs inside tmux, the harness automatically opens **each spawned teammate in its own tmux pane** — a live wall of every dream agent thinking in parallel, navigable with normal tmux keys. This is free; nothing to script. It's a second, independent reason the tmux pre-flight is mandatory: survivability AND visibility. (Observed 2026-06-10 on a 4-agent Notion audit team — JP: "that's magical.") If panes don't appear, the team still works — check `tmux list-panes` and continue; never block on pane creation.
 
-**Separate agents window (ALWAYS for dream agents — part of the spawn sequence):** the auto-created panes land in Sandman's tmux window, crowding the orchestrator. After spawning, **always** move dream agent panes into their own tmux window — even for 2 agents. JP considers this default behavior, not something to request separately. Panes spawned to produce output directly for JP (e.g., an inline research report, a verification result) stay in JP's current window — only background workers move to the agents tab.
+**Separate agents window (now AUTOMATIC — verify, don't re-tile by hand):** the
+`pane-organizer.sh` **PostToolUse(Agent)** hook fires *async on every spawn* and moves that
+spawn's new pane out of Sandman's window into a dedicated **`agents`** window — found or
+created **by name** (so a non-zero base-index or a pre-existing window can't fool it, the
+way a hardcoded `:2` did). It self-skips when you're not in tmux, or when
+`DREAMTEAM_INLINE_PANE=1` marks an agent whose output goes straight to JP (those stay in
+JP's window). So after spawning, **verify** the panes landed (`tmux list-windows`) rather
+than moving them yourself. JP still considers a clean agents tab default behavior — the hook
+just does it now.
+
+Two fallbacks for when the hook didn't fire (spawned outside tmux, hook timed out, or panes
+piled up before it was wired in):
+
+- **Batch (preferred):** `bash scripts/tmux-layout.sh [orch-window]` sweeps **every** stray
+  agent pane into the `agents` window in one shot (by name) and tiles. It targets the
+  dedicated `dreamteam` tmux socket, so it works even from an **outside** terminal — the
+  per-spawn hook only chips one pane per *future* spawn and can't clean a backlog.
+- **Manual (last resort):** the one-window-at-a-time snippet below (adjust `:1`/`:2` to your
+  real window indices — it does not resolve the window by name the way the hook does).
 
 ```bash
 # Create a new tmux window named "agents"
@@ -142,37 +164,53 @@ JP can then flip between tabs with `Ctrl-b n`/`Ctrl-b p`, or open the agents win
 > MORE THAN ONE runaway agent.**
 
 The plugin's **mem-gate** (`PreToolUse(Agent|Task)`) enforces this automatically — it
-`exit 2`-blocks a spawn with no headroom. To size a wave yourself, run `/dreamteam-status`
-(or the formula):
+`exit 2`-blocks a spawn with no headroom. **`/dreamteam-status` is the source of truth**
+for the live numbers. The tunables live in `config.json` (`.memory`), **not in this
+skill** — so they re-tune without a doc edit, and they *have* (perAgent 600→400→300,
+count cap 30→36, balloon 8→4→8 G, all inside 06-30…07-01). Never hardcode them here. The
+formula's *shape*, with the config keys that feed it:
 
 ```bash
-AVAIL=$(free -m | awk '/^Mem:/{print $7}')          # MiB available (real, incl. reclaimable)
-PER_AGENT=400        # planning RSS per NEW agent (baseline ~200-280; active-with-ctx ~350-430)
-HOST_RESERVE=6000    # GUI + browser + MCP servers + kernel + buff/cache pressure
-BALLOON_RESERVE=8000 # headroom for TWO concurrent balloons (06-30 had two at 3.7+3.4 GB)
-BUDGET=$(( (AVAIL - HOST_RESERVE - BALLOON_RESERVE) / PER_AGENT ))   # MAX = min(30, BUDGET)
+AVAIL=$(free -m | awk '/^Mem:/{print $7}')       # MiB available (real, incl. reclaimable)
+# perAgentMB, hostReserveMB, balloonReserveMB, maxAgents, minAvailableMB ← config.json .memory
+BUDGET=$(( (AVAIL - hostReserveMB - balloonReserveMB) / perAgentMB ))
+MAX_AGENTS=$(( BUDGET < maxAgents ? BUDGET : maxAgents ))   # = min(count cap, RAM budget)
 ```
 
-- **MAX_AGENTS = min(30, BUDGET).** The budget is **dynamic** — it shrinks when the host is
-  busy (Waydroid + browser open), which the old count cap never did. The count cap is
-  **system-wide** (all Claude procs, not just this team — 06-30's 59 spanned sessions).
+- **MAX_AGENTS = min(count cap, RAM budget).** The RAM budget is **dynamic** — it shrinks
+  when the host is busy (Waydroid + browser open), which the old count cap never did. The
+  count cap (`maxAgents`) is **system-wide** (all Claude procs, not just this team —
+  06-30's 59 spanned sessions). Below the `minAvailableMB` floor the gate hard-blocks
+  (MAX=0) regardless of count — that floor is the real backstop.
 - **Batch in waves** if you need more than the budget allows — spawn N, let them finish +
-  merge, recompute the budget, spawn the next N. Never exceed the live budget.
+  merge, recompute (`/dreamteam-status`), spawn the next N. Never exceed the live budget.
 - **Don't run Waydroid during an overnight dreamteam.** It consumes RAM *and* poisons OOM
   victim selection (Android `oom_score_adj` 900+ makes the kernel kill tiny Android procs
   before the real hog). `waydroid session stop` before a large run.
 
-### ⛔ Pre-flight: cap the team's cgroup (protect the host)
+### ⛔ Containment: cap the agents' cgroup (automatic + belt-and-braces)
 
 The 06-30 crash cascaded because the whole team shared **one cgroup with no memory limit**,
-so it consumed all host RAM + swap and took the GUI/tmux/siblings down. Launch the dream
-session in a dedicated, memory-capped systemd scope (the `/dreamteam` command wraps this via
-`launch-dreamteam.sh`):
+so it consumed all host RAM + swap and took the GUI/tmux/siblings down.
+
+**Automatic containment (default — no action needed).** `scope-attach.sh` attaches **every
+live agent proc on the host** (any session — the plugin's guards are system-wide) into a
+`dreamteam-agents.scope` user scope on **every spawn and every TeammateIdle sweep**, capped with
+the `config.json .scope` values and created `Delegate=yes` (required for the systemd
+`AttachProcessesToUnit` call). Orchestrators/main sessions are deliberately **left outside**, so
+a scope OOM-kill takes the teams and the orchestrator survives to recover them. Children spawned
+*after* attach (gradle/JVM daemons — the actual 07-01 killers) **inherit** the cgroup; the one
+gap is a daemon detached *before* its parent was attached. (Postmortem §5.4; live-verified 16:26
+— 11 agents from two plain-session fleets attached. Disable via `scope.autoAttach=false`.)
+
+**Belt-and-braces for overnight — `launch-dreamteam.sh` (the `/dreamteam` command).** For a
+long unattended run, launch the *whole session* in its own capped scope **and** its own tmux
+server, so a runaway can't reach the host and a dead tmux server can't take JP's other work:
 
 ```bash
 systemd-run --user --scope \
   -p MemoryHigh=20G -p MemoryMax=24G -p MemorySwapMax=8G --unit=dreamteam \
-  tmux -L dreamteam new-session -s dream
+  tmux -L dreamteam new-session -s dream    # caps come from config.json .scope, not hardcoded
 ```
 
 - **`MemoryHigh`** = soft throttle (reclaim pressure — team slows *before* the wall).
@@ -181,6 +219,14 @@ systemd-run --user --scope \
   replacement for a polling watchdog** — a balloon can't escape the cap.
 - **`MemorySwapMax`** = bounds the team's swap so it can't drive the host's swap to 0 (the
   thing that turned a 2-second kill into a 30-minute freeze).
+
+### Statusline (at-a-glance)
+
+A `statusLine` command (user `settings.json`) renders one line every refresh: **model · effort ·
+ctx % + tokens · 5h/7d rate-limit usage · 🕯 live proc count · 🛡 (scope live) · MiB free**. The
+proc count is the system-wide Claude count the mem-gate budgets against (not the roster — that's
+`roster.sh`); 🛡 = containment scope active. Cheap always-on read; `/dreamteam-status` is the
+detailed one, `/dreamteam-incident` the forensic one after a kill.
 
 ### ⛔ MANDATORY: manual worktree creation before spawn
 
@@ -225,11 +271,20 @@ When you spawn, DO NOT pass `isolation: "worktree"`. The harness will quietly dr
 
 After spawning, run `git worktree list` and `ls .claude/worktrees/`. If the harness has started creating per-agent worktrees automatically, you'll see entries you didn't create. Until that day, treat `isolation: "worktree"` as broken for team agents and create the worktrees yourself.
 
-### Step 6.5 — Write the roster file (MANDATORY — survives compaction)
+### Step 6.5 — Write the roster file (the ASSIGNMENT layer — MANDATORY, survives compaction)
 
-> Learned 2026-06-29: context compaction wiped the orchestrator's agent roster — 15 agents running, orchestrator couldn't name or reach them. Had to reconstruct from `ps -p <pid> -o args=` on every tmux pane. The fix: write the roster to disk so post-compaction context can recover it by reading one file.
+> Learned 2026-06-29: context compaction wiped the orchestrator's agent roster — 15 agents running, orchestrator couldn't name or reach them. Had to reconstruct from `ps -p <pid> -o args=` on every tmux pane.
 
-**Immediately after spawning all agents**, write `scratch/<team>/roster.md`:
+**That identity + liveness recovery is now AUTOMATED.** `scripts/roster.sh` reads the
+authoritative harness team config (`~/.claude/teams/<team>/config.json`) — every member with
+its live status (lead / active / idle / dead; liveness from one `ps` snapshot) — and the
+plugin injects it at **SessionStart, every spawn (post-spawn accounting), TeammateIdle,
+SubagentStop, and Pre/PostCompact**. A post-compaction orchestrator is handed the true roster
+with no file read (`bash scripts/roster.sh` on demand).
+
+**What the harness config does NOT carry is the ASSIGNMENT mapping** — which issue, which
+branch, which task each agent owns. That is what `scratch/<team>/roster.md` is for, and why it
+stays MANDATORY. **Immediately after spawning all agents**, write `scratch/<team>/roster.md`:
 
 ```bash
 # Create scratch dir for the team
@@ -255,23 +310,28 @@ Updated: <timestamp>
 - Agent's PR merges → update status to `merged`
 - New agent spawned → add row
 
-**After compaction**, the first action is:
-```
-Read scratch/<team>/roster.md
-```
-This recovers the full agent table without needing to scan tmux processes.
+**After compaction**, the injected roster.sh already names every live agent (identity +
+liveness); `Read scratch/<team>/roster.md` to recover the **assignment** overlay
+(issue/branch/task) the harness config doesn't hold. The two are complementary — one says
+who's alive, the other says what each was doing.
 
 **Recovery tiers** (try in order):
 
-1. **Roster file** — `Read scratch/<team>/roster.md` (primary).
-2. **tmux pane processes** (if roster file is missing/stale):
+1. **Injected roster / `bash scripts/roster.sh`** (AUTOMATED, primary) — the authoritative
+   harness team config: every member + live status. Injected at SessionStart, each spawn,
+   TeammateIdle, SubagentStop, and Pre/PostCompact, so it's usually already in context. This
+   is identity + liveness — the layer that used to require the manual `ps` scan.
+2. **Roster file** — `Read scratch/<team>/roster.md` for the ASSIGNMENT overlay (issue →
+   branch → task → PR) that tier 1 lacks. Pair them: roster.sh says who's alive, roster.md
+   says what each was doing.
+3. **tmux pane processes** (if the assignment file is missing/stale):
    ```bash
    tmux list-panes -t <session>:<window> -F '#{pane_index} #{pane_pid}' | while read idx pid; do
      cmd=$(ps -p $pid -o args= 2>/dev/null)
      echo "$cmd" | grep -oP '(?<=--agent-name )\S+'
    done
    ```
-3. **Palace** (if both above fail — e.g. agents already exited, panes gone):
+4. **Palace** (if all above fail — e.g. agents already exited, panes gone):
    ```bash
    mempalace search "<team-name>" --limit 5 --format compact
    ```
@@ -362,10 +422,17 @@ These belong in every agent prompt and have prevented the failure mode when foll
 3. **No `git branch -m`, no `git checkout` of another branch, no `git worktree` commands** — only the orchestrator runs those.
 4. **STOP-and-escalate on unexpected branch state** — branches "disappearing" or HEAD shifting unexpectedly means a sibling is colliding; do not try to fix locally.
 
+> **Now backed by a hook (issue #5):** `worktree-guard.sh` (PreToolUse `Edit|Write`) fires
+> *inside* each teammate session and — **only** for a `.claude/worktrees/…` cwd — `exit 2`-blocks
+> writes outside the worktree (`/tmp` + `*/scratch/*` allowed). It fails **open** on any ambiguity
+> so a bug can't brick an agent; shared-checkout spawns are exempt; kill-switch `worktree.enforce=false`.
+> Prompt discipline 1–4 stays the front line; this is the backstop.
+
 ## Agent Reuse & Context-Affinity Routing
 
 **Reuse an idle teammate before spawning a new agent — every time you can.** A fresh agent
-costs ~250-400 MB of new RAM (the 06-30 OOM was 59 procs); an idle teammate costs **zero**
+costs ~300 MB of new RAM (config's per-agent plan, growing as its context warms; the 06-30
+OOM was 59 procs); an idle teammate costs **zero**
 and already has **warm context** (better answers, fewer tokens re-reading). This is the
 cheapest OOM lever and the highest-quality routing.
 
@@ -512,7 +579,7 @@ Read-only, never touches the worktree. Use it for unfamiliar code, prior decisio
 
 The stop hook auto-saves transcripts already. The orchestrator *additionally* writes one
 **structured index-card** diary entry — short, queryable, keyed on the team name. This is
-what a future session finds, and what makes roster recovery tier 3 work.
+what a future session finds, and what makes roster recovery tier 4 work.
 
 ```bash
 source ~/.config/palace-daemon/env   # PALACE_API_KEY, PALACE_DAEMON_URL
@@ -531,10 +598,10 @@ Record: **team name, each agent + assignment, issues/PRs shipped, spec path, key
 decisions.** It's an index card, not a transcript. (Endpoint fields: `entry` required;
 `wing`, `topic`, `agent_name` optional — verified against the daemon OpenAPI 2026-06-29.)
 
-### Roster recovery tier 3
+### Roster recovery tier 4
 
-If the roster file AND tmux reconstruction both fail, `mempalace search "<team-name>"`
-returns the post-completion entry + checkpoints (see Step 6.5 recovery tiers). The
+If the injected roster, the roster file, AND tmux reconstruction all fail, `mempalace search
+"<team-name>"` returns the post-completion entry + checkpoints (see Step 6.5 recovery tiers). The
 post-completion save above is the prerequisite — without it, the team name may live only
 inside long transcript drawers that rank poorly.
 
@@ -707,9 +774,14 @@ Scouts (Nebula, Haze) file issues → fixers (Morpheus, Aurora, Lucid) pick them
 
 ### Memory-pressure degradation tiers
 
-Check `/dreamteam-status` periodically (and before each new wave). Act on whichever signal
-trips first — degrade by shedding work in a controlled order, *before* the kernel sheds it
-for you at random.
+**You will be told in-context — act, don't poll.** The plugin now gives these tiers an ACTOR:
+`team-events.sh` appends a live **ORANGE/RED tier warning** to every **TeammateIdle** and
+**SubagentStop** injection, keyed on available RAM vs the config floor (**RED** below
+`minAvailableMB`, **ORANGE** below 1.5×); TeammateIdle *also* runs a containment sweep. Before
+this the ladder was prose no orchestrator watched — the 07-01 16:06 kill grew ~10 GB unseen
+(postmortem §5.2). When a warning lands, **act** in the controlled order below. The richer
+signals (psi_full, per-agent balloon size, swap %) are **not** auto-computed — read them via
+`/dreamteam-status` when one lands or before each new wave.
 
 | Tier | Signal | Action |
 |---|---|---|
@@ -776,11 +848,22 @@ Next session: read HANDOFF.md → check tablet version vs latest tag → `gh pr 
 
 ### Crash HANDOFF (write continuously, read first on recovery)
 
-A violent OOM is *sudden* — no chance to write a handoff *after*. So the orchestrator
-refreshes `scratch/<team>/HANDOFF.md` **continuously** (every ~10 min and on every merge),
-so whatever is on disk at crash time is current. The plugin's SessionStart **crash-audit**
-hook auto-surfaces the recovery checklist when a prior session died uncleanly (a stale
-`state/active` marker that SessionEnd never cleared).
+A violent OOM is *sudden* — no chance to write a handoff *after*. Two layers now cover it:
+
+- **Automated (the plugin):** the **PreCompact** hook (`compact-guard.sh`) snapshots
+  `state/HANDOFF-auto.md` — live roster + git branch/dirty-count + worktree list + footprint
+  tail + post-compaction first-actions — *before* the context is summarized; **PostCompact**
+  then re-injects the live roster so the fresh context never starts blind (the 2026-06-29
+  failure: 15 agents running, orchestrator couldn't name one). Separately, the SessionStart
+  **crash-audit** hook surfaces the recovery checklist when a prior session died uncleanly (a
+  stale `state/active` marker SessionEnd never cleared). That marker is now written on the
+  **first spawn of ANY session** (`spawn-accounting.sh`), not just `launch-dreamteam.sh`
+  launches — so crash-audit fires for plain sessions too (the 07-01 16:06 oomd kill produced
+  no notice before this fix; see postmortem §5).
+- **Manual (the orchestrator):** you still refresh `scratch/<team>/HANDOFF.md`
+  **continuously** (every ~10 min and on every merge) for the **mission + progress narrative**
+  the auto-snapshot can't infer — what's merged, what's in flight, the next exact PR. Whatever
+  is on disk at crash time is what recovery reads.
 
 ```markdown
 # Dream Team HANDOFF — <team> — <timestamp>
@@ -833,6 +916,10 @@ For each agent worktree: `git log --oneline`, `git diff --stat`, `git status`. C
 For larger teams (or when JP opted into "ultracode"), run the **verification Workflow**
 instead of checking by hand — one read-only agent per worktree returns a structured
 green/red verdict across all of them at once (see § Ultrathink & Ultracode Integration).
+
+Prefer the **`oracle`** dream type for any verifier — **no Edit/Write in its toolset**
+(harness-enforced, not a prompt promise), so it's structurally unable to "fix" what it checks;
+it reports CONFIRMED vs PLAUSIBLE. Read-only by construction beats read-only by instruction.
 
 ### 2. Consolidate
 
@@ -901,7 +988,10 @@ the transcript; this entry is the short, searchable index that points back to it
 - **Worktrees for everything — manually created before spawn.** No exceptions. Even for 2 agents on different files. `isolation: "worktree"` silently fails for team agents and the failure mode is catastrophic (see § Mandatory manual worktree creation). Run `git worktree list` after spawn; you should see one entry per agent you created. If you didn't see it, you didn't make it.
 - **Verify, don't trust summaries** — agent messages can confabulate. Check `git diff`, compile state. Also check that the working tree of each agent's worktree is clean of files belonging to other agents (cross-contamination = wrong worktree).
 - **agent-orchestration.md** has the full voice/speech details, prompt templates, and communication patterns. Cross-reference it for speech tool usage, heartbeat patterns, and error escalation.
-- **General-purpose agents only** — they need Bash/Edit/gh. Explore/Plan agents lack these.
+- **Full-tool agent types for implementers** — team spawns need Bash/Edit/gh: use
+  `general-purpose` or a dreamteam type (`luna`/`morpheus`/`lucid`/`nebula`, all-tools).
+  `Explore`/`Plan` lack Edit/Write; read-only verification → `oracle` (§ Verify). Dream agents
+  **inherit the session model** (Fable 5; settings fallback to latest Opus) — never pin a model per agent, no Sonnet/Haiku tiers.
 - **Salvage protocol when collisions happen anyway** — if you discover agents collided in the orchestrator's worktree: (1) shut all agents down with `shutdown_request` to stop further churn, (2) `git stash push -u` with a dated label to preserve all uncommitted work, (3) inspect each commit on each branch (`git log <branch> ^origin/main`) — work may have committed before the collision and only needs pushing, (4) for unpushed work, split the stash diff by file and apply each portion in a fresh isolated worktree off origin/main, then test + commit + push + PR per agent. Do not rebase or cherry-pick across collided branches — start clean.
 
 ## Context Hygiene
