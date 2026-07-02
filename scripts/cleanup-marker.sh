@@ -10,6 +10,21 @@
 set -uo pipefail
 ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 STATE="${DREAMTEAM_STATE:-$ROOT/state}"
+
+# #10: a marker present at SessionEnd means a team ran this session AND it's a
+# clean exit (an OOM/terminal-loss never fires SessionEnd). File a completion card
+# BEFORE clearing the marker. palace-file.sh self-gates (DREAMTEAM_TEST / no daemon
+# → silent queue) and writes no stdout. No marker → no team ran → no card.
+if [ -f "$STATE/active" ]; then
+  _MTEAM="$(jq -r '.team // "?"' "$STATE/active" 2>/dev/null || echo '?')"; [ -n "$_MTEAM" ] || _MTEAM="?"
+  _COUNTS="$(bash "$ROOT/scripts/roster.sh" --json 2>/dev/null \
+    | jq -r '.counts | "\(.lead) lead, \(.active) active, \(.idle) idle, \(.dead) dead"' 2>/dev/null || true)"
+  [ -n "$_COUNTS" ] || _COUNTS="roster unavailable"
+  bash "$ROOT/scripts/palace-file.sh" --topic dreamteam \
+    "clean shutdown — team ${_MTEAM} · roster: ${_COUNTS} · $(date +%FT%T)" \
+    >/dev/null 2>&1 || true
+fi
+
 rm -f "$STATE/active"
 
 # Tear down the auto-containment scope when it holds nothing but its anchor —

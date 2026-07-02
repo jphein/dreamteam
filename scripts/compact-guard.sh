@@ -59,6 +59,21 @@ case "$EVENT" in
       echo "2. Verify roster liveness: bash \"$ROOT/scripts/roster.sh\""
       echo "3. Idle agents are REUSABLE via SendMessage — do not respawn them."
     } > "$SNAP" 2>/dev/null || true
+    # Palace card (#10): file a SHORT index card so this checkpoint is recorded in
+    # the palace even if the session is later lost — an index card, NOT the whole
+    # HANDOFF. palace-file.sh self-gates (DREAMTEAM_TEST / no daemon → silent queue)
+    # and writes no stdout, so the systemMessage below is byte-unchanged.
+    _RJSON="$(roster_json)"
+    _RTEAM="$(printf '%s' "$_RJSON" | jq -r '.team // "?"' 2>/dev/null || echo '?')"
+    _RLINE="$(printf '%s' "$_RJSON" | jq -r 'if (.agents|length)>0 then [.agents[]|"\(.name)(\(.status))"]|join(" ") else "no team" end' 2>/dev/null || echo 'n/a')"
+    _GB=""; _GD=""
+    if git -C "$CWD" rev-parse --git-dir >/dev/null 2>&1; then
+      _GB="$(git -C "$CWD" branch --show-current 2>/dev/null)"
+      _GD="$(git -C "$CWD" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+    fi
+    bash "$ROOT/scripts/palace-file.sh" --topic dreamteam \
+      "compaction checkpoint (trigger: ${TRIGGER:-?}) — team ${_RTEAM} · roster: ${_RLINE} · git ${_GB:-?}${_GD:+ +${_GD} dirty} · $TS" \
+      >/dev/null 2>&1 || true
     jq -n --arg msg "🕯 dreamteam: pre-compaction snapshot written → $SNAP (roster: $(roster_line))" \
       '{"systemMessage": $msg}'
     ;;

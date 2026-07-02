@@ -6,12 +6,20 @@
 # the live roster, containment-scope state, and a memory snapshot. Markdown
 # to stdout. Read-only; always exits 0.
 #
-# Usage: incident-report.sh [--since "24 hours ago"]
+# Usage: incident-report.sh [--since "24 hours ago"] [--save]
+#   --save  after printing, file a one-line index card into the palace (#10):
+#           first oomd kill (or "no kills"), live claude-proc count, marker state.
 set -uo pipefail
 ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 STATE="${DREAMTEAM_STATE:-$ROOT/state}"
-SINCE="24 hours ago"
-[ "${1:-}" = "--since" ] && [ -n "${2:-}" ] && SINCE="$2"
+SINCE="24 hours ago"; SAVE=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --since) [ -n "${2:-}" ] && { SINCE="$2"; shift 2; } || shift;;
+    --save)  SAVE=1; shift;;
+    *) shift;;
+  esac
+done
 
 echo "# dreamteam incident report — $(hostname) — $(date +'%F %T %Z')"
 echo ""
@@ -55,4 +63,16 @@ ps -eo rss,comm --sort=-rss 2>/dev/null | head -6 | sed 's/^/    /'
 echo "### claude procs"
 echo "    count: $(pgrep -fc 'claude/versions' 2>/dev/null || echo 0)"
 pgrep -af 'claude/versions' 2>/dev/null | grep -oE -- '--agent-name [^ ]+' | sed 's/^/    /' || true
+
+# --save (#10): file a one-line index card AFTER the report. palace-file.sh is
+# silent + self-gating, so it never disturbs the report on stdout above.
+if [ "$SAVE" -eq 1 ]; then
+  FIRSTKILL="$(printf '%s\n' "$KILLS" | grep -m1 'Killed' 2>/dev/null || true)"
+  [ -n "$FIRSTKILL" ] || FIRSTKILL="no kills since $SINCE"
+  NPROCS="$(pgrep -fc 'claude/versions' 2>/dev/null || echo 0)"; NPROCS="${NPROCS//[!0-9]/}"; NPROCS="${NPROCS:-0}"
+  MARKER="clear"; [ -f "$STATE/active" ] && MARKER="PRESENT"
+  bash "$ROOT/scripts/palace-file.sh" --topic dreamteam \
+    "incident report ($(hostname), since ${SINCE}) — oomd: $(printf '%s' "$FIRSTKILL" | tr -s ' ' | cut -c1-160) · claude procs: ${NPROCS} · crash marker: ${MARKER}" \
+    >/dev/null 2>&1 || true
+fi
 exit 0
