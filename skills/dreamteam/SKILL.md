@@ -782,8 +782,11 @@ Scouts (Nebula, Haze) file issues → fixers (Morpheus, Aurora, Lucid) pick them
 `minAvailableMB`, **ORANGE** below 1.5×); TeammateIdle *also* runs a containment sweep. A
 **🚨 SCOPE PRESSURE** signal fires when the agents scope's `MemoryCurrent` reaches ≥85% of its
 `MemoryHigh` — that one specifically predicts a scope kill (quiesce; a kill takes the whole
-team). RED and scope-pressure additionally fire a **throttled desktop notification** to JP
-(`notify-send`, max one per 10 min). Before this the ladder was prose no orchestrator watched —
+team). RED and scope-pressure additionally fire **throttled multi-channel attention** to JP —
+a desktop notification (`notify-send`) *and* one spoken Davis sentence (`speak.sh`, issue #9) —
+both gated by the SAME marker (max one attention event per 10 min; each channel independently
+best-effort, voice detached so hooks never block; muted via config `speech.enabled=false`).
+Before this the ladder was prose no orchestrator watched —
 the 07-01 16:06 kill grew ~10 GB unseen (postmortem §5.2). When a warning lands, **act** in the
 controlled order below. The richer signals (psi_full, per-agent balloon size, swap %) are
 **not** auto-computed — read them via `/dreamteam-status` when one lands or before each new wave.
