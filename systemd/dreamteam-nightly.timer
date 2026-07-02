@@ -1,0 +1,11 @@
+[Unit]
+Description=dreamteam nightly overnight gate — daily ~02:11
+
+[Timer]
+# Off the :00 mark (fleet politeness). Runs before the ~07:03 briefing.
+OnCalendar=*-*-* 02:11:00
+Persistent=true
+RandomizedDelaySec=180
+
+[Install]
+WantedBy=timers.target

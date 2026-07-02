@@ -817,7 +817,7 @@ progress** — that's what the voice line + tmux panes are for. Push message for
 200 chars, lead with what to act on** ("Merge conflict on PhoneWearBridge.kt blocks PR #1431
 — pick: rebase mine or cancel theirs?"), not a status recap.
 
-### Self-pacing & scheduling — ScheduleWakeup + CronCreate
+### Self-pacing & scheduling — ScheduleWakeup (in-session) + systemd timers (durable)
 
 - **`ScheduleWakeup`** — in-session self-pacing for the overnight loop. Schedule a health
   check so the orchestrator wakes itself even when idle (no agent message pending):
@@ -830,15 +830,13 @@ progress** — that's what the voice line + tmux panes are for. Push message for
   Use ~900s (15 min) while the team is active (stays inside the prompt-cache window enough
   for a poll); stretch to 1800s+ when genuinely idle. Pairs with the Argus 15-min cadence.
 
-- **`CronCreate`** — cross-session trigger. A nightly "start the dream team if there's open
-  work" job so overnight mode bootstraps itself:
-
-  ```
-  CronCreate({ name: "nightly-dreamteam",
-    cron_expression: "0 2 * * *",          // 02:00 daily
-    create_new_session_on_fire: true,       // fresh session each night
-    prompt: "If `gh issue list --label dream` shows open issues, run /dreamteam to work them overnight; else exit." })
-  ```
+- **Durable schedules → systemd USER timers, NOT `CronCreate`** (session-only, dies on exit —
+  can't survive a laptop close; JP's ruling: local systemd, not Claude artifacts). The pack lives
+  in `systemd/` (install: `scripts/timers-ctl.sh install`): `dreamteam-nightly.timer` (~02:11 →
+  `overnight-launch.sh` PILOT — gates on open `dream` issues, writes `state/overnight-pending.md`,
+  no auto-start until JP arms it), `dreamteam-briefing.timer` (~07:03 → `morning-briefing.sh`),
+  `dreamteam-audit.timer` (Sun ~03:07 → `self-audit.sh`). See `/dreamteam-overnight`;
+  `ScheduleWakeup` stays for *in-session* pacing.
 
 ### Stop conditions
 

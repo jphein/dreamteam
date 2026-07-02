@@ -5,7 +5,7 @@ export const meta = {
   phases: [
     { title: 'Scout', detail: 'parallel scouts, one lens each (bugs, tech-debt, perf, tests); file gh issues; dedup + prioritize' },
     { title: 'Fix', detail: 'pipeline — one worktree-isolated agent per issue: implement, commit, push, open PR' },
-    { title: 'Review', detail: 'pipeline — ultrareview each PR with 3 adversarial lenses → approve/revise/reject' },
+    { title: 'Review', detail: 'pipeline — oracle (read-only by construction) ultrareviews each PR with 3 adversarial lenses → approve/revise/reject' },
     { title: 'Ship', detail: 'barrier then SERIAL merge of approved+green PRs in safe order (no-eager-merge)' },
   ],
 }
@@ -179,7 +179,7 @@ Inspect the diff: \`gh pr diff ${fix.prNumber} --repo ${REPO}\` (open changed fi
 Lens — **${l.k}**: ${l.p}
 
 Return a verdict (approve | revise | reject), rationale, blocking[] (must-fix-before-merge), nits[].`,
-        { label: `review:${l.k}:#${fix.prNumber}`, phase: 'Review', schema: REVIEW_SCHEMA })
+        { label: `review:${l.k}:#${fix.prNumber}`, phase: 'Review', agentType: 'dreamteam:oracle', schema: REVIEW_SCHEMA })
     )).then(verdicts => {
       const valid = verdicts.filter(Boolean)
       const reject = valid.some(v => v.verdict === 'reject')

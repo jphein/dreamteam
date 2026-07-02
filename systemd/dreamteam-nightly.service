@@ -1,0 +1,20 @@
+[Unit]
+Description=dreamteam nightly overnight gate (PILOT — records pending, does not auto-start)
+Documentation=https://github.com/jphein/dreamteam
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/jp/Projects/dreamteam
+Environment=CLAUDE_PLUGIN_ROOT=/home/jp/Projects/dreamteam
+ExecStart=/usr/bin/bash /home/jp/Projects/dreamteam/scripts/overnight-launch.sh
+NoNewPrivileges=yes
+MemoryMax=512M
+# PILOT: overnight-launch.sh only gates on `dream` issues and writes
+# state/overnight-pending.md (+ one spoken line). It does NOT start a coordinator.
+# FULL ACTIVATION is JP's call after a dry cycle: replace overnight-launch.sh above
+# with launch-dreamteam.sh to actually start the overnight sweep. Legitimate from a
+# timer — a timer start is an out-of-session launch, so the nested-coordinator bug
+# (commands/dreamteam.md) does not apply here.
+# Triggered by dreamteam-nightly.timer — no [Install]; the timer owns activation.

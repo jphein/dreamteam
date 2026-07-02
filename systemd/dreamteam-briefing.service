@@ -1,0 +1,15 @@
+[Unit]
+Description=dreamteam morning briefing (overnight activity → briefing file + davis voice)
+Documentation=https://github.com/jphein/dreamteam
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Absolute paths — user units don't inherit an interactive shell's PATH/cwd.
+WorkingDirectory=/home/jp/Projects/dreamteam
+Environment=CLAUDE_PLUGIN_ROOT=/home/jp/Projects/dreamteam
+ExecStart=/usr/bin/bash /home/jp/Projects/dreamteam/scripts/morning-briefing.sh --repo /home/jp/Projects/dreamteam
+NoNewPrivileges=yes
+MemoryMax=512M
+# Triggered by dreamteam-briefing.timer — no [Install]; the timer owns activation.

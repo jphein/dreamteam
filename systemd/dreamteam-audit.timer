@@ -1,0 +1,10 @@
+[Unit]
+Description=dreamteam weekly self-audit — Sundays ~03:07
+
+[Timer]
+OnCalendar=Sun *-*-* 03:07:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

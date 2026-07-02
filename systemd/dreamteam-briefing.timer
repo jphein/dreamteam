@@ -1,0 +1,12 @@
+[Unit]
+Description=dreamteam morning briefing — daily ~07:03
+
+[Timer]
+# Off the :00 mark (fleet politeness). Reports on the ~02:11 nightly run.
+OnCalendar=*-*-* 07:03:00
+# Catch up a missed run (laptop asleep at 07:03) on next wake.
+Persistent=true
+RandomizedDelaySec=180
+
+[Install]
+WantedBy=timers.target

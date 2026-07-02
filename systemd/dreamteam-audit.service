@@ -1,0 +1,15 @@
+[Unit]
+Description=dreamteam weekly self-audit (suite + statusline/palace health + log prune)
+Documentation=https://github.com/jphein/dreamteam
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/jp/Projects/dreamteam
+Environment=CLAUDE_PLUGIN_ROOT=/home/jp/Projects/dreamteam
+ExecStart=/usr/bin/bash /home/jp/Projects/dreamteam/scripts/self-audit.sh
+NoNewPrivileges=yes
+# Runs the test suite (subshells) — a touch more headroom than the reporters.
+MemoryMax=1G
+# Triggered by dreamteam-audit.timer — no [Install]; the timer owns activation.
