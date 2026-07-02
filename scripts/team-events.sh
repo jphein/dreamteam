@@ -83,19 +83,26 @@ human_bytes() {
   }'
 }
 
-# notify_red: throttled (600s) critical desktop notification for RED / scope
-# pressure. Failure-tolerant by contract — writes no stdout (it's called inside a
-# $(…) capture), never changes the exit code, and is a no-op when notify-send is
-# absent or a notice already fired inside the window.
+# notify_red: throttled (600s) MULTI-CHANNEL critical attention for RED / scope
+# pressure — ONE marker gates ALL channels (desktop notify + voice): a single
+# attention event, do NOT double-throttle. $1 = desktop text; $2 = spoken sentence
+# (optional; one sentence, Davis voice). Failure-tolerant by contract — writes no
+# stdout (it's called inside a $(…) capture), never changes the exit code; each
+# channel is independently best-effort; voice is detached (never blocks) and is
+# suppressed under DREAMTEAM_TEST so the suite never speaks.
 notify_red() {
-  command -v notify-send >/dev/null 2>&1 || return 0
   local marker="$STATE/.last-notify" now mtime
   if [ -f "$marker" ]; then
     now=$(date +%s 2>/dev/null || printf 0)
     mtime=$(stat -c %Y "$marker" 2>/dev/null || printf 0)
-    [ $(( now - mtime )) -lt 600 ] && return 0    # still inside throttle window
+    [ $(( now - mtime )) -lt 600 ] && return 0    # inside throttle window → all channels quiet
   fi
-  notify-send -u critical "dreamteam" "$1" >/dev/null 2>&1 || true
+  # channel 1 — desktop notification (best-effort; an absent notify-send is fine)
+  command -v notify-send >/dev/null 2>&1 && notify-send -u critical "dreamteam" "$1" >/dev/null 2>&1 || true
+  # channel 2 — voice (SAME attention event; detached so it never blocks; quiet in tests)
+  if [ -z "${DREAMTEAM_TEST:-}" ] && [ -n "${2:-}" ]; then
+    bash "$ROOT/scripts/speak.sh" "$2" --voice davis >/dev/null 2>&1 || true
+  fi
   touch "$marker" 2>/dev/null || true
 }
 
@@ -120,7 +127,8 @@ tier_note() {
     if [ -n "$cur" ] && [ -n "$high" ] && [ "$high" -gt 0 ] && [ "$cur" -ge $(( high * 85 / 100 )) ]; then
       printf ' 🚨 SCOPE PRESSURE: %s of %s MemoryHigh — reclaim throttling imminent and a scope kill takes the WHOLE team; quiesce now (no new tasks, let agents finish + merge).' \
         "$(human_bytes "$cur")" "$(human_bytes "$high")"
-      notify_red "SCOPE PRESSURE: $(human_bytes "$cur")/$(human_bytes "$high") MemoryHigh — quiesce, a scope kill takes the whole team"
+      notify_red "SCOPE PRESSURE: $(human_bytes "$cur")/$(human_bytes "$high") MemoryHigh — quiesce, a scope kill takes the whole team" \
+                 "Scope pressure: team memory near the cap."
     fi
   fi
 
@@ -129,7 +137,8 @@ tier_note() {
   [ -n "$avail" ] || return 0
   if [ "$avail" -lt "$floor" ]; then
     printf ' 🚨 RED TIER: %sMiB avail < %sMiB floor — CHECKPOINT NOW (commit+push WIP), then shutdown_request newest/lowest-priority agents until pressure clears.' "$avail" "$floor"
-    notify_red "RED TIER: ${avail}MiB avail < ${floor}MiB floor — checkpoint WIP + shed agents"
+    notify_red "RED TIER: ${avail}MiB avail < ${floor}MiB floor — checkpoint WIP + shed agents" \
+               "Dreamteam red tier: ${avail} megabytes available — checkpoint and shed now."
   elif [ "$avail" -lt $(( floor * 3 / 2 )) ]; then
     printf ' ⚠ ORANGE TIER: %sMiB avail — quiesce: no new tasks, let in-flight agents finish + merge, investigate any balloon (incl. gradle/build daemons).' "$avail"
   fi
