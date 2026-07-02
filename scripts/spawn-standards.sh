@@ -56,6 +56,22 @@ teach() {
   exit 2
 }
 
+# Rule 0 — teammates require tmux (the skill's pre-flight, now enforced).
+# Outside tmux the harness cannot create panes: teammates open separate GUI
+# terminal WINDOWS instead (observed candela 2026-07-01) — no agents tab, no
+# pane wall, and each agent dies with its window. TMUX in the hook env is the
+# same signal pane-organizer trusts.
+if [ -n "$TEAM" ] && [ -z "${TMUX:-}" ]; then
+  {
+    echo "🛌 DREAMTEAM SPAWN STANDARDS — teammate spawn blocked: orchestrator is NOT inside tmux."
+    echo "   Teammates spawned here open separate GUI terminal windows (no agents tab; each"
+    echo "   dies with its window). Relaunch the orchestrator inside tmux first — skill pre-flight:"
+    echo "     tmux -L dreamteam new-session -s dream     # or any tmux session"
+    echo "   Deliberate exception? Add 'STANDARDS-EXEMPT: <reason>' to the prompt."
+  } >&2
+  exit 2
+fi
+
 # Rule 1a — teammates must be named.
 if [ -z "$NAME" ]; then
   [ -n "$TEAM" ] && teach "teammate spawned without a name (SendMessage addressing needs one)."

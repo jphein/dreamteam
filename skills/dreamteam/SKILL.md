@@ -203,9 +203,11 @@ a scope OOM-kill takes the teams and the orchestrator survives to recover them. 
 gap is a daemon detached *before* its parent was attached. (Postmortem §5.4; live-verified 16:26
 — 11 agents from two plain-session fleets attached. Disable via `scope.autoAttach=false`.)
 
-**Belt-and-braces for overnight — `launch-dreamteam.sh` (the `/dreamteam` command).** For a
-long unattended run, launch the *whole session* in its own capped scope **and** its own tmux
-server, so a runaway can't reach the host and a dead tmux server can't take JP's other work:
+**Belt-and-braces for overnight — `launch-dreamteam.sh`.** For a long unattended run, launch
+the *whole session* in its own capped scope **and** its own tmux server, so a runaway can't
+reach the host and a dead tmux server can't take JP's other work. **JP runs it from a plain
+terminal — a coordinator must NEVER exec it mid-session**: it starts a NEW session, i.e. a
+second coordinator in its own window (observed candela 2026-07-01):
 
 ```bash
 systemd-run --user --scope \

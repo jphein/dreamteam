@@ -38,6 +38,16 @@ run '{"tool_name":"Agent","tool_input":{"name":"morpheus-1400-routing","subagent
 run '{"tool_name":"Agent","tool_input":{"team_name":"t1","prompt":"x"}}' \
   && bad "unnamed teammate allowed" || { grep -q "without a name" "$TMP/err" && ok "block: unnamed teammate" || bad "wrong message: $(cat "$TMP/err")"; }
 
+# Rule 0 — teammates require tmux (candela 2026-07-01: GUI windows instead of panes)
+runenv() { printf '%s' "$2" | env "$1" DREAMTEAM_CONFIG="$ROOT/config.json" CLAUDE_PLUGIN_ROOT="$ROOT" bash "$SS" 2>"$TMP/err"; }
+runenv "-u" '{"tool_name":"Agent","tool_input":{"name":"lucid-x1","team_name":"t1","subagent_type":"dreamteam:lucid","prompt":"x"}}' 2>/dev/null
+printf '%s' '{"tool_name":"Agent","tool_input":{"name":"lucid-x1","team_name":"t1","subagent_type":"dreamteam:lucid","prompt":"x"}}' | env -u TMUX DREAMTEAM_CONFIG="$ROOT/config.json" CLAUDE_PLUGIN_ROOT="$ROOT" bash "$SS" 2>"$TMP/err" \
+  && bad "teammate outside tmux allowed" || { grep -q "NOT inside tmux" "$TMP/err" && ok "block: teammate spawn outside tmux (pre-flight enforced)" || bad "wrong message: $(cat "$TMP/err")"; }
+printf '%s' '{"tool_name":"Agent","tool_input":{"name":"lucid-x1","team_name":"t1","subagent_type":"dreamteam:lucid","prompt":"x"}}' | env TMUX=/tmp/fake,1,1 DREAMTEAM_CONFIG="$ROOT/config.json" CLAUDE_PLUGIN_ROOT="$ROOT" bash "$SS" 2>"$TMP/err" \
+  && ok "allow: teammate inside tmux" || bad "teammate inside tmux blocked: $(cat "$TMP/err")"
+printf '%s' '{"tool_name":"Agent","tool_input":{"prompt":"quick lookup no team"}}' | env -u TMUX DREAMTEAM_CONFIG="$ROOT/config.json" CLAUDE_PLUGIN_ROOT="$ROOT" bash "$SS" 2>"$TMP/err" \
+  && ok "allow: non-team utility spawn outside tmux" || bad "utility outside tmux blocked"
+
 # ALLOW: unnamed utility spawn (no team)
 run '{"tool_name":"Agent","tool_input":{"prompt":"quick lookup"}}' \
   && ok "allow: anonymous utility spawn (no team)" || bad "utility spawn blocked: $(cat "$TMP/err")"
