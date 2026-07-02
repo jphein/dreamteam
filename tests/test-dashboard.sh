@@ -106,6 +106,33 @@ else
 fi
 
 # ───────────────────────────────────────────────────────────────────────────
+# 1b. --all-teams : additive teams[] for the fleet view; single-team keys intact
+# ───────────────────────────────────────────────────────────────────────────
+echo; echo "=== --all-teams contract ==="
+ALLJSON="$TMP/all.json"
+bash "$SCRIPT" --json --all-teams >"$ALLJSON" 2>"$TMP/all.err"
+rc=$?
+[ "$rc" -eq 0 ] && ok "--all-teams exits 0" || no "--all-teams exit $rc (stderr: $(head -1 "$TMP/all.err"))"
+[ -s "$ALLJSON" ] && ok "--all-teams produced output" || no "--all-teams produced no output"
+if [ "$HAVE_JQ" -eq 1 ]; then
+  jq . "$ALLJSON" >/dev/null 2>&1 && ok "--all-teams output is valid JSON" || no "--all-teams output is NOT valid JSON"
+  jq -e 'has("teams") and (.teams|type=="array")' "$ALLJSON" >/dev/null 2>&1 \
+    && ok "--all-teams adds .teams (array)" || no "--all-teams missing .teams array"
+  # backward-compat: every single-team contract key survives alongside teams[]
+  jq -e 'has("memory") and has("agents") and has("tier") and has("timeline")' "$ALLJSON" >/dev/null 2>&1 \
+    && ok "--all-teams keeps the single-team keys (backward compatible)" || no "--all-teams dropped a single-team key"
+  # each entry carries roster.sh's shape (all() is vacuously true on an empty fleet)
+  jq -e '.teams|all(has("team") and has("counts") and (.agents|type=="array"))' "$ALLJSON" >/dev/null 2>&1 \
+    && ok "--all-teams entries have {team,counts,agents[]}" || no "--all-teams entry shape wrong"
+  # gating: plain --json (no flag) must NOT carry teams — purely additive, on demand
+  jq -e 'has("teams")|not' "$JSON" >/dev/null 2>&1 \
+    && ok "plain --json omits teams[] (flag-gated, contract unchanged)" || no "plain --json unexpectedly has teams[]"
+else
+  sk "--all-teams key/type assertions (needs jq)"
+  grep -q '"teams"' "$ALLJSON" && ok "--all-teams mentions teams (no jq)" || no "--all-teams missing teams (no jq)"
+fi
+
+# ───────────────────────────────────────────────────────────────────────────
 # 2. --inject : exit 0, markers replaced, data block non-empty, tags balance
 # ───────────────────────────────────────────────────────────────────────────
 echo; echo "=== --inject contract ==="

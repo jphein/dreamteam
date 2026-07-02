@@ -1,0 +1,28 @@
+# TEMPLATE unit — install with `scripts/dashboard-ctl.sh install`, which substitutes
+# __PLUGIN_ROOT__ and writes the materialized unit to ~/.config/systemd/user/.
+# (Committed portable: no hardcoded home path.)
+[Unit]
+Description=dreamteam mission-control dashboard (local live service)
+Documentation=https://github.com/jphein/dreamteam
+After=network.target
+
+[Service]
+Type=simple
+# __PLUGIN_ROOT__ is a TEMPLATE token — scripts/dashboard-ctl.sh install substitutes
+# this checkout's absolute plugin root when materializing the unit into the user
+# manager. Committed portable (no hardcoded home); user units need absolute paths.
+WorkingDirectory=__PLUGIN_ROOT__
+Environment=CLAUDE_PLUGIN_ROOT=__PLUGIN_ROOT__
+ExecStart=/usr/bin/python3 __PLUGIN_ROOT__/scripts/dashboard-server.py
+Restart=on-failure
+RestartSec=2
+# The server traps SIGTERM and shuts the listener down gracefully.
+KillSignal=SIGTERM
+TimeoutStopSec=5
+NoNewPrivileges=yes
+# Tiny read-only server — cap it hard, per the plugin's own memory ethos. This
+# is a soft-ish ceiling; the collector's real work is short-lived subprocesses.
+MemoryMax=256M
+
+[Install]
+WantedBy=default.target

@@ -20,6 +20,11 @@
       "enforce": "true = reuse-gate BLOCKS a fresh spawn when an idle teammate can take the task (reuse via SendMessage = zero new RAM + warm context). Override per-spawn with 'FRESH-SPAWN: <reason>' in the prompt. false = disable the gate entirely."
     }
   },
+  "dashboard": {
+    "port": 8383,
+    "host": "0.0.0.0",
+    "_notes": "Local mission-control dashboard service (issue #11). scripts/dashboard-server.py serves templates/dashboard.html + /api/data (dashboard-data.sh --json --all-teams, 5s cache) + /api/version. host defaults to 127.0.0.1 (localhost only, safe); set \"0.0.0.0\" to expose on the LAN (homelab norm — opt-in). Manage via scripts/dashboard-ctl.sh {install|start|stop|status|logs} — a systemctl --user unit (systemd/dreamteam-dashboard.service, MemoryMax 256M). Readers default to 8383/127.0.0.1 if this section is absent, per the file's baked-defaults idiom; env DREAMTEAM_DASHBOARD_PORT/HOST override at runtime."
+  },
   "spawn": {
     "enforceStandards": true,
     "_notes": "spawn-standards.sh (PreToolUse Agent|Task, first in chain) blocks teammate spawns that violate the skill's conventions: names must be <dreamname>-<task-slug> from the dream roster, and typed personas (luna/morpheus/lucid/nebula/oracle) must spawn with subagent_type dreamteam:<name>. Escape per-spawn: STANDARDS-EXEMPT: <reason> in the prompt. Added 2026-07-01 after coordinators kept drifting from the naming/type conventions."

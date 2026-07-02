@@ -1,4 +1,4 @@
-<title>Dream Team · candela</title>
+<title>Dream Team · mission control</title>
 <!-- Inline candle favicon so the file has an icon when opened standalone.
      (When published via the Artifact tool, pass favicon:"🕯️" as well.) -->
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><radialGradient id='fl' cx='0.5' cy='0.6' r='0.62'><stop offset='0' stop-color='%23fff6d0'/><stop offset='0.5' stop-color='%23f2b84e'/><stop offset='1' stop-color='%23e8743b'/></radialGradient></defs><circle cx='16' cy='9' r='9' fill='%23f2b84e' opacity='0.18'/><rect x='11.5' y='15' width='9' height='14' rx='2' fill='%23ece0bd'/><rect x='11.5' y='15' width='9' height='14' rx='2' fill='none' stroke='%23c9b585' stroke-width='0.6'/><path d='M16 3.5C12.8 8.4 13.2 11.6 16 13.4 18.8 11.6 19.2 8.4 16 3.5Z' fill='url(%23fl)'/></svg>">
@@ -25,11 +25,15 @@
                  state, url } ]
     timeline: { shipped:[{label,ref,at}], inFlight:[{label,status,url}],
                 pending:[{label}] }
+    teams  : (optional, --all-teams) [ roster.sh objects {team,counts,agents}
+                for every team with a live member ] — drives the fleet view
   ────────────────────────────────────────────────────────────────────────
-  TO REFRESH: re-run dashboard-data.sh and re-deploy. The 12s in-page loop
-  re-renders the injected snapshot and advances clocks; it cannot fetch
-  (CSP), so live numbers change only when the orchestrator re-publishes.
-  Easiest path:  dashboard-data.sh --inject <this-template>  > out.html
+  TWO WAYS TO GET DATA:
+   • LIVE (scripts/dashboard-server.py): the page fetch()es /api/data on load,
+     renders, and polls every 10s — header shows "live · updated HH:MM:SS".
+   • STANDALONE (file:// open, or Artifact --inject): if the fetch fails, the
+     page falls back to the embedded sample block below (or an injected snapshot).
+  Static path:  dashboard-data.sh --inject <this-template> > out.html
   ════════════════════════════════════════════════════════════════════════
 -->
 
@@ -197,6 +201,30 @@
   .pill.dead,.pill.failure{ color:var(--crit); background:var(--crit-bg); border-color:rgba(242,87,103,.3); }
   .pill.none{ color:var(--muted); background:var(--line-soft); border-color:var(--line); }
   .pill.none::before{ background:var(--muted); }
+  .pill.lead{ color:var(--violet); background:rgba(124,92,255,.13); border-color:rgba(124,92,255,.32); }
+
+  /* ── fleet view (multi-team, --all-teams) ─────────────────────── */
+  .fleets { display:grid; grid-template-columns:repeat(auto-fill,minmax(238px,1fr)); gap:12px; }
+  .fleet {
+    border:1px solid var(--line-soft); border-radius:var(--r-sm);
+    background:var(--ground-2); padding:11px 13px;
+  }
+  .fleet.current { border-color:var(--gold); box-shadow:inset 0 0 0 1px rgba(242,184,78,.28); }
+  .fleet .fh { display:flex; align-items:baseline; gap:9px; margin-bottom:9px; }
+  .fleet .fh .tn { font-family:var(--mono); font-size:.8rem; font-weight:600; color:var(--ink-dim);
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .fleet .fh .you { font-size:.6rem; text-transform:uppercase; letter-spacing:.08em; color:var(--gold); }
+  .fleet .fh .fc { margin-left:auto; font-size:.68rem; color:var(--muted); font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .fleet .roster { display:flex; flex-wrap:wrap; gap:5px; }
+  .fleet .roster .empty-mini { font-size:.72rem; color:var(--muted); font-style:italic; }
+
+  /* live-data indicator on the age line */
+  .ageline.live { color:var(--good); }
+  .ageline.live::before {
+    content:""; display:inline-block; width:7px; height:7px; border-radius:50%;
+    background:var(--good); margin-right:6px; vertical-align:middle;
+    box-shadow:0 0 7px var(--good); animation:breathe 2s ease-in-out infinite;
+  }
 
   /* memory budget waterfall */
   .formula { display:flex; flex-direction:column; gap:7px; font-size:.82rem; }
@@ -249,7 +277,7 @@
   .refresh-ring .bg { stroke:var(--line); } .refresh-ring .fg { stroke:var(--gold); stroke-linecap:round; transition:stroke-dashoffset 1s linear; }
 
   @media (prefers-reduced-motion: reduce) {
-    .candle .flame, .candle .halo, .tier-Red, .refresh-ring .fg { animation:none !important; transition:none !important; }
+    .candle .flame, .candle .halo, .tier-Red, .refresh-ring .fg, .ageline.live::before { animation:none !important; transition:none !important; }
   }
 </style>
 
@@ -260,7 +288,7 @@
         <span class="halo"></span><span class="flame"></span><span class="stick"></span>
       </div>
       <div class="titles">
-        <h1>Dream Team <span class="sub">· candela</span></h1>
+        <h1>Dream Team <span class="sub">· mission control</span></h1>
         <div class="meta" id="hdr-meta">host <b>—</b> · team <b>—</b></div>
       </div>
     </div>
@@ -278,6 +306,11 @@
 
   <div class="tiles" id="tiles"></div>
   <div class="waydroid-warn" id="waydroid" role="status">🜁 Waydroid is RUNNING — it eats RAM and poisons OOM victim selection. <b>waydroid session stop</b> before a large wave.</div>
+
+  <section class="card fleet-card" id="fleet-card" hidden style="margin-bottom:14px;">
+    <h2>🛰️ Fleets <span class="count" id="fleet-count"></span></h2>
+    <div class="pad"><div class="fleets" id="fleet"></div></div>
+  </section>
 
   <div class="grid">
     <div style="display:flex; flex-direction:column; gap:14px;">
@@ -321,7 +354,7 @@
       <span><i style="background:var(--warn)"></i>idle / pending</span>
       <span><i style="background:var(--crit)"></i>dead / failed</span>
     </div>
-    <div>auto-refreshes every 12s · <span class="mono">candela dreamteam</span></div>
+    <div id="foot-note">standalone · <span class="mono">dreamteam · mission control</span></div>
   </footer>
 </div>
 
@@ -350,13 +383,21 @@ window.DREAMTEAM_DATA = {
     shipped: [ { label:"v1.6.0 — Library Nocturne", ref:"v1.6.0", at:"2026-06-29T23:33:00-07:00" } ],
     inFlight: [ { label:"#1431 dreamteam dashboard", status:"CI pending", url:"#" } ],
     pending: [ { label:"Finalize dreamteam plugin conversion" }, { label:"OS OOM hardening — shipped, awaiting JP review" } ]
-  }
+  },
+  teams: [
+    { team:"session-0202ecbc", counts:{lead:1,active:2,idle:1,dead:0}, agents:[
+      { name:"Sandman", status:"lead" }, { name:"Cirrus", status:"active" },
+      { name:"Aurora", status:"idle" }, { name:"Nimbus", status:"active" } ] },
+    { team:"session-7c1e9a4d", counts:{lead:1,active:1,idle:0,dead:1}, agents:[
+      { name:"Orion", status:"lead" }, { name:"Vesper", status:"active" }, { name:"Wisp", status:"dead" } ] }
+  ]
 };
 /* DREAMTEAM_DATA:END */
 
 (function () {
   "use strict";
-  var REFRESH_MS = 12000, STALE_MS = 60000;
+  var REFRESH_MS = 12000, LIVE_MS = 10000, STALE_MS = 60000;
+  var LIVE = false;            // flips true once /api/data answers (i.e. served mode)
   var $ = function (id) { return document.getElementById(id); };
   function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];}); }
   /* allow only http(s) links (and the "#" placeholder); blocks javascript:/data: hrefs */
@@ -393,12 +434,11 @@ window.DREAMTEAM_DATA = {
       '<span class="tierbadge tier-'+tier+'"><span class="dot"></span>'+esc(tier)+
       ' tier&nbsp;<small>'+esc(tb.blurb)+'</small></span>';
 
-    // age line
-    var age = $("ageline");
-    if(gen){ var old = (Date.now()-gen)>STALE_MS;
-      age.textContent = "data "+rel(gen)+(old?" · stale — orchestrator hasn't pushed":"");
-      age.classList.toggle("stale", old);
-    } else { age.textContent="data —"; age.classList.remove("stale"); }
+    // age line + footer note (live vs standalone)
+    updateAge();
+    var fn=$("foot-note");
+    if(fn) fn.innerHTML = (LIVE ? "live · polling every 10s" : "standalone sample — start the dashboard service for live")+
+      ' · <span class="mono">dreamteam · mission control</span>';
 
     // ── tiles ──
     var avail=+M.availableMb||0, total=+M.totalMb||1;
@@ -479,6 +519,9 @@ window.DREAMTEAM_DATA = {
       tlGroup("Pending","var(--muted)", (T.pending||[]), function(x){
         return '<div class="tlitem pending"><div>'+esc(x.label)+'</div></div>'; });
 
+    // ── fleet view (multi-team; only when teams[] present) ──
+    renderFleet(D);
+
     $("clock").textContent = new Date().toLocaleTimeString();
   }
 
@@ -502,9 +545,52 @@ window.DREAMTEAM_DATA = {
     return "< "+gb(r)+" free";
   }
 
+  // ── live-data indicator (shared by render + frame) ──
+  function updateAge(){
+    var D=window.DREAMTEAM_DATA||{}, gen=parseT(D.generatedAt), age=$("ageline");
+    if(!age) return;
+    if(LIVE){
+      var oldL = gen && (Date.now()-gen)>STALE_MS;
+      var when = new Date(gen||Date.now()).toLocaleTimeString();
+      age.textContent = "live · updated "+when+(oldL?" · collector stalled":"");
+      age.classList.toggle("live", !oldL);
+      age.classList.toggle("stale", !!oldL);
+    } else {
+      age.classList.remove("live");
+      if(gen){ var old=(Date.now()-gen)>STALE_MS;
+        age.textContent = "data "+rel(gen)+(old?" · stale — sample":"");
+        age.classList.toggle("stale", old);
+      } else { age.textContent="data —"; age.classList.remove("stale"); }
+    }
+  }
+
+  // ── multi-team fleet view (div/span only; every value esc()'d, counts coerced) ──
+  function renderFleet(D){
+    var card=$("fleet-card"); if(!card) return;
+    var teams=(D&&D.teams)||[];
+    if(!teams.length){ card.hidden=true; $("fleet").innerHTML=""; $("fleet-count").textContent=""; return; }
+    card.hidden=false;
+    $("fleet-count").textContent = teams.length+" team"+(teams.length>1?"s":"");
+    $("fleet").innerHTML = teams.map(function(t){
+      var c=t.counts||{}, ags=t.agents||[];
+      var mine = !!(t.team && D.team && t.team===D.team);
+      var pills = ags.length ? ags.map(function(a){
+        var kind=String(a.status||"none").toLowerCase();
+        return '<span class="pill '+esc(kind)+'" title="'+esc(a.status||"")+'">'+esc(a.name||"?")+'</span>';
+      }).join("") : '<span class="empty-mini">no members</span>';
+      var summary=(+c.active||0)+" active · "+(+c.idle||0)+" idle"+((+c.dead||0)?" · "+(+c.dead||0)+" dead":"");
+      return '<div class="fleet'+(mine?" current":"")+'"><div class="fh">'+
+        '<span class="tn" title="'+esc(t.team||"")+'">'+esc(t.team||"—")+'</span>'+
+        (mine?'<span class="you">you</span>':"")+
+        '<span class="fc">'+esc(summary)+'</span></div>'+
+        '<div class="roster">'+pills+'</div></div>';
+    }).join("");
+  }
+
   // ── refresh loop + countdown ring ──
   var ring=$("ring-fg"), C=2*Math.PI*6; if(ring){ ring.style.strokeDasharray=C.toFixed(2); }
   var t0=Date.now();
+  function cycleMs(){ return LIVE?LIVE_MS:REFRESH_MS; }
   function tick(){
     render();
     t0=Date.now();
@@ -512,16 +598,28 @@ window.DREAMTEAM_DATA = {
   }
   function frame(){
     // advance the countdown ring + live clock between full renders
-    var elapsed=Date.now()-t0, p=Math.min(1,elapsed/REFRESH_MS);
+    var elapsed=Date.now()-t0, p=Math.min(1,elapsed/cycleMs());
     if(ring) ring.style.strokeDashoffset=(C*p).toFixed(2);
     $("clock").textContent=new Date().toLocaleTimeString();
-    var D=window.DREAMTEAM_DATA||{}, gen=parseT(D.generatedAt);
-    if(gen){ var old=(Date.now()-gen)>STALE_MS; var a=$("ageline");
-      a.textContent="data "+rel(gen)+(old?" · stale — orchestrator hasn't pushed":""); a.classList.toggle("stale",old); }
+    updateAge();
   }
-  tick();
-  setInterval(tick, REFRESH_MS);
+
+  // Pull /api/data when served by dashboard-server.py; fall back to the embedded
+  // sample when opened standalone (file://) or when the fetch is blocked / fails.
+  function fetchData(){
+    if(typeof fetch!=="function") return Promise.resolve(false);
+    return fetch("/api/data",{cache:"no-store"})
+      .then(function(r){ if(!r.ok) throw new Error("HTTP "+r.status); return r.json(); })
+      .then(function(d){ if(d&&typeof d==="object"){ window.DREAMTEAM_DATA=d; LIVE=true; return true; } return false; })
+      .catch(function(){ return false; });
+  }
+  var pollTimer=null;
+  function ensurePoll(){ if(!pollTimer) pollTimer=setInterval(function(){ fetchData().then(tick); }, LIVE_MS); }
+  function refresh(){ fetchData().then(function(ok){ tick(); if(ok) ensurePoll(); }); }
+
+  tick();                                                          // instant paint (sample / injected)
+  fetchData().then(function(ok){ tick(); if(ok) ensurePoll(); });  // upgrade to live if served
   setInterval(frame, 1000);
-  $("refresh-btn").addEventListener("click", tick);
+  $("refresh-btn").addEventListener("click", refresh);
 })();
 </script>

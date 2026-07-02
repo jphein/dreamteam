@@ -9,6 +9,9 @@
 # Usage:
 #   dashboard-data.sh                      # print the JSON snapshot (default)
 #   dashboard-data.sh --team NAME          # pin a specific team (else newest)
+#   dashboard-data.sh --json --all-teams   # add teams[] (every team with a live
+#                                          #   member) for the multi-fleet view —
+#                                          #   additive; single-team keys unchanged
 #   dashboard-data.sh --inject [TEMPLATE]  # print the full HTML with data
 #                                          #   injected between the markers
 #                                          #   (TEMPLATE defaults to the bundled
@@ -30,10 +33,11 @@ STATE="${DREAMTEAM_STATE:-$ROOT/state}"
 REPO="${DREAMTEAM_REPO:-$PWD}"
 TEMPLATE_DEFAULT="$ROOT/templates/dashboard.html"
 
-TEAM=""; MODE="json"; TEMPLATE="$TEMPLATE_DEFAULT"
+TEAM=""; MODE="json"; TEMPLATE="$TEMPLATE_DEFAULT"; ALL_TEAMS=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --team)   TEAM="${2:-}"; shift 2;;
+    --all-teams) ALL_TEAMS=1; shift;;
     --inject) MODE="inject"
               if [ "${2:-}" ] && [ "${2#--}" = "${2}" ]; then TEMPLATE="$2"; shift 2; else shift; fi;;
     --json)   MODE="json"; shift;;
@@ -43,7 +47,8 @@ while [ $# -gt 0 ]; do
 done
 
 export DT_ROOT="$ROOT" DT_CFG="$CFG" DT_TEAMS_DIR="$TEAMS_DIR" DT_STATE="$STATE" \
-       DT_REPO="$REPO" DT_TEAM="$TEAM" DT_MODE="$MODE" DT_TEMPLATE="$TEMPLATE"
+       DT_REPO="$REPO" DT_TEAM="$TEAM" DT_MODE="$MODE" DT_TEMPLATE="$TEMPLATE" \
+       DT_ALL_TEAMS="$ALL_TEAMS"
 
 python3 - <<'PY'
 import json, os, re, glob, socket, subprocess
@@ -269,6 +274,39 @@ out = {
     "prs": prs,
     "timeline": {"shipped": shipped, "inFlight": inflight, "pending": pending},
 }
+
+# ── all-teams fleet view (--all-teams) ──────────────────────────────────────
+# Every team config under TEAMS_DIR with ≥1 LIVE member (active|idle per
+# roster.sh), each entry = roster.sh's own {team,counts,agents} object. Purely
+# additive: the single-team fields above are unchanged, so the --json contract
+# (and test-dashboard.sh) stays green whether or not --all-teams is passed.
+if os.environ.get("DT_ALL_TEAMS"):
+    # Forking roster.sh for EVERY team config (each takes its own full `ps`) is
+    # 4–6s once dozens of stale session configs pile up. Take ONE `ps` snapshot
+    # here and cheaply pre-filter on the SAME signal roster.sh uses — an
+    # `agent-id <id>` token in a live process's args — so only teams with a live
+    # member get the authoritative roster.sh call. roster.sh stays the single
+    # source of truth for the counts/status we actually emit.
+    snap = run(["ps", "-ww", "-eo", "args"])
+    fleets = []
+    for cfgp in sorted(glob.glob(os.path.join(TEAMS_DIR, "*", "config.json"))):
+        tname = os.path.basename(os.path.dirname(cfgp))
+        try:
+            members = json.load(open(cfgp)).get("members", [])
+        except Exception:
+            continue
+        if not any(m.get("agentId") and ("agent-id %s" % m.get("agentId")) in snap
+                   for m in members if m.get("agentType") != "team-lead"):
+            continue                       # no live member in the ps snapshot → skip the fork
+        try:
+            r = json.loads(run(["bash", os.path.join(ROOT, "scripts", "roster.sh"),
+                                 "--team", tname, "--json"]) or "{}")
+        except Exception:
+            continue
+        c = r.get("counts") or {}
+        if (c.get("active", 0) or 0) + (c.get("idle", 0) or 0) >= 1:
+            fleets.append(r)
+    out["teams"] = fleets
 
 if MODE == "inject":
     try:
