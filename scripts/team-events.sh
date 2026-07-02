@@ -32,6 +32,11 @@ EVENT="$(jf '.hook_event_name')"
 # Best-effort identity — field names differ per event; take the first that exists.
 WHO="$(jf '.teammate_name // .agent_name // .agent_id // .name // .subagent_type // .tool_input.name')"
 PATHISH="$(jf '.worktree_path // .path // .cwd')"
+# Per-session roster (#4): the team THIS event belongs to. Without it roster.sh
+# defaults to the mtime-newest team config, which on a multi-fleet day injects
+# the WRONG team's roster into the session; TeammateIdle/SubagentStop carry
+# team_name (confirmed via events.log capture), so thread it through.
+TEAM="$(jf '.team_name')"
 KEYS="$(printf '%s' "$IN" | jq -c 'keys' 2>/dev/null || echo '[]')"
 TS=$(date +%FT%T)
 
@@ -51,8 +56,47 @@ jq -cn --arg ts "$TS" --arg ev "$EVENT" --arg who "${WHO:-}" --arg path "${PATHI
       >> "$EVLOG" 2>/dev/null || true
 
 roster_line() {
-  bash "$ROOT/scripts/roster.sh" --json 2>/dev/null \
+  bash "$ROOT/scripts/roster.sh" ${TEAM:+--team "$TEAM"} --json 2>/dev/null \
     | jq -r 'if (.agents|length) > 0 then [.agents[] | "\(.name)(\(.status))"] | join(" ") else "" end' 2>/dev/null || true
+}
+
+# scope_high_bytes: config .scope.memoryHigh ("20G"/"512M"/bare bytes) → bytes on
+# stdout; empty when unset/unparseable (caller then skips the scope check).
+scope_high_bytes() {
+  local v n
+  v=$(jq -r '.scope.memoryHigh // empty' "${1:?}" 2>/dev/null)
+  n=${v%[GgMm]}                                   # strip a trailing unit if any
+  case "$n" in *[!0-9]*|'') return 0;; esac       # non-integer mantissa → skip
+  case "$v" in
+    *[Gg]) printf '%s' $(( n * 1073741824 ));;
+    *[Mm]) printf '%s' $(( n * 1048576 ));;
+    *)     printf '%s' "$n";;                      # already bytes
+  esac
+}
+
+# human_bytes: bytes → compact human string for the message (e.g. 18.0G / 512M).
+human_bytes() {
+  awk -v b="${1:-0}" 'BEGIN{
+    if (b+0 >= 1073741824) printf "%.1fG", b/1073741824;
+    else if (b+0 >= 1048576) printf "%.0fM", b/1048576;
+    else printf "%dB", b+0;
+  }'
+}
+
+# notify_red: throttled (600s) critical desktop notification for RED / scope
+# pressure. Failure-tolerant by contract — writes no stdout (it's called inside a
+# $(…) capture), never changes the exit code, and is a no-op when notify-send is
+# absent or a notice already fired inside the window.
+notify_red() {
+  command -v notify-send >/dev/null 2>&1 || return 0
+  local marker="$STATE/.last-notify" now mtime
+  if [ -f "$marker" ]; then
+    now=$(date +%s 2>/dev/null || printf 0)
+    mtime=$(stat -c %Y "$marker" 2>/dev/null || printf 0)
+    [ $(( now - mtime )) -lt 600 ] && return 0    # still inside throttle window
+  fi
+  notify-send -u critical "dreamteam" "$1" >/dev/null 2>&1 || true
+  touch "$marker" 2>/dev/null || true
 }
 
 # Memory-tier check — gives the skill's degradation tiers an ACTOR. Before the
@@ -61,13 +105,31 @@ roster_line() {
 # TeammateIdle/SubagentStop fire constantly during fleet work, so piggybacking
 # the tier warning here means every active orchestrator hears it in-context.
 tier_note() {
-  local avail floor cfg
+  local avail floor cfg cur high
   cfg="${DREAMTEAM_CONFIG:-$ROOT/config.json}"
+
+  # Scope-pressure tier (#3): the dreamteam-agents.scope cgroup is the REAL
+  # containment boundary — MemoryHigh throttles reclaim, MemoryMax hard-kills the
+  # WHOLE team's cgroup. The host can look healthy while the scope sits at its
+  # High water mark, so check the scope first and independently — this is additive
+  # to the host tiers below (both can fire in one message).
+  if systemctl --user is-active --quiet dreamteam-agents.scope 2>/dev/null; then
+    cur=$(systemctl --user show dreamteam-agents.scope -p MemoryCurrent --value 2>/dev/null)
+    cur=${cur//[!0-9]/}                            # "[not set]"/"infinity" → empty
+    high=$(scope_high_bytes "$cfg")
+    if [ -n "$cur" ] && [ -n "$high" ] && [ "$high" -gt 0 ] && [ "$cur" -ge $(( high * 85 / 100 )) ]; then
+      printf ' 🚨 SCOPE PRESSURE: %s of %s MemoryHigh — reclaim throttling imminent and a scope kill takes the WHOLE team; quiesce now (no new tasks, let agents finish + merge).' \
+        "$(human_bytes "$cur")" "$(human_bytes "$high")"
+      notify_red "SCOPE PRESSURE: $(human_bytes "$cur")/$(human_bytes "$high") MemoryHigh — quiesce, a scope kill takes the whole team"
+    fi
+  fi
+
   floor=$(jq -r '.memory.minAvailableMB // 8000' "$cfg" 2>/dev/null); floor=${floor//[!0-9]/}; floor=${floor:-8000}
   avail=$(free -m 2>/dev/null | awk '/^Mem:/{print $7}'); avail=${avail//[!0-9]/}
   [ -n "$avail" ] || return 0
   if [ "$avail" -lt "$floor" ]; then
     printf ' 🚨 RED TIER: %sMiB avail < %sMiB floor — CHECKPOINT NOW (commit+push WIP), then shutdown_request newest/lowest-priority agents until pressure clears.' "$avail" "$floor"
+    notify_red "RED TIER: ${avail}MiB avail < ${floor}MiB floor — checkpoint WIP + shed agents"
   elif [ "$avail" -lt $(( floor * 3 / 2 )) ]; then
     printf ' ⚠ ORANGE TIER: %sMiB avail — quiesce: no new tasks, let in-flight agents finish + merge, investigate any balloon (incl. gradle/build daemons).' "$avail"
   fi
@@ -79,6 +141,13 @@ case "$EVENT" in
     # agent that slipped past its spawn-time attach gets caught here (cheap —
     # scope-attach only busctl's pids not already in the scope).
     bash "$ROOT/scripts/scope-attach.sh" 2>/dev/null || true
+    # Pane sweep: the harness sometimes creates an agent's tmux pane AFTER the
+    # spawn's PostToolUse fires, so it stayed in the orchestrator window ("not
+    # making the agents tab"). By idle time the pane exists → sweep it here.
+    # </dev/null: the hook's stdin was already consumed and pane-organizer reads
+    # stdin. DREAMTEAM_TEST guard: the suite runs inside a live tmux, so skip the
+    # sweep under test to never reorganize JP's / a sibling's real panes.
+    [ -n "${DREAMTEAM_TEST:-}" ] || bash "$ROOT/scripts/pane-organizer.sh" --sweep </dev/null 2>/dev/null || true
     R="$(roster_line)"; T="$(tier_note)"
     jq -n --arg msg "🕯 dreamteam: ${WHO:-a teammate} is IDLE — reusable via SendMessage (zero new RAM, warm context). Roster: ${R:-n/a}${T}" \
       '{"systemMessage": $msg}'

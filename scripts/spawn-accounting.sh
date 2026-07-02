@@ -48,7 +48,11 @@ bash "$ROOT/scripts/scope-attach.sh" 2>/dev/null || true
 # Build roster summary from the AUTHORITATIVE harness team config (via roster.sh)
 # — every member with its TRUE status, not just spawns this session saw. roster.sh
 # always exits 0; if it can't resolve a team, .agents is empty → blank line.
-ROSTER_LINE=$(bash "$ROOT/scripts/roster.sh" --json 2>/dev/null \
+# Per-session roster (#4): thread THIS spawn's team so a multi-fleet day doesn't
+# inject the mtime-newest team's roster. tool_input.team_name is the spawn arg;
+# .team_name is the fallback if the harness lifts it to the payload's top level.
+TEAM=$(printf '%s' "$INPUT" | jq -r '.tool_input.team_name // .team_name // empty' 2>/dev/null || true)
+ROSTER_LINE=$(bash "$ROOT/scripts/roster.sh" ${TEAM:+--team "$TEAM"} --json 2>/dev/null \
   | jq -r 'if (.agents|length) > 0 then [.agents[] | "\(.name)(\(.status))"] | join(" ") else "" end' 2>/dev/null || true)
 
 # Emit to stdout as JSON — PostToolUse hooks use systemMessage to inject into Claude's context

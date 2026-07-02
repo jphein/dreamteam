@@ -22,9 +22,13 @@ jf() { printf '%s' "$IN" | jq -r "$1 // empty" 2>/dev/null || true; }
 EVENT="$(jf '.hook_event_name')"
 TRIGGER="$(jf '.trigger // .matcher')"
 CWD="$(jf '.cwd')"; [ -n "$CWD" ] || CWD="$PWD"
+# Per-session roster (#4): PreCompact/PostCompact MAY carry team_name — thread it
+# so the snapshot + re-arm show THIS session's team, not the mtime-newest one.
+# Often absent on compaction payloads → empty → current newest-team fallback.
+TEAM="$(jf '.team_name')"
 TS=$(date +%FT%T)
 
-roster_json() { bash "$ROOT/scripts/roster.sh" --json 2>/dev/null || true; }
+roster_json() { bash "$ROOT/scripts/roster.sh" ${TEAM:+--team "$TEAM"} --json 2>/dev/null || true; }
 roster_line() {
   roster_json | jq -r 'if (.agents|length) > 0 then [.agents[] | "\(.name)(\(.status))"] | join(" ") else "no team" end' 2>/dev/null || echo "n/a"
 }
@@ -36,7 +40,7 @@ case "$EVENT" in
       echo "Updated: $TS   trigger: ${TRIGGER:-?}   cwd: $CWD"
       echo ""
       echo "## Roster (authoritative, at snapshot time)"
-      bash "$ROOT/scripts/roster.sh" 2>/dev/null || echo "(roster unavailable)"
+      bash "$ROOT/scripts/roster.sh" ${TEAM:+--team "$TEAM"} 2>/dev/null || echo "(roster unavailable)"
       echo ""
       echo "## Git"
       if git -C "$CWD" rev-parse --git-dir >/dev/null 2>&1; then

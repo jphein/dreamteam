@@ -23,7 +23,25 @@ EOF
 mkdir -p "$TMP/bin"
 printf '#!/bin/bash\necho "Mem: 32000 10000 2000 100 3000 ${FAKE_AVAIL:-20000}"\n' > "$TMP/bin/free"
 chmod +x "$TMP/bin/free"
-run_ev() { DREAMTEAM_STATE="$TMP/state" DREAMTEAM_TEAMS_DIR="$TMP/teams" CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/team-events.sh"; }
+# Stub `systemctl` so the scope-pressure tier is deterministic. Default: the
+# agents scope is INACTIVE (is-active exits 3), so EVERY existing tier test stays
+# green (scope check short-circuits). FAKE_SCOPE=pressure flips is-active→active
+# and makes `show … MemoryCurrent` report FAKE_SCOPE_CUR (default 18G) — enough to
+# cross 85% of the config's 20G MemoryHigh.
+cat > "$TMP/bin/systemctl" <<'EOF'
+#!/bin/bash
+case "$*" in
+  *is-active*)          [ "${FAKE_SCOPE:-}" = pressure ] && exit 0 || exit 3 ;;
+  *show*MemoryCurrent*) echo "${FAKE_SCOPE_CUR:-19327352832}" ;;
+  *)                    exit 0 ;;
+esac
+EOF
+chmod +x "$TMP/bin/systemctl"
+# Stub `notify-send` → record each invocation to a log instead of hitting the real
+# desktop bus (RED/scope tier events call it; tests must not spam JP's desktop).
+printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "%s/notify.log"\n' "$TMP" > "$TMP/bin/notify-send"
+chmod +x "$TMP/bin/notify-send"
+run_ev() { DREAMTEAM_TEST=1 DREAMTEAM_STATE="$TMP/state" DREAMTEAM_TEAMS_DIR="$TMP/teams" CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/team-events.sh"; }
 run_cg() { DREAMTEAM_STATE="$TMP/state" DREAMTEAM_TEAMS_DIR="$TMP/teams" CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/compact-guard.sh"; }
 
 for f in team-events compact-guard subagent-statusline; do
@@ -101,6 +119,65 @@ import json,sys
 h=json.load(open('$ROOT/hooks/hooks.json'))['hooks']
 sys.exit(0 if '$ev' in h else 1)" && ok "hooks.json wires $ev" || bad "hooks.json wires $ev"
 done
+
+# team-events: scope-pressure tier (#3) — additive to the host tiers, driven by
+# the dreamteam-agents.scope cgroup (systemctl stub). Default scope is INACTIVE.
+OUT=$(echo '{"hook_event_name":"TeammateIdle","teammate_name":"luna"}' | run_ev)
+case "$OUT" in *"SCOPE PRESSURE"*) bad "scope inactive: no scope-pressure expected ($OUT)";; *) ok "scope inactive → no scope-pressure line";; esac
+# Active at 18G current vs 20G MemoryHigh (90% ≥ 85%) → SCOPE PRESSURE fires, even
+# though host memory is green — i.e. surfaced independently of the host tier.
+OUT=$(echo '{"hook_event_name":"TeammateIdle","teammate_name":"luna"}' | FAKE_SCOPE=pressure run_ev)
+case "$OUT" in *"SCOPE PRESSURE"*"MemoryHigh"*) ok "scope ≥85% of MemoryHigh → SCOPE PRESSURE warning";; *) bad "scope pressure ($OUT)";; esac
+# Non-vacuous threshold control: 16G current vs 20G high = 80% < 85% → silent.
+OUT=$(echo '{"hook_event_name":"TeammateIdle","teammate_name":"luna"}' | FAKE_SCOPE=pressure FAKE_SCOPE_CUR=17179869184 run_ev)
+case "$OUT" in *"SCOPE PRESSURE"*) bad "scope 80% < 85%: should NOT warn ($OUT)";; *) ok "scope 80% < threshold → silent (threshold non-vacuous)";; esac
+# Additive: scope pressure and a RED host tier co-fire in the SAME message.
+OUT=$(echo '{"hook_event_name":"SubagentStop","agent_id":"x"}' | FAKE_SCOPE=pressure FAKE_AVAIL=5000 run_ev)
+case "$OUT" in *"SCOPE PRESSURE"*"RED TIER"*|*"RED TIER"*"SCOPE PRESSURE"*) ok "scope pressure + RED host tier are additive";; *) bad "additive tiers ($OUT)";; esac
+
+# team-events: RED-tier desktop notification (#3), throttled via state/.last-notify
+rm -f "$TMP/state/.last-notify" "$TMP/notify.log"
+echo '{"hook_event_name":"SubagentStop","agent_id":"x"}' | FAKE_AVAIL=5000 run_ev >/dev/null
+[ -f "$TMP/state/.last-notify" ] && ok "RED tier touches the notify throttle marker" || bad "notify marker not written"
+{ [ -f "$TMP/notify.log" ] && [ "$(wc -l < "$TMP/notify.log")" -eq 1 ]; } && ok "RED tier fires notify-send once" || bad "RED notify count ($(cat "$TMP/notify.log" 2>/dev/null))"
+# Immediate second RED event → throttled (marker < 600s old): still one invocation.
+echo '{"hook_event_name":"SubagentStop","agent_id":"x"}' | FAKE_AVAIL=5000 run_ev >/dev/null
+[ "$(wc -l < "$TMP/notify.log")" -eq 1 ] && ok "second RED within 600s is throttled (no re-notify)" || bad "throttle failed ($(cat "$TMP/notify.log"))"
+# Green host memory → no notification at all (notify is RED/scope only).
+rm -f "$TMP/state/.last-notify" "$TMP/notify.log"
+echo '{"hook_event_name":"TeammateIdle","teammate_name":"luna"}' | run_ev >/dev/null
+[ ! -f "$TMP/notify.log" ] && ok "green tier does not notify" || bad "green notified unexpectedly ($(cat "$TMP/notify.log"))"
+
+# team-events + spawn-accounting + compact-guard: per-session roster threading (#4).
+# A DECOY team, made mtime-NEWEST with a DIFFERENT lead name, simulates a
+# multi-fleet day. A no-team call must resolve the decoy (proving it IS newest);
+# a call carrying team_name must resolve THAT team instead — proving --team is
+# threaded past roster.sh's newest-config default.
+mkdir -p "$TMP/teams/decoytm"
+cat > "$TMP/teams/decoytm/config.json" <<'EOF'
+{"members":[
+  {"name":"decoy-lead","agentType":"team-lead","agentId":"decoy-x","cwd":"/tmp"}
+]}
+EOF
+touch "$TMP/teams/decoytm/config.json"   # bump mtime → decoy is the newest config
+# Control: no team_name → newest (decoy) resolves. Makes the next check non-vacuous.
+OUT=$(echo '{"hook_event_name":"TeammateIdle","teammate_name":"luna"}' | run_ev)
+case "$OUT" in *"decoy-lead(lead)"*) ok "no team_name → mtime-newest (decoy) roster (control)";; *) bad "decoy-newest control ($OUT)";; esac
+# The #4 fix (team-events): team_name routes past the newest-fallback to faketeam.
+OUT=$(echo '{"hook_event_name":"TeammateIdle","teammate_name":"luna","team_name":"faketeam"}' | run_ev)
+case "$OUT" in
+  *"team-lead(lead)"*) case "$OUT" in *decoy-lead*) bad "team-events threaded team leaked decoy ($OUT)";; *) ok "team-events: team_name:faketeam → faketeam roster despite newer decoy";; esac ;;
+  *) bad "team-events team threading ($OUT)";;
+esac
+# The #4 fix (spawn-accounting): tool_input.team_name routes past newest-fallback.
+OUT=$(echo '{"tool_name":"Agent","tool_input":{"name":"t","team_name":"faketeam"},"cwd":"/tmp/proj"}' | DREAMTEAM_STATE="$TMP/state" DREAMTEAM_TEAMS_DIR="$TMP/teams" CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/spawn-accounting.sh")
+case "$OUT" in
+  *"team-lead(lead)"*) case "$OUT" in *decoy-lead*) bad "spawn-accounting leaked decoy ($OUT)";; *) ok "spawn-accounting: tool_input.team_name:faketeam → faketeam roster";; esac ;;
+  *) bad "spawn-accounting team threading ($OUT)";;
+esac
+# The #4 fix (compact-guard): team_name in a PreCompact payload routes the snapshot.
+echo '{"hook_event_name":"PreCompact","trigger":"manual","cwd":"'"$ROOT"'","team_name":"faketeam"}' | run_cg >/dev/null
+{ grep -q "team-lead" "$TMP/state/HANDOFF-auto.md" && ! grep -q "decoy-lead" "$TMP/state/HANDOFF-auto.md"; } && ok "compact-guard: team_name routes snapshot roster to faketeam" || bad "compact-guard team threading ($(grep -E 'lead' "$TMP/state/HANDOFF-auto.md" 2>/dev/null))"
 
 echo "────────────────────────────────────────"
 echo "SUMMARY: $PASS passed, $FAIL failed, $((PASS+FAIL)) total"
