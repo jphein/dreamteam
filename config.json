@@ -20,6 +20,14 @@
       "enforce": "true = reuse-gate BLOCKS a fresh spawn when an idle teammate can take the task (reuse via SendMessage = zero new RAM + warm context). Override per-spawn with 'FRESH-SPAWN: <reason>' in the prompt. false = disable the gate entirely."
     }
   },
+  "spawn": {
+    "enforceStandards": true,
+    "_notes": "spawn-standards.sh (PreToolUse Agent|Task, first in chain) blocks teammate spawns that violate the skill's conventions: names must be <dreamname>-<task-slug> from the dream roster, and typed personas (luna/morpheus/lucid/nebula/oracle) must spawn with subagent_type dreamteam:<name>. Escape per-spawn: STANDARDS-EXEMPT: <reason> in the prompt. Added 2026-07-01 after coordinators kept drifting from the naming/type conventions."
+  },
+  "worktree": {
+    "enforce": true,
+    "_notes": "worktree-guard.sh (PreToolUse Edit|Write in TEAMMATE sessions) blocks writes outside an agent's assigned worktree (its team-config cwd) when that cwd is under .claude/worktrees/. Shared-checkout spawns (cwd not a worktree) are unaffected. Escape: orchestrator sets enforce=false, or the agent escalates via SendMessage. Added 2026-07-01 — converts the skill's #1 failure mode (2 collision incidents) from prompt discipline to harness law."
+  },
   "scope": {
     "memoryHigh": "20G",
     "memoryMax": "24G",

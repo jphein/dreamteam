@@ -7,6 +7,11 @@
         "hooks": [
           {
             "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/spawn-standards.sh\"",
+            "timeout": 3000
+          },
+          {
+            "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/reuse-gate.sh\"",
             "timeout": 6000
           },
@@ -24,6 +29,16 @@
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/sendmessage-reminder.sh\"",
             "timeout": 3000
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/worktree-guard.sh\"",
+            "timeout": 4000
           }
         ]
       }
