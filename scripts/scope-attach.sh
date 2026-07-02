@@ -24,7 +24,11 @@ set -uo pipefail
 ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 CFG="${DREAMTEAM_CONFIG:-$ROOT/config.json}"
 STATE="${DREAMTEAM_STATE:-$ROOT/state}"
-SCOPE="dreamteam-agents"
+# Seam: tests override the scope name — a teammate session running INSIDE the
+# real scope makes its child fixtures inherit the cgroup, so the idempotency
+# guard below would correctly-but-unhelpfully skip them (found by lucid,
+# 2026-07-01: containment worked too well for the test to be hermetic).
+SCOPE="${DREAMTEAM_SCOPE_NAME:-dreamteam-agents}"
 
 # Master switch (default on). Disable via config: scope.autoAttach=false
 # NOTE: not `// true` — jq's // treats false as empty, which would make the

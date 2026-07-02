@@ -50,7 +50,10 @@ echo "$AGENT_PID"
 echo "$PLAIN_PID"
 EOF
 chmod +x "$TMP/bin/"*
-run() { PATH="$TMP/bin:$PATH" DREAMTEAM_STATE="$TMP/state" DREAMTEAM_CONFIG="${1:-$ROOT/config.json}" CLAUDE_PLUGIN_ROOT="$ROOT" bash "$SA"; }
+# DREAMTEAM_SCOPE_NAME: fake scope so fixtures that INHERIT the real
+# dreamteam-agents.scope cgroup (this test may run inside a contained teammate
+# session) never trip the idempotency skip — lucid root-caused this 2026-07-01.
+run() { PATH="$TMP/bin:$PATH" DREAMTEAM_SCOPE_NAME="dreamteam-testscope-$$" DREAMTEAM_STATE="$TMP/state" DREAMTEAM_CONFIG="${1:-$ROOT/config.json}" CLAUDE_PLUGIN_ROOT="$ROOT" bash "$SA"; }
 
 bash -n "$SA" && ok "bash -n scope-attach.sh" || bad "bash -n scope-attach.sh"
 
@@ -58,10 +61,10 @@ bash -n "$SA" && ok "bash -n scope-attach.sh" || bad "bash -n scope-attach.sh"
 : > "$CALLS"; rm -f "$TMP/scope-up"
 run; RC=$?
 [ "$RC" -eq 0 ] && ok "exits 0" || bad "exit $RC"
-grep -q 'systemd-run --user --scope --unit=dreamteam-agents' "$CALLS" && ok "creates capped scope when absent" || bad "scope creation"
+grep -q "systemd-run --user --scope --unit=dreamteam-testscope-$$" "$CALLS" && ok "creates capped scope when absent" || bad "scope creation"
 grep -q 'MemoryMax=24G' "$CALLS" && ok "scope uses config MemoryMax" || bad "config caps"
 grep -q 'Delegate=yes' "$CALLS" && ok "scope created with Delegate=yes (AttachProcessesToUnit requires it)" || bad "Delegate=yes missing — attach will fail on non-delegated units"
-grep -q "AttachProcessesToUnit ssau dreamteam-agents.scope / 1 $AGENT_PID" "$CALLS" && ok "attaches the --agent-id proc" || bad "agent attach"
+grep -q "AttachProcessesToUnit ssau dreamteam-testscope-$$.scope / 1 $AGENT_PID" "$CALLS" && ok "attaches the --agent-id proc" || bad "agent attach"
 grep -q "1 $PLAIN_PID" "$CALLS" && bad "must NOT attach non-agent proc" || ok "main-session proc left outside (orchestrator survives)"
 grep -q 'scope-attach: 1 agent' "$TMP/state/dreamteam.log" && ok "attach logged" || bad "attach log"
 
