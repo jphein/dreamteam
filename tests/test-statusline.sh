@@ -24,10 +24,14 @@ bash -n "$SL" && ok "bash -n statusline.sh" || bad "bash -n statusline.sh"
 # 1. Payload effort wins; model + ctx rendered. REAL shape: effort is an OBJECT
 # ({"level":"max"} — live-verified 2026-07-01; a raw jq -r of it once rendered
 # the statusline as three lines).
-OUT=$(echo '{"model":{"display_name":"Fable 5"},"effort":{"level":"max"},"context_window_tokens_used":420000,"context_window_total_tokens":1000000}' | run)
+OUT=$(echo '{"model":{"display_name":"Fable 5"},"effort":{"level":"max"},"context_window":{"used_percentage":23,"total_input_tokens":229000,"context_window_size":1000000},"rate_limits":{"five_hour":{"used_percentage":34},"seven_day":{"used_percentage":16}}}' | run)
 case "$OUT" in *"Fable 5"*) ok "model from payload";; *) bad "model from payload ($OUT)";; esac
 case "$OUT" in *"effort:max"*) ok "effort from payload object (.effort.level)";; *) bad "effort from payload object ($OUT)";; esac
-case "$OUT" in *"ctx 42%"*) ok "ctx% computed (420k/1M=42%)";; *) bad "ctx% computed ($OUT)";; esac
+case "$OUT" in *"ctx 23% (229k/1M)"*) ok "ctx from nested context_window (pct + counts)";; *) bad "nested ctx ($OUT)";; esac
+case "$OUT" in *"5h:34% 7d:16%"*) ok "rate limits rendered (5h/7d)";; *) bad "rate limits ($OUT)";; esac
+# legacy flat keys still work (pre-drift builds)
+OUT=$(echo '{"model":{"display_name":"Fable 5"},"effort":{"level":"max"},"context_window_tokens_used":420000,"context_window_total_tokens":1000000}' | run)
+case "$OUT" in *"ctx 42%"*) ok "legacy flat ctx keys still computed (42%)";; *) bad "legacy ctx fallback ($OUT)";; esac
 [ "$(printf '%s\n' "$OUT" | wc -l)" -eq 1 ] && ok "single-line output (no pretty-printed object)" || bad "single-line output (got: $OUT)"
 OUT=$(echo '{"model":{"display_name":"Fable 5"},"effort":"high"}' | run)
 case "$OUT" in *"effort:high"*) ok "effort as plain string still accepted";; *) bad "effort as plain string ($OUT)";; esac

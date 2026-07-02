@@ -17,6 +17,11 @@ ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 IN="$(cat 2>/dev/null || true)"
 jf() { printf '%s' "$IN" | jq -r "$1 // empty" 2>/dev/null || true; }
 
+# Payload field discovery: `touch state/statusline-debug` → next render dumps
+# its stdin to state/statusline-payload.json (payload shape is undocumented
+# and has drifted before — the .effort object, 2026-07-01).
+[ -f "$ROOT/state/statusline-debug" ] && printf '%s' "$IN" > "$ROOT/state/statusline-payload.json" 2>/dev/null
+
 MODEL="$(jf '.model.display_name')"
 [ -n "$MODEL" ] || MODEL="$(jf '.model.id')"
 MODEL="${MODEL:-?}"
@@ -34,13 +39,36 @@ fi
 [ -n "$EFF" ] || EFF=$(jq -r '.effortLevel // empty' "$HOME/.claude/settings.json" 2>/dev/null) || true
 EFF="${EFF:-default}"
 
-# Context % — same math as the previous inline-jq statusline this replaces.
+# Context tokens — the payload drifted (2026-07-01, live-captured): the old flat
+# context_window_tokens_used/context_window_total_tokens keys became a nested
+# .context_window object with a pre-computed used_percentage. Prefer the nested
+# form, keep the flat keys as fallback for older builds.
+fmt_tok() {  # 200964 → 201k · 1000000 → 1M
+  local n=$1
+  if [ "$n" -ge 1000000 ]; then printf '%dM' $(( (n + 500000) / 1000000 ))
+  else printf '%dk' $(( (n + 500) / 1000 )); fi
+}
 CTX=""
-USED="$(jf '.context_window_tokens_used')"
-TOTAL="$(jf '.context_window_total_tokens')"
-case "$USED$TOTAL" in *[!0-9]*|"") ;; *)
-  [ "$TOTAL" -gt 0 ] && CTX=" · ctx $(( USED * 100 / TOTAL ))%"
-;; esac
+PCT="$(jf '.context_window.used_percentage')"; PCT=${PCT//[!0-9]/}
+if [ -n "$PCT" ]; then
+  USED="$(jf '.context_window.total_input_tokens')"; USED=${USED//[!0-9]/}
+  SIZE="$(jf '.context_window.context_window_size')"; SIZE=${SIZE//[!0-9]/}
+  DETAIL=""
+  [ -n "$USED" ] && [ -n "$SIZE" ] && [ "$SIZE" -gt 0 ] && DETAIL=" ($(fmt_tok "$USED")/$(fmt_tok "$SIZE"))"
+  CTX=" · ctx ${PCT}%${DETAIL}"
+else
+  USED="$(jf '.context_window_tokens_used')"
+  TOTAL="$(jf '.context_window_total_tokens')"
+  case "$USED$TOTAL" in *[!0-9]*|"") ;; *)
+    [ "$TOTAL" -gt 0 ] && CTX=" · ctx $(( USED * 100 / TOTAL ))%"
+  ;; esac
+fi
+
+# Rate limits — the other "tokens": plan usage. 5h/7d used_percentage.
+RL=""
+H5="$(jf '.rate_limits.five_hour.used_percentage')"; H5=${H5//[!0-9]/}
+D7="$(jf '.rate_limits.seven_day.used_percentage')"; D7=${D7//[!0-9]/}
+[ -n "$H5" ] && RL=" · 5h:${H5}%${D7:+ 7d:${D7}%}"
 
 # Dreamteam footprint — LIVE, not the log tail (a logged snapshot goes stale the
 # moment agents exit and once showed a dead team as "11 agents"). pgrep + free
@@ -55,7 +83,7 @@ SHIELD=""
 systemctl --user is-active --quiet dreamteam-agents.scope 2>/dev/null && SHIELD=" 🛡"
 [ -n "$NPROCS" ] && DT=" · 🕯 ${NPROCS} procs${SHIELD}${AVAIL:+ · ${AVAIL}MiB free}"
 
-printf '%s · effort:%s%s%s\n' "$MODEL" "$EFF" "$CTX" "$DT"
+printf '%s · effort:%s%s%s%s\n' "$MODEL" "$EFF" "$CTX" "$RL" "$DT"
 
 # Mirror into the tmux pane title — visible in choose-tree (C-b w) now, and in
 # pane borders if JP ever turns on: tmux set -g pane-border-status top
