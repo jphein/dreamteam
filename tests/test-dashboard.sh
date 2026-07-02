@@ -74,6 +74,10 @@ if [ "$HAVE_JQ" -eq 1 ]; then
     '.memory|has("perAgentMb")' \
     '.memory|has("cap")' \
     '.memory|has("availableMb")' \
+    '.memory|has("scopeActive")' \
+    '.memory|has("scopeCurrentMb")' \
+    '.memory|has("scopeMemoryHigh")' \
+    '.memory|has("scopeMemoryMax")' \
     '.timeline|has("shipped")' \
     '.timeline|has("inFlight")' \
     '.timeline|has("pending")'; do
@@ -86,7 +90,11 @@ if [ "$HAVE_JQ" -eq 1 ]; then
     '.agents|type=="array"' \
     '.prs|type=="array"' \
     '.timeline.shipped|type=="array"' \
-    '.memory|type=="object"'; do
+    '.memory|type=="object"' \
+    '.memory.scopeActive|type=="boolean"' \
+    '.memory.scopeMemoryHigh|type=="string"' \
+    '.memory.scopeMemoryMax|type=="string"' \
+    '(.memory.scopeCurrentMb|type) as $t | $t=="number" or $t=="null"'; do
     if jq -e "$expr" "$JSON" >/dev/null 2>&1; then ok "--json $expr"
     else no "--json wrong type: $expr"; fi
   done

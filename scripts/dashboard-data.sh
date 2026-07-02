@@ -67,15 +67,32 @@ def run(cmd, cwd=None, timeout=15):
         return ""
 
 # ── config (same keys/defaults as mem-budget.sh) ───────────────────────────
-cfg = {}
-try: cfg = json.load(open(CFG)).get("memory", {})
-except Exception: cfg = {}
+_full_cfg = {}
+try: _full_cfg = json.load(open(CFG))
+except Exception: _full_cfg = {}
+if not isinstance(_full_cfg, dict): _full_cfg = {}
+cfg       = _full_cfg.get("memory", {})
+scope_cfg = _full_cfg.get("scope", {}) if isinstance(_full_cfg.get("scope"), dict) else {}
 def m(k, d):
     try: return int(cfg.get(k, d))
     except Exception: return d
 PER_AGENT = m("perAgentMB", 400);  HOST_RES = m("hostReserveMB", 6000)
 BALLOON   = m("balloonReserveMB", 8000); MIN_AVAIL = m("minAvailableMB", 8000)
 MAX_AGENTS= m("maxAgents", 30)
+
+# ── team scope (auto-containment cgroup) — the TRUE footprint incl. child procs ──
+# MemoryCurrent counts the gradle/JVM children the claude-proc RSS accounting is
+# blind to (the 2026-07-01 16:06 oomd root cause; postmortem §5). Config caps pass
+# through verbatim (may be "20G"/"infinity"); current is sanitized → MiB or None.
+scope_high = str(scope_cfg.get("memoryHigh", "20G"))
+scope_max  = str(scope_cfg.get("memoryMax",  "24G"))
+scope_active = run(["systemctl","--user","is-active","dreamteam-agents.scope"]).strip() == "active"
+scope_cur_mb = None
+if scope_active:
+    _raw = run(["systemctl","--user","show","dreamteam-agents.scope","-p","MemoryCurrent","--value"]).strip()
+    _digits = "".join(ch for ch in _raw if ch.isdigit())   # drop [not set]/infinity/non-numeric
+    if _digits and len(_digits) <= 15:                     # <=15 rejects the uint64 not-available sentinel
+        scope_cur_mb = int(_digits) // (1024 * 1024)
 
 # ── memory (free -m: Mem/Swap rows) ────────────────────────────────────────
 total=used=avail=swt=swu=0
@@ -244,6 +261,8 @@ out = {
         "minAvailableMb": MIN_AVAIL, "maxAgents": MAX_AGENTS,
         "budget": budget, "cap": cap, "liveAgents": live, "room": room,
         "thresholds": {"redBelowMb": red_below, "orangeBelowMb": orange_below, "yellowBelowMb": yellow_below},
+        "scopeActive": scope_active, "scopeCurrentMb": scope_cur_mb,
+        "scopeMemoryHigh": scope_high, "scopeMemoryMax": scope_max,
     },
     "tier": tier,
     "agents": agents,

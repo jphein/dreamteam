@@ -16,8 +16,22 @@ bad()  { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
 mkdir -p "$TMP/bin"
 printf '#!/bin/bash\necho 7\n' > "$TMP/bin/pgrep"
 printf '#!/bin/bash\necho "Mem: 32000 15000 2000 100 3000 12345"\n' > "$TMP/bin/free"
-chmod +x "$TMP/bin/pgrep" "$TMP/bin/free"
-run()  { env -u TMUX -u TMUX_PANE PATH="$TMP/bin:$PATH" HOME="$TMP" CLAUDE_PLUGIN_ROOT="$TMP" bash "$SL"; }
+# systemctl stub — makes the auto-containment scope deterministic (the real host may
+# have a live dreamteam-agents.scope). Mode-switchable via marker files, DEFAULT OFF
+# (no $TMP/scope-active) so every pre-existing check runs with the scope inactive.
+#   is-active      → exit 0 iff $TMP/scope-active exists
+#   MemoryCurrent  → echoes the contents of $TMP/scope-memcurrent (raw, so we can
+#                    feed "[not set]"/"infinity" to exercise the sanitize guard)
+cat > "$TMP/bin/systemctl" <<EOF
+#!/bin/bash
+case "\$*" in
+  *is-active*)     [ -f "$TMP/scope-active" ] && exit 0 || exit 3 ;;
+  *MemoryCurrent*) cat "$TMP/scope-memcurrent" 2>/dev/null; exit 0 ;;
+  *)               exit 0 ;;
+esac
+EOF
+chmod +x "$TMP/bin/pgrep" "$TMP/bin/free" "$TMP/bin/systemctl"
+run()  { env -u TMUX -u TMUX_PANE -u DREAMTEAM_CONFIG PATH="$TMP/bin:$PATH" HOME="$TMP" CLAUDE_PLUGIN_ROOT="$TMP" bash "$SL"; }
 
 bash -n "$SL" && ok "bash -n statusline.sh" || bad "bash -n statusline.sh"
 
@@ -66,6 +80,48 @@ printf '#!/bin/bash\nexit 1\n' > "$TMP/bin/pgrep"
 OUT=$(echo '{"model":{"display_name":"Fable 5"}}' | run); RC=$?
 [ "$RC" -eq 0 ] && ok "pgrep failure: exits 0" || bad "pgrep failure exits $RC"
 case "$OUT" in *procs*) bad "footprint suppressed when pgrep fails ($OUT)";; *) ok "footprint suppressed when pgrep fails";; esac
+
+# 7. Auto-containment scope shield: 🛡 <current>/<high>. MemoryCurrent (from the
+# systemctl stub) is the TRUE footprint incl. child procs (postmortem §5). Restore a
+# WORKING pgrep first — test 6 left it failing, and the shield rides the procs line.
+printf '#!/bin/bash\necho 7\n' > "$TMP/bin/pgrep"
+BASE='{"model":{"display_name":"Fable 5"}}'
+
+# 7a. scope inactive (default) → NO shield anywhere on the line
+rm -f "$TMP/scope-active"
+OUT=$(echo "$BASE" | run)
+case "$OUT" in *"🛡"*) bad "no shield when scope inactive ($OUT)";; *) ok "no 🛡 when scope inactive";; esac
+
+# 7b. scope active + readable MemoryCurrent + memoryHigh READ from config (18G, so
+#     it can't be the 20G fallback) → 🛡 3.2G/18G
+touch "$TMP/scope-active"
+printf '3435973837\n' > "$TMP/scope-memcurrent"          # ≈3.2 GiB, in bytes
+printf '{"scope":{"memoryHigh":"18G"}}\n' > "$TMP/config.json"
+OUT=$(echo "$BASE" | run)
+case "$OUT" in *"🛡 3.2G/18G"*) ok "🛡 <cur>/<high> reads memoryHigh from config (🛡 3.2G/18G)";; *) bad "shield from config ($OUT)";; esac
+
+# 7c. no config → memoryHigh falls back to 20G (the canonical render)
+rm -f "$TMP/config.json"
+OUT=$(echo "$BASE" | run)
+case "$OUT" in *"🛡 3.2G/20G"*) ok "memoryHigh falls back to 20G (🛡 3.2G/20G)";; *) bad "shield high fallback ($OUT)";; esac
+
+# 7d. sub-GiB current → integer MiB (M branch), never fractional G
+printf '536870912\n' > "$TMP/scope-memcurrent"           # 512 MiB
+OUT=$(echo "$BASE" | run)
+case "$OUT" in *"🛡 512M/20G"*) ok "sub-GiB current shown as integer M (🛡 512M/20G)";; *) bad "shield M-format ($OUT)";; esac
+
+# 7e. unreadable MemoryCurrent ("[not set]") → bare 🛡, NO figure (sanitize guard)
+printf '[not set]\n' > "$TMP/scope-memcurrent"
+OUT=$(echo "$BASE" | run)
+case "$OUT" in
+  *"🛡 "[0-9]*) bad "rendered a figure despite unreadable MemoryCurrent ($OUT)";;
+  *"🛡"*)       ok "unreadable MemoryCurrent → bare 🛡, guarded (no figure)";;
+  *)            bad "shield missing when scope active ($OUT)";;
+esac
+
+# 7f. scope active must not break the exit contract
+OUT=$(echo "$BASE" | run); RC=$?
+[ "$RC" -eq 0 ] && ok "exits 0 with scope active" || bad "exit $RC with scope active"
 
 echo "────────────────────────────────────────"
 echo "SUMMARY: $PASS passed, $FAIL failed, $((PASS+FAIL)) total"

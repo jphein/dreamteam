@@ -14,6 +14,7 @@
 # no claude CLI, one bounded log read.
 set -uo pipefail
 ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+CFG="${DREAMTEAM_CONFIG:-$ROOT/config.json}"   # scope.memoryHigh for the shield segment
 IN="$(cat 2>/dev/null || true)"
 jf() { printf '%s' "$IN" | jq -r "$1 // empty" 2>/dev/null || true; }
 
@@ -48,6 +49,15 @@ fmt_tok() {  # 200964 → 201k · 1000000 → 1M
   if [ "$n" -ge 1000000 ]; then printf '%dM' $(( (n + 500000) / 1000000 ))
   else printf '%dk' $(( (n + 500) / 1000 )); fi
 }
+fmt_bytes() {  # bytes → "3.2G" (≥1 GiB, one decimal, rounded) or "512M" (<1 GiB, integer MiB)
+  local b=$1
+  if [ "$b" -ge 1073741824 ]; then
+    local t=$(( (b * 10 + 536870912) / 1073741824 ))   # tenths of a GiB, half-up
+    printf '%d.%dG' $(( t / 10 )) $(( t % 10 ))
+  else
+    printf '%dM' $(( (b + 524288) / 1048576 ))
+  fi
+}
 CTX=""
 PCT="$(jf '.context_window.used_percentage')"; PCT=${PCT//[!0-9]/}
 if [ -n "$PCT" ]; then
@@ -78,9 +88,19 @@ D7="$(jf '.rate_limits.seven_day.used_percentage')"; D7=${D7//[!0-9]/}
 DT=""
 NPROCS=$(pgrep -fc 'claude/versions' 2>/dev/null); NPROCS=${NPROCS//[!0-9]/}
 AVAIL=$(free -m 2>/dev/null | awk '/^Mem:/{print $7}'); AVAIL=${AVAIL//[!0-9]/}
-# 🛡 = the auto-containment scope is live (agent procs are memory-capped)
+# 🛡 <cur>/<high> = the auto-containment scope is live. MemoryCurrent is the TRUE
+# team footprint — it counts the gradle/JVM child procs the pgrep/RSS accounting is
+# blind to (root cause of the 2026-07-01 16:06 oomd kill; see postmortem §5). One
+# extra `systemctl show` beyond the existing is-active, and ONLY when active.
 SHIELD=""
-systemctl --user is-active --quiet dreamteam-agents.scope 2>/dev/null && SHIELD=" 🛡"
+if systemctl --user is-active --quiet dreamteam-agents.scope 2>/dev/null; then
+  SHIELD=" 🛡"
+  SMC=$(systemctl --user show dreamteam-agents.scope -p MemoryCurrent --value 2>/dev/null)
+  SMC=${SMC//[!0-9]/}   # empty / "[not set]" / "infinity" / non-numeric → ""
+  SHIGH=$(jq -r '.scope.memoryHigh // "20G"' "$CFG" 2>/dev/null); [ -n "$SHIGH" ] || SHIGH="20G"
+  # ${#SMC}<=15 rejects the uint64 "not-available" sentinel; real usage on a 32G host is ~11 digits
+  [ -n "$SMC" ] && [ "${#SMC}" -le 15 ] && SHIELD=" 🛡 $(fmt_bytes "$SMC")/${SHIGH}"
+fi
 [ -n "$NPROCS" ] && DT=" · 🕯 ${NPROCS} procs${SHIELD}${AVAIL:+ · ${AVAIL}MiB free}"
 
 printf '%s · effort:%s%s%s%s\n' "$MODEL" "$EFF" "$CTX" "$RL" "$DT"
