@@ -42,7 +42,7 @@ chmod +x "$TMP/bin/systemctl"
 printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "%s/notify.log"\n' "$TMP" > "$TMP/bin/notify-send"
 chmod +x "$TMP/bin/notify-send"
 run_ev() { DREAMTEAM_TEST=1 DREAMTEAM_STATE="$TMP/state" DREAMTEAM_TEAMS_DIR="$TMP/teams" CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/team-events.sh"; }
-run_cg() { DREAMTEAM_STATE="$TMP/state" DREAMTEAM_TEAMS_DIR="$TMP/teams" CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/compact-guard.sh"; }
+run_cg() { DREAMTEAM_TEST=1 DREAMTEAM_STATE="$TMP/state" DREAMTEAM_TEAMS_DIR="$TMP/teams" CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/compact-guard.sh"; }
 
 for f in team-events compact-guard subagent-statusline; do
   bash -n "$ROOT/scripts/$f.sh" && ok "bash -n $f.sh" || bad "bash -n $f.sh"
