@@ -90,6 +90,44 @@ run; RC=$?
 [ "$RC" -eq 0 ] && ok "busctl failure: still exits 0" || bad "busctl failure exit $RC"
 grep -q 'scope-attach' "$TMP/state/dreamteam.log" && bad "failed attach must not log success" || ok "failed attach not logged as success"
 
+# ── #19: per-project scopes ───────────────────────────────────────────────────
+# 5. Project filter — an agent proc whose cwd is a DIFFERENT project must never
+#    be attached (the near-miss rail: foreign fleets are not ours to contain).
+mkdir -p "$TMP/otherproj"
+( cd "$TMP/otherproj" && exec bash -c 'sleep 60 && true' claude-versions-fake --agent-id foreign@other ) &
+FOREIGN_PID=$!
+trap 'rm -rf "$TMP"; kill $AGENT_PID $PLAIN_PID $FOREIGN_PID 2>/dev/null' EXIT INT TERM
+sleep 0.2
+cat > "$TMP/bin/busctl" <<EOF
+#!/bin/bash
+echo "busctl \$*" >> "$CALLS"
+exit 0
+EOF
+cat > "$TMP/bin/pgrep" <<EOF
+#!/bin/bash
+echo "$AGENT_PID"
+echo "$FOREIGN_PID"
+EOF
+chmod +x "$TMP/bin/"*
+: > "$CALLS"
+run
+grep -q "1 $AGENT_PID" "$CALLS" && ok "own-project agent still attached" || bad "own-project attach broken"
+grep -q "1 $FOREIGN_PID" "$CALLS" && bad "FOREIGN project's agent was attached — cross-project containment forbidden" \
+  || ok "foreign-project agent left alone (#19 filter)"
+
+# 6. Scope-name derivation (lib.sh) — env wins > config .scope.name > derived > fallback
+. "$ROOT/scripts/lib.sh"
+N1=$(DREAMTEAM_SCOPE_NAME="dreamteam-pinned" DREAMTEAM_CONFIG="$ROOT/config.json" dreamteam_scope_name)
+[ "$N1" = "dreamteam-pinned" ] && ok "derivation: env seam wins" || bad "env seam: $N1"
+echo '{"scope":{"name":"dreamteam-cfg"}}' > "$TMP/named.json"
+N2=$(DREAMTEAM_SCOPE_NAME= DREAMTEAM_CONFIG="$TMP/named.json" dreamteam_scope_name)
+[ "$N2" = "dreamteam-cfg" ] && ok "derivation: config .scope.name honored" || bad "config name: $N2"
+mkdir -p "$TMP/My_Cool.Repo/.claude/worktrees/luna-w1"
+N3=$(DREAMTEAM_SCOPE_NAME= DREAMTEAM_CONFIG="$ROOT/config.json" DREAMTEAM_PROJECT_DIR="$TMP/My_Cool.Repo/.claude/worktrees/luna-w1" dreamteam_scope_name)
+[ "$N3" = "dreamteam-my-cool-repo" ] && ok "derivation: worktree-strip + sanitize (My_Cool.Repo → my-cool-repo)" || bad "derived: $N3"
+N4=$(DREAMTEAM_SCOPE_NAME= DREAMTEAM_CONFIG="$ROOT/config.json" DREAMTEAM_PROJECT_DIR="$TMP/My_Cool.Repo" dreamteam_project_root)
+[ "$N4" = "$(readlink -f "$TMP")/My_Cool.Repo" ] && ok "project root resolves real path" || bad "root: $N4"
+
 echo "────────────────────────────────────────"
 echo "SUMMARY: $PASS passed, $FAIL failed, $((PASS+FAIL)) total"
 [ "$FAIL" -eq 0 ]

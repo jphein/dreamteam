@@ -41,8 +41,9 @@ if [ ! -f "$STATE/active" ]; then
   printf '{"team":"%s","repo":"%s","started":"%s"}\n' "session-spawned" "$CWD" "$TS" > "$STATE/active" 2>/dev/null || true
 fi
 
-# Automatic containment (incident-2 fix): attach agent procs to the capped
-# dreamteam-agents.scope so a runaway team is oomd's victim, not the host.
+# Automatic containment (incident-2 fix): attach THIS project's agent procs to
+# its capped dreamteam-<project>.scope (#19) so a runaway team is oomd's victim,
+# not the host — and not any OTHER project's fleet.
 bash "$ROOT/scripts/scope-attach.sh" 2>/dev/null || true
 
 # Build roster summary from the AUTHORITATIVE harness team config (via roster.sh)

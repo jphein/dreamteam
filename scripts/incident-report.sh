@@ -46,13 +46,18 @@ echo ""
 echo "## live roster"
 bash "$ROOT/scripts/roster.sh" 2>/dev/null | sed 's/^/    /' || echo "    (unavailable)"
 echo ""
-echo "## containment scope"
-if systemctl --user is-active --quiet dreamteam-agents.scope 2>/dev/null; then
-  CUR=$(systemctl --user show dreamteam-agents.scope -p MemoryCurrent --value 2>/dev/null); CUR=${CUR//[!0-9]/}
-  echo "    dreamteam-agents.scope: ACTIVE, MemoryCurrent=$(( ${CUR:-0} / 1048576 ))MiB"
-  systemctl --user show dreamteam-agents.scope -p MemoryHigh -p MemoryMax -p MemorySwapMax --no-pager 2>/dev/null | sed 's/^/    /'
+echo "## containment scopes"
+# Forensics wants EVERY dreamteam scope (#19: per-project scopes coexist with
+# the draining legacy shared one), not just this project's.
+_SCOPES=$(systemctl --user list-units 'dreamteam-*.scope' --no-legend --plain 2>/dev/null | awk '{print $1}')
+if [ -n "$_SCOPES" ]; then
+  for _s in $_SCOPES; do
+    CUR=$(systemctl --user show "$_s" -p MemoryCurrent --value 2>/dev/null); CUR=${CUR//[!0-9]/}
+    echo "    ${_s}: ACTIVE, MemoryCurrent=$(( ${CUR:-0} / 1048576 ))MiB"
+    systemctl --user show "$_s" -p MemoryHigh -p MemoryMax -p MemorySwapMax --no-pager 2>/dev/null | sed 's/^/      /'
+  done
 else
-  echo "    dreamteam-agents.scope: not active"
+  echo "    no dreamteam-*.scope active"
 fi
 [ -f "$STATE/active" ] && echo "    ⚠ crash marker PRESENT: $(cat "$STATE/active")" || echo "    crash marker: clear"
 echo ""

@@ -8,10 +8,10 @@
     "minAvailableMB": 8000,
     "scopeToDreamteam": false,
     "_notes": {
-      "maxAgents": "SYSTEM-WIDE cap (mem-gate counts ALL claude procs via pgrep, not just this team). 59 ran on 06-30 across multiple sessions — a per-team cap can't see the aggregate; this can. Raised 30→36 on 2026-07-01 after the cap (not memory) became the binding constraint during a real multi-fleet day (31 procs, budget said 7 more agents fit); the memory budget + 8G floor remain the true guards, and 36 still sits well under the 59-proc disaster load.",
-      "perAgentMB": "Planning RSS for a NEW agent. Verified baseline at OOM time was ~200-280 MB; live-active with context ~350-430 MB. Set to 300 (2026-07-01) — the measured baseline, not the padded active figure, because the balloonReserve + earlyoom + cgroup handle spikes and the minAvailableMB floor is the real backstop. This is a THROTTLE (how fast we approach the floor), not a safety limit. (Earlier 600 was a cgroup-peak-incl-cache artifact; 400 over-padded.)",
-      "balloonReserveMB": "Headroom for runaway growth of ALREADY-ADMITTED agents — including their CHILD toolchains (gradle/JVM daemons on candela days), which the claude-proc accounting cannot see. Cut 8->4G on 2026-07-01 morning; RESTORED to 8G the same day after the 16:06 systemd-oomd kill: fleets admitted under the 4G reserve grew ~10GB of build-tool memory and oomd killed the shared Ghostty scope at 70% mem+swap. Admission math is spawn-time-only; this reserve is what absorbs post-admission growth. Loosen only inside a launch-dreamteam.sh MemoryMax scope.",
-      "scopeToDreamteam": "false = GLOBAL safety net on every agent spawn (recommended — 06-30 spanned multiple sessions). true = only acts when a team marker is active (state/active)."
+      "maxAgents": "SYSTEM-WIDE cap (mem-gate counts ALL claude procs via pgrep, not just this team). 59 ran on 06-30 across multiple sessions \u2014 a per-team cap can't see the aggregate; this can. Raised 30\u219236 on 2026-07-01 after the cap (not memory) became the binding constraint during a real multi-fleet day (31 procs, budget said 7 more agents fit); the memory budget + 8G floor remain the true guards, and 36 still sits well under the 59-proc disaster load.",
+      "perAgentMB": "Planning RSS for a NEW agent. Verified baseline at OOM time was ~200-280 MB; live-active with context ~350-430 MB. Set to 300 (2026-07-01) \u2014 the measured baseline, not the padded active figure, because the balloonReserve + earlyoom + cgroup handle spikes and the minAvailableMB floor is the real backstop. This is a THROTTLE (how fast we approach the floor), not a safety limit. (Earlier 600 was a cgroup-peak-incl-cache artifact; 400 over-padded.)",
+      "balloonReserveMB": "Headroom for runaway growth of ALREADY-ADMITTED agents \u2014 including their CHILD toolchains (gradle/JVM daemons on candela days), which the claude-proc accounting cannot see. Cut 8->4G on 2026-07-01 morning; RESTORED to 8G the same day after the 16:06 systemd-oomd kill: fleets admitted under the 4G reserve grew ~10GB of build-tool memory and oomd killed the shared Ghostty scope at 70% mem+swap. Admission math is spawn-time-only; this reserve is what absorbs post-admission growth. Loosen only inside a launch-dreamteam.sh MemoryMax scope.",
+      "scopeToDreamteam": "false = GLOBAL safety net on every agent spawn (recommended \u2014 06-30 spanned multiple sessions). true = only acts when a team marker is active (state/active)."
     }
   },
   "reuse": {
@@ -23,7 +23,7 @@
   "dashboard": {
     "port": 8383,
     "host": "0.0.0.0",
-    "_notes": "Local mission-control dashboard service (issue #11). scripts/dashboard-server.py serves templates/dashboard.html + /api/data (dashboard-data.sh --json --all-teams, 5s cache) + /api/version. host defaults to 127.0.0.1 (localhost only, safe); set \"0.0.0.0\" to expose on the LAN (homelab norm — opt-in). Manage via scripts/dashboard-ctl.sh {install|start|stop|status|logs} — a systemctl --user unit (systemd/dreamteam-dashboard.service, MemoryMax 256M). Readers default to 8383/127.0.0.1 if this section is absent, per the file's baked-defaults idiom; env DREAMTEAM_DASHBOARD_PORT/HOST override at runtime."
+    "_notes": "Local mission-control dashboard service (issue #11). scripts/dashboard-server.py serves templates/dashboard.html + /api/data (dashboard-data.sh --json --all-teams, 5s cache) + /api/version. host defaults to 127.0.0.1 (localhost only, safe); set \"0.0.0.0\" to expose on the LAN (homelab norm \u2014 opt-in). Manage via scripts/dashboard-ctl.sh {install|start|stop|status|logs} \u2014 a systemctl --user unit (systemd/dreamteam-dashboard.service, MemoryMax 256M). Readers default to 8383/127.0.0.1 if this section is absent, per the file's baked-defaults idiom; env DREAMTEAM_DASHBOARD_PORT/HOST override at runtime."
   },
   "spawn": {
     "enforceStandards": true,
@@ -31,13 +31,13 @@
   },
   "worktree": {
     "enforce": true,
-    "_notes": "worktree-guard.sh (PreToolUse Edit|Write in TEAMMATE sessions) blocks writes outside an agent's assigned worktree (its team-config cwd) when that cwd is under .claude/worktrees/. Shared-checkout spawns (cwd not a worktree) are unaffected. Escape: orchestrator sets enforce=false, or the agent escalates via SendMessage. Added 2026-07-01 — converts the skill's #1 failure mode (2 collision incidents) from prompt discipline to harness law."
+    "_notes": "worktree-guard.sh (PreToolUse Edit|Write in TEAMMATE sessions) blocks writes outside an agent's assigned worktree (its team-config cwd) when that cwd is under .claude/worktrees/. Shared-checkout spawns (cwd not a worktree) are unaffected. Escape: orchestrator sets enforce=false, or the agent escalates via SendMessage. Added 2026-07-01 \u2014 converts the skill's #1 failure mode (2 collision incidents) from prompt discipline to harness law."
   },
   "scope": {
     "memoryHigh": "20G",
     "memoryMax": "24G",
     "memorySwapMax": "8G",
     "autoAttach": true,
-    "_notes": "Caps for BOTH containment paths: launch-dreamteam.sh (whole-session scope) and scope-attach.sh (autoAttach=true: every spawn attaches all live agent procs on the host into dreamteam-agents.scope via AttachProcessesToUnit — added after the 2026-07-01 16:06 oomd kill, when unscoped fleets shared the Ghostty cgroup and the kill took everything). MemoryHigh = throttle; MemoryMax = hard kill inside the agents' cgroup (orchestrators stay outside and survive); MemorySwapMax bounds the team's swap. Size to leave the GUI/host a few GB."
+    "_notes": "Caps for BOTH containment paths: launch-dreamteam.sh (whole-session scope) and scope-attach.sh (autoAttach=true: every spawn attaches THIS PROJECT'S live agent procs into dreamteam-<project>.scope via AttachProcessesToUnit \u2014 per-project since #19, so scope==project for fleet attribution and one project's runaway can't throttle another's fleet; before that, one shared dreamteam-agents.scope held everyone, added after the 2026-07-01 16:06 oomd kill). Name precedence: DREAMTEAM_SCOPE_NAME env > scope.name (add here to pin) > dreamteam-<repo basename, sanitized>. Caps apply PER SCOPE \u2014 N projects can nominally reserve N*MemoryHigh; the host RED-tier floor and systemd-oomd remain the global guards. MemoryHigh = throttle; MemoryMax = hard kill inside the agents' cgroup (orchestrators stay outside and survive); MemorySwapMax bounds the team's swap. Size to leave the GUI/host a few GB."
   }
 }

@@ -27,13 +27,25 @@ fi
 
 rm -f "$STATE/active"
 
-# Tear down the auto-containment scope when it holds nothing but its anchor —
-# other sessions' agents may still live there, so only stop when it's empty.
-if command -v systemctl >/dev/null 2>&1 && systemctl --user is-active --quiet dreamteam-agents.scope 2>/dev/null; then
-  AGENTS_IN_SCOPE=0
+# Tear down containment scopes that hold nothing but their anchor. Two targets:
+#   1. THIS project's scope (#19: per-project name via lib.sh) — same-project
+#      sibling sessions may still have agents there, so only stop when empty.
+#   2. The LEGACY shared scope (dreamteam-agents) — transition sweeper: every
+#      project's agents are migrating to per-project scopes, so once no agent
+#      proc lives in the shared one, any clean session-end may retire it.
+# shellcheck source=lib.sh
+. "$ROOT/scripts/lib.sh" 2>/dev/null || true
+DT_SCOPE="$(command -v dreamteam_scope_name >/dev/null 2>&1 && dreamteam_scope_name || echo dreamteam-agents)"
+stop_scope_if_empty() {
+  local scope="$1" pid
+  systemctl --user is-active --quiet "$scope.scope" 2>/dev/null || return 0
   for pid in $(pgrep -f 'claude/versions' 2>/dev/null); do
-    grep -q 'dreamteam-agents.scope' "/proc/$pid/cgroup" 2>/dev/null && AGENTS_IN_SCOPE=1 && break
+    grep -q "$scope.scope" "/proc/$pid/cgroup" 2>/dev/null && return 0   # occupied — leave it
   done
-  [ "$AGENTS_IN_SCOPE" -eq 0 ] && systemctl --user stop dreamteam-agents.scope 2>/dev/null || true
+  systemctl --user stop "$scope.scope" 2>/dev/null || true
+}
+if command -v systemctl >/dev/null 2>&1; then
+  stop_scope_if_empty "$DT_SCOPE"
+  [ "$DT_SCOPE" != "dreamteam-agents" ] && stop_scope_if_empty "dreamteam-agents"
 fi
 exit 0

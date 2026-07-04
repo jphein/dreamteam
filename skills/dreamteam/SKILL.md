@@ -193,11 +193,16 @@ MAX_AGENTS=$(( BUDGET < maxAgents ? BUDGET : maxAgents ))   # = min(count cap, R
 The 06-30 crash cascaded because the whole team shared **one cgroup with no memory limit**,
 so it consumed all host RAM + swap and took the GUI/tmux/siblings down.
 
-**Automatic containment (default — no action needed).** `scope-attach.sh` attaches **every
-live agent proc on the host** (any session — the plugin's guards are system-wide) into a
-`dreamteam-agents.scope` user scope on **every spawn and every TeammateIdle sweep**, capped with
-the `config.json .scope` values and created `Delegate=yes` (required for the systemd
-`AttachProcessesToUnit` call). Orchestrators/main sessions are deliberately **left outside**, so
+**Automatic containment (default — no action needed).** `scope-attach.sh` attaches **this
+project's live agent procs** (cwd under the project root, worktree-aware — never another
+project's fleet) into a **per-project** `dreamteam-<project>.scope` user scope on **every spawn
+and every TeammateIdle sweep** (#19; name via `lib.sh dreamteam_scope_name` — env
+`DREAMTEAM_SCOPE_NAME` > config `.scope.name` > sanitized repo basename), capped with the
+`config.json .scope` values and created `Delegate=yes` (required for the systemd
+`AttachProcessesToUnit` call). Scope == project, so one project's runaway is throttled/killed
+inside its OWN cap instead of taking every fleet on the host down with the old shared scope
+(which now drains: own-project procs found in it are re-homed, and `cleanup-marker.sh` retires
+it once no agent lives there). Orchestrators/main sessions are deliberately **left outside**, so
 a scope OOM-kill takes the teams and the orchestrator survives to recover them. Children spawned
 *after* attach (gradle/JVM daemons — the actual 07-01 killers) **inherit** the cgroup; the one
 gap is a daemon detached *before* its parent was attached. (Postmortem §5.4; live-verified 16:26

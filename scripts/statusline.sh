@@ -93,9 +93,12 @@ AVAIL=$(free -m 2>/dev/null | awk '/^Mem:/{print $7}'); AVAIL=${AVAIL//[!0-9]/}
 # blind to (root cause of the 2026-07-01 16:06 oomd kill; see postmortem §5). One
 # extra `systemctl show` beyond the existing is-active, and ONLY when active.
 SHIELD=""
-if systemctl --user is-active --quiet dreamteam-agents.scope 2>/dev/null; then
+# shellcheck source=lib.sh
+. "$ROOT/scripts/lib.sh" 2>/dev/null || true
+DT_SCOPE="$(command -v dreamteam_scope_name >/dev/null 2>&1 && dreamteam_scope_name || echo dreamteam-agents)"
+if systemctl --user is-active --quiet "$DT_SCOPE.scope" 2>/dev/null; then
   SHIELD=" 🛡"
-  SMC=$(systemctl --user show dreamteam-agents.scope -p MemoryCurrent --value 2>/dev/null)
+  SMC=$(systemctl --user show "$DT_SCOPE.scope" -p MemoryCurrent --value 2>/dev/null)
   SMC=${SMC//[!0-9]/}   # empty / "[not set]" / "infinity" / non-numeric → ""
   SHIGH=$(jq -r '.scope.memoryHigh // "20G"' "$CFG" 2>/dev/null); [ -n "$SHIGH" ] || SHIGH="20G"
   # ${#SMC}<=15 rejects the uint64 "not-available" sentinel; real usage on a 32G host is ~11 digits

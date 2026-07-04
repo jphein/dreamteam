@@ -22,6 +22,10 @@ ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 STATE="${DREAMTEAM_STATE:-$ROOT/state}"
 mkdir -p "$STATE"
 EVLOG="$STATE/events.log"
+# Per-project containment scope name (#19) — shared derivation; env seam wins.
+# shellcheck source=lib.sh
+. "$ROOT/scripts/lib.sh" 2>/dev/null || true
+DT_SCOPE="$(command -v dreamteam_scope_name >/dev/null 2>&1 && dreamteam_scope_name || echo dreamteam-agents)"
 
 IN="$(cat 2>/dev/null || true)"
 jf() { printf '%s' "$IN" | jq -r "$1 // empty" 2>/dev/null || true; }
@@ -115,13 +119,13 @@ tier_note() {
   local avail floor cfg cur high
   cfg="${DREAMTEAM_CONFIG:-$ROOT/config.json}"
 
-  # Scope-pressure tier (#3): the dreamteam-agents.scope cgroup is the REAL
-  # containment boundary — MemoryHigh throttles reclaim, MemoryMax hard-kills the
+  # Scope-pressure tier (#3): THIS PROJECT'S containment cgroup ($DT_SCOPE, #19)
+  # is the REAL boundary — MemoryHigh throttles reclaim, MemoryMax hard-kills the
   # WHOLE team's cgroup. The host can look healthy while the scope sits at its
   # High water mark, so check the scope first and independently — this is additive
   # to the host tiers below (both can fire in one message).
-  if systemctl --user is-active --quiet dreamteam-agents.scope 2>/dev/null; then
-    cur=$(systemctl --user show dreamteam-agents.scope -p MemoryCurrent --value 2>/dev/null)
+  if systemctl --user is-active --quiet "$DT_SCOPE.scope" 2>/dev/null; then
+    cur=$(systemctl --user show "$DT_SCOPE.scope" -p MemoryCurrent --value 2>/dev/null)
     cur=${cur//[!0-9]/}                            # "[not set]"/"infinity" → empty
     high=$(scope_high_bytes "$cfg")
     if [ -n "$cur" ] && [ -n "$high" ] && [ "$high" -gt 0 ] && [ "$cur" -ge $(( high * 85 / 100 )) ]; then

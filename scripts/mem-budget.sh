@@ -32,11 +32,12 @@ if [ "${1:-}" = "--max" ]; then echo "$CAP"; exit 0; fi
 # MemoryCurrent sanitize as statusline.sh. Computed AFTER the --max fast path so the
 # hot spawn gate stays untouched; renders nothing when the scope is inactive.
 SCOPE_SUFFIX=""
-if systemctl --user is-active --quiet dreamteam-agents.scope 2>/dev/null; then
-  SMC=$(systemctl --user show dreamteam-agents.scope -p MemoryCurrent --value 2>/dev/null); SMC=${SMC//[!0-9]/}
+DT_SCOPE="$(command -v dreamteam_scope_name >/dev/null 2>&1 && dreamteam_scope_name || echo dreamteam-agents)"
+if systemctl --user is-active --quiet "$DT_SCOPE.scope" 2>/dev/null; then
+  SMC=$(systemctl --user show "$DT_SCOPE.scope" -p MemoryCurrent --value 2>/dev/null); SMC=${SMC//[!0-9]/}
   S_HIGH=$(getscope memoryHigh 20G); S_MAX=$(getscope memoryMax 24G)
   if [ -n "$SMC" ] && [ "${#SMC}" -le 15 ]; then CUR="$(( SMC / 1048576 )) MiB current"; else CUR="? MiB current"; fi
-  SCOPE_SUFFIX=$'\n'"  team scope    : ${CUR} / high ${S_HIGH} / max ${S_MAX}   (true footprint incl. child procs)"
+  SCOPE_SUFFIX=$'\n'"  team scope    : ${CUR} / high ${S_HIGH} / max ${S_MAX}   (${DT_SCOPE}.scope, true footprint incl. child procs)"
 fi
 
 waydroid_note=""

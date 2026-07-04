@@ -46,9 +46,15 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# Per-project scope name (#19) resolved in bash (single source: lib.sh) and
+# handed to the python below via env — python must not re-derive its own.
+# shellcheck source=lib.sh
+. "$ROOT/scripts/lib.sh" 2>/dev/null || true
+DT_SCOPE="$(command -v dreamteam_scope_name >/dev/null 2>&1 && dreamteam_scope_name || echo dreamteam-agents)"
+
 export DT_ROOT="$ROOT" DT_CFG="$CFG" DT_TEAMS_DIR="$TEAMS_DIR" DT_STATE="$STATE" \
        DT_REPO="$REPO" DT_TEAM="$TEAM" DT_MODE="$MODE" DT_TEMPLATE="$TEMPLATE" \
-       DT_ALL_TEAMS="$ALL_TEAMS"
+       DT_ALL_TEAMS="$ALL_TEAMS" DT_SCOPE="$DT_SCOPE"
 
 python3 - <<'PY'
 import json, os, re, glob, socket, subprocess
@@ -91,10 +97,11 @@ MAX_AGENTS= m("maxAgents", 30)
 # through verbatim (may be "20G"/"infinity"); current is sanitized → MiB or None.
 scope_high = str(scope_cfg.get("memoryHigh", "20G"))
 scope_max  = str(scope_cfg.get("memoryMax",  "24G"))
-scope_active = run(["systemctl","--user","is-active","dreamteam-agents.scope"]).strip() == "active"
+SCOPE_UNIT = os.environ.get("DT_SCOPE", "dreamteam-agents") + ".scope"   # resolved by the bash wrapper (#19)
+scope_active = run(["systemctl","--user","is-active",SCOPE_UNIT]).strip() == "active"
 scope_cur_mb = None
 if scope_active:
-    _raw = run(["systemctl","--user","show","dreamteam-agents.scope","-p","MemoryCurrent","--value"]).strip()
+    _raw = run(["systemctl","--user","show",SCOPE_UNIT,"-p","MemoryCurrent","--value"]).strip()
     _digits = "".join(ch for ch in _raw if ch.isdigit())   # drop [not set]/infinity/non-numeric
     if _digits and len(_digits) <= 15:                     # <=15 rejects the uint64 not-available sentinel
         scope_cur_mb = int(_digits) // (1024 * 1024)

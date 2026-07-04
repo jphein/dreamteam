@@ -6,13 +6,20 @@
 # fleets used it — so on 2026-07-01 16:06 systemd-oomd killed the shared Ghostty
 # scope holding EVERYTHING. This script makes containment automatic:
 #
-#   1. Ensures a user scope `dreamteam-agents.scope` exists, capped with the
-#      same MemoryHigh/Max/SwapMax the launcher uses (config.json .scope).
-#   2. Attaches every live teammate process on the host (any session — the
-#      plugin's guards are system-wide by design) into that scope via the
-#      sanctioned systemd D-Bus call (AttachProcessesToUnit; verified working
-#      on katana 2026-07-01). Their children (gradle/JVM daemons — the actual
-#      killers) inherit the cgroup.
+#   1. Ensures THIS PROJECT'S user scope `dreamteam-<project>.scope` exists
+#      (issue #19 — per-project scopes; name via lib.sh dreamteam_scope_name,
+#      env/config overridable), capped with the same MemoryHigh/Max/SwapMax
+#      the launcher uses (config.json .scope).
+#   2. Attaches every live teammate process THAT BELONGS TO THIS PROJECT
+#      (cwd under the project root, worktree-aware — never another project's
+#      fleet; #18's near-miss rail) via the sanctioned systemd D-Bus call
+#      (AttachProcessesToUnit; verified working on katana 2026-07-01). Their
+#      children (gradle/JVM daemons — the actual killers) inherit the cgroup.
+#      An own-project proc still sitting in the LEGACY shared scope is re-homed
+#      here by the same call (cgroup migration), so the shared cap drains as
+#      each project's sessions pick up the update. A wandering agent (cwd
+#      outside the repo mid-task) is simply picked up by a later sweep —
+#      attach runs on every spawn and TeammateIdle.
 #
 # Orchestrators/main sessions are deliberately NOT attached — when the scope is
 # OOM-killed, the teams die and the orchestrators survive to recover them.
@@ -24,11 +31,15 @@ set -uo pipefail
 ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 CFG="${DREAMTEAM_CONFIG:-$ROOT/config.json}"
 STATE="${DREAMTEAM_STATE:-$ROOT/state}"
-# Seam: tests override the scope name — a teammate session running INSIDE the
-# real scope makes its child fixtures inherit the cgroup, so the idempotency
-# guard below would correctly-but-unhelpfully skip them (found by lucid,
-# 2026-07-01: containment worked too well for the test to be hermetic).
-SCOPE="${DREAMTEAM_SCOPE_NAME:-dreamteam-agents}"
+# Scope name + project root from the shared lib (single source: mem-budget,
+# statusline, team-events, cleanup-marker and this script must agree).
+# DREAMTEAM_SCOPE_NAME still wins inside the helper — the tests' hermeticity
+# seam (fixtures inherit the real cgroup otherwise; lucid 2026-07-01) and the
+# launcher's explicit per-team scopes both ride on it.
+# shellcheck source=lib.sh
+. "$ROOT/scripts/lib.sh" 2>/dev/null || true
+SCOPE="$(dreamteam_scope_name 2>/dev/null || echo dreamteam-agents)"
+MYROOT="$(dreamteam_project_root 2>/dev/null || echo "$PWD")"
 
 # Master switch (default on). Disable via config: scope.autoAttach=false
 # NOTE: not `// true` — jq's // treats false as empty, which would make the
@@ -61,6 +72,11 @@ fi
 ATTACHED=0
 for pid in $(pgrep -f 'claude/versions' 2>/dev/null); do
   grep -q -- '--agent-id' "/proc/$pid/cmdline" 2>/dev/null || continue
+  # Project filter (#19): only THIS project's agents. cwd → worktree-strip →
+  # must equal or live under MYROOT. Foreign fleets are never touched.
+  ACWD="$(readlink -f "/proc/$pid/cwd" 2>/dev/null)" || continue
+  case "$ACWD" in */.claude/worktrees/*) ACWD="${ACWD%%/.claude/worktrees/*}" ;; esac
+  case "$ACWD" in "$MYROOT"|"$MYROOT"/*) ;; *) continue ;; esac
   grep -q "$SCOPE.scope" "/proc/$pid/cgroup" 2>/dev/null && continue
   if busctl call --user org.freedesktop.systemd1 /org/freedesktop/systemd1 \
        org.freedesktop.systemd1.Manager AttachProcessesToUnit \
