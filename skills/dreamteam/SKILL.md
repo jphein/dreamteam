@@ -359,6 +359,12 @@ tmux capture-pane -t :<window>.<pane> -p -S -50   # last 50 lines of the agent's
 - **Never take over an agent's task while it's actively working** — you'll create edit
   conflicts in its worktree. (Pairs with `feedback_verify_dont_assume_agents.md` and
   `feedback_never_shutdown_active_agents.md`.)
+- **Before reasoning about "unaccounted" processes, run `/dreamteam-fleet`**
+  (`scripts/fleet.sh`, issue #18): it maps EVERY agent on the host — all projects, all
+  scopes, all tmux sockets — and labels foreign fleets `NOT-YOURS`. Scope membership ≠
+  project membership: the shared scope carries OTHER projects' live agents, and "procs I
+  can't account for" are usually someone else's working fleet, never orphans to reap
+  (2026-07-04 near-miss). The tool is observer-only — it terminates nothing.
 
 ### Spawn template
 
