@@ -19,8 +19,13 @@ tmux sockets (PPid-chain matched) — and prints per agent: PID · project
 you, no matter how the scope math looks (the 2026-07-04 near-miss: 11 "unaccounted"
 procs in the shared scope were techempower's and memorypalace's working fleets).
 
-- `--stale` lists candidates (pane-less + old + idle CPU) for **human** review.
-  The tool terminates nothing, by design and by test (test-fleet.sh tripwire).
-- `--json` is the orchestrator contract: `{caller, scopes[], agents[]}`.
+- The `LIVE` column is the hooks' own working/idle/stopped stamp (#20 —
+  `~/.claude/dreamteam-fleet/`, written on spawn/TeammateIdle/SubagentStart/Stop,
+  shown as `state@age`). A stamp beats the CPU-time heuristic; `-` = unstamped.
+- `--stale` lists candidates (stamp old — or, unstamped, pane-less + old + idle
+  CPU) for **human** review. The tool terminates nothing, by design and by test
+  (test-fleet.sh tripwire).
+- `--json` is the orchestrator contract: `{caller, scopes[], agents[]}` (each
+  agent carries `live`/`liveAgeSec`, null when unstamped).
 - Scope totals at the top are the true per-scope footprints (`memory.current`),
   including child processes — the same numbers containment enforces against.

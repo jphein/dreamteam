@@ -52,6 +52,15 @@ PROC="${DREAMTEAM_PROC:-/proc}"
 CALLER_CWD="${DREAMTEAM_CALLER_CWD:-$PWD}"
 STALE_SEC="$(jq -r '.fleet.staleAfterSec // 3600' "$CFG" 2>/dev/null || echo 3600)"
 
+# Liveness stamps (#20): team-events.sh / spawn-accounting stamp
+# "<state> <epoch>" per agent into this GLOBAL dir (key: <project>__<agent>).
+# A stamp is a REAL working/idle signal from the hooks and beats the CPU-time
+# heuristic below. Age-GC only — pruning our own cache files is not a reap path
+# (48h: stamps of long-gone agents; live ones re-stamp on every event).
+FLEET_STATE="${DREAMTEAM_FLEET_STATE:-$HOME/.claude/dreamteam-fleet}"
+[ -d "$FLEET_STATE" ] && find "$FLEET_STATE" -maxdepth 1 -type f -mmin +2880 -delete 2>/dev/null
+NOW_EPOCH="$(date +%s)"
+
 JSON=0; FILTER=""; STALE_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -136,8 +145,21 @@ for pid in $AGENT_PIDS; do
   pane="$(pane_of "$pid")"; pane="${pane:--}"
   scope="${PID_SCOPE[$pid]:--}"
   yours="false"; [ -n "$proj" ] && [ "$proj" = "$CALLER_PROJ" ] && yours="true"
+  # Liveness: prefer the hook stamp (#20); fall back to the CPU-time heuristic.
+  live="null"; liveAge=-1
+  stampf="$FLEET_STATE/$(printf '%s__%s' "$proj" "$agent" | tr '/' '_')"
+  if [ "$agent" != "-" ] && [ -f "$stampf" ]; then
+    read -r _lstate _lepoch < "$stampf" 2>/dev/null || true
+    _lepoch="${_lepoch//[!0-9]/}"
+    if [ -n "${_lstate:-}" ] && [ -n "$_lepoch" ]; then
+      live="\"$_lstate\""; liveAge=$(( NOW_EPOCH - _lepoch )); [ "$liveAge" -lt 0 ] && liveAge=0
+    fi
+  fi
   stale="false"
-  if [ "$pane" = "-" ] && [ "$etimes" -gt "$STALE_SEC" ] && [ "$((cputimes * 100))" -lt "$etimes" ]; then
+  if [ "$live" != "null" ]; then
+    # stamped: stale only when the last signal is old AND nothing on screen
+    [ "$pane" = "-" ] && [ "$liveAge" -gt "$STALE_SEC" ] && stale="true"
+  elif [ "$pane" = "-" ] && [ "$etimes" -gt "$STALE_SEC" ] && [ "$((cputimes * 100))" -lt "$etimes" ]; then
     stale="true"
   fi
   [ -n "$FILTER" ] && [[ "$proj" != *"$FILTER"* ]] && continue
@@ -146,8 +168,10 @@ for pid in $AGENT_PIDS; do
       --arg pane "$pane" --arg scope "$scope" --argjson etimes "$etimes" \
       --argjson cputimes "$cputimes" --argjson rssMB "$((rss / 1024))" \
       --argjson yours "$yours" --argjson stale "$stale" \
+      --argjson live "$live" --argjson liveAge "$liveAge" \
       '{pid:$pid, project:$proj, agent:$agent, pane:$pane, scope:$scope,
-        uptimeSec:$etimes, cpuSec:$cputimes, rssMB:$rssMB, yours:$yours, stale:$stale}')")
+        uptimeSec:$etimes, cpuSec:$cputimes, rssMB:$rssMB, yours:$yours, stale:$stale,
+        live:$live, liveAgeSec:(if $liveAge < 0 then null else $liveAge end)}')")
 done
 
 # ── output ───────────────────────────────────────────────────────────────────
@@ -170,10 +194,11 @@ fi
   printf '%s\n' "${rows[@]:-}" | jq -rs '
     (map(select(.!=null)) | sort_by([(.yours | not), .project, .pid]))[] |
     [ (.pid|tostring), .project, .agent, .pane, .scope,
+      (if .live != null then "\(.live)@\((.liveAgeSec // 0) / 60 | floor)m" else "-" end),
       "\(.uptimeSec / 60 | floor)m", "\(.cpuSec)s", "\(.rssMB)M",
       (if .yours then "yours" else "NOT-YOURS" end),
       (if .stale then "stale?" else "" end) ] | @tsv' \
-    | column -t -s $'\t' -N PID,PROJECT,AGENT,PANE,SCOPE,UP,CPU,RSS,OWNER,FLAG 2>/dev/null \
+    | column -t -s $'\t' -N PID,PROJECT,AGENT,PANE,SCOPE,LIVE,UP,CPU,RSS,OWNER,FLAG 2>/dev/null \
     || printf '%s\n' "${rows[@]:-}" | jq -rs '.[] | "\(.pid) \(.project) \(.agent) \(.pane) \(.scope)"'
   n_stale="$(printf '%s\n' "${rows[@]:-}" | jq -rs '[.[] | select(.!=null and .stale)] | length')"
   [ "${n_stale:-0}" -gt 0 ] && echo "  ⚠ ${n_stale} stale candidate(s) — inspect by hand (pane-less + old + idle CPU). Observer only: this tool terminates nothing."

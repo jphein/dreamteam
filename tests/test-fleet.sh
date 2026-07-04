@@ -70,8 +70,17 @@ printf '101\n102\n103\n'
 EOF
 chmod +x "$TMP/bin/"*
 
+# Liveness stamps (#20): 101 stamped fresh-working; 102 stamped idle LONG ago
+# (pane-less + old stamp ⇒ stale); 103 unstamped (heuristic path). Plus one
+# ancient orphan stamp the age-GC must prune.
+mkdir -p "$TMP/fleetstate"
+printf 'working %s\n' "$(date +%s)" > "$TMP/fleetstate/alpha__lucid-x"
+printf 'idle %s\n' "$(( $(date +%s) - 99999 ))" > "$TMP/fleetstate/beta__luna-w1"
+touch -d '3 days ago' "$TMP/fleetstate/ghost__gone"
+
 run() { HOME="$TMP/home" DREAMTEAM_CGROUP_ROOT="$TMP/cg" DREAMTEAM_TMUX_DIR="$TMP/tmux" \
         DREAMTEAM_PROC="$TMP/proc" DREAMTEAM_CALLER_CWD="$TMP/home/Projects/alpha" \
+        DREAMTEAM_FLEET_STATE="$TMP/fleetstate" \
         DREAMTEAM_CONFIG="$ROOT/config.json" CLAUDE_PLUGIN_ROOT="$ROOT" \
         PATH="$TMP/bin:$PATH" bash "$FLEET" "$@"; }
 
@@ -97,6 +106,14 @@ A102='.agents[] | select(.pid==102)'
 [ "$(echo "$J" | jq -r "$A102 | .scope")" = "dreamteam-beta.scope" ] && ok "NESTED cgroup member attributed to its scope" || bad "102 scope"
 [ "$(echo "$J" | jq -r "$A102 | .yours")" = "false" ] && ok "other project's agent yours=false" || bad "102 yours"
 [ "$(echo "$J" | jq -r "$A102 | .stale")" = "true" ] && ok "pane-less + old + idle ⇒ stale candidate" || bad "102 stale"
+
+# ── liveness stamps (#20) ─────────────────────────────────────────────────────
+[ "$(echo "$J" | jq -r "$A101 | .live")" = "working" ] && ok "fresh stamp read (live=working)" || bad "101 live: $(echo "$J" | jq -r "$A101|.live")"
+[ "$(echo "$J" | jq -r "$A101 | .liveAgeSec < 60")" = "true" ] && ok "stamp age computed" || bad "101 liveAge"
+[ "$(echo "$J" | jq -r "$A102 | .live")" = "idle" ] && ok "old idle stamp read on 102" || bad "102 live"
+[ "$(echo "$J" | jq -r '.agents[] | select(.pid==103) | .live')" = "null" ] && ok "unstamped agent falls back to heuristic (live=null)" || bad "103 live"
+[ -f "$TMP/fleetstate/ghost__gone" ] && bad "ancient stamp survived age-GC" || ok "age-GC pruned the 3-day-old orphan stamp"
+[ -f "$TMP/fleetstate/alpha__lucid-x" ] && ok "fresh stamps survive GC" || bad "GC ate a fresh stamp"
 
 # ── filters ───────────────────────────────────────────────────────────────────
 [ "$(run --json --project beta | jq -r '.agents | length')" = "1" ] && ok "--project filters" || bad "--project"

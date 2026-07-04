@@ -41,7 +41,10 @@ chmod +x "$TMP/bin/systemctl"
 # desktop bus (RED/scope tier events call it; tests must not spam JP's desktop).
 printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "%s/notify.log"\n' "$TMP" > "$TMP/bin/notify-send"
 chmod +x "$TMP/bin/notify-send"
-run_ev() { DREAMTEAM_TEST=1 DREAMTEAM_STATE="$TMP/state" DREAMTEAM_TEAMS_DIR="$TMP/teams" CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/team-events.sh"; }
+# DREAMTEAM_PROJECT_DIR pins the derived project/scope name (hermetic against
+# whatever REAL dreamteam-<cwd>.scope is live on the host); DREAMTEAM_FLEET_STATE
+# isolates the #20 liveness stamps.
+run_ev() { DREAMTEAM_TEST=1 DREAMTEAM_STATE="$TMP/state" DREAMTEAM_TEAMS_DIR="$TMP/teams" DREAMTEAM_PROJECT_DIR="$TMP/projx" DREAMTEAM_FLEET_STATE="$TMP/fleet" CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/team-events.sh"; }
 run_cg() { DREAMTEAM_TEST=1 DREAMTEAM_STATE="$TMP/state" DREAMTEAM_TEAMS_DIR="$TMP/teams" CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/compact-guard.sh"; }
 
 for f in team-events compact-guard subagent-statusline; do
@@ -59,6 +62,17 @@ OUT=$(echo '{"hook_event_name":"SubagentStop","agent_id":"lucid@s1"}' | run_ev)
 case "$OUT" in *lucid@s1*stopped*) ok "SubagentStop emits stop notice";; *) bad "SubagentStop ($OUT)";; esac
 OUT=$(echo '{"hook_event_name":"SubagentStart","agent_name":"wisp"}' | run_ev)
 [ -z "$OUT" ] && ok "SubagentStart is log-only (no stdout)" || bad "SubagentStart silent ($OUT)"
+
+# team-events: liveness stamps (#20) — the fleet observer's real signal.
+# The three events above already fired; assert their stamps landed with the
+# right states, project-prefixed keys, and @team stripped from agent ids.
+read -r ST _EP < "$TMP/fleet/projx__luna" 2>/dev/null || ST=missing
+[ "$ST" = "idle" ] && ok "TeammateIdle stamps idle (projx__luna)" || bad "idle stamp: $ST"
+read -r ST _EP < "$TMP/fleet/projx__wisp" 2>/dev/null || ST=missing
+[ "$ST" = "working" ] && ok "SubagentStart stamps working" || bad "working stamp: $ST"
+read -r ST EPOCH < "$TMP/fleet/projx__lucid" 2>/dev/null || ST=missing
+[ "$ST" = "stopped" ] && ok "SubagentStop stamps stopped, @team stripped (lucid@s1 → lucid)" || bad "stopped stamp: $ST"
+case "${EPOCH:-x}" in ''|*[!0-9]*) bad "stamp epoch not numeric (${EPOCH:-empty})";; *) ok "stamp carries numeric epoch";; esac
 
 # team-events: worktree audit — off-pattern flagged, canonical path not
 echo '{"hook_event_name":"WorktreeCreate","path":"/tmp/rogue"}' | run_ev >/dev/null

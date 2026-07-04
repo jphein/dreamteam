@@ -148,12 +148,35 @@ tier_note() {
   fi
 }
 
+# ── liveness stamps (#20): these hooks KNOW working/idle — record it where the
+# cross-project fleet observer reads it (fleet.sh LIVE column; stamp beats its
+# CPU-time heuristic). One tiny file per agent in a GLOBAL dir — every project's
+# session writes here, fleet.sh joins on project+agent and age-prunes old files.
+# Content: "<state> <epoch>". Never blocks, never fails the hook.
+FLEET_STATE="${DREAMTEAM_FLEET_STATE:-$HOME/.claude/dreamteam-fleet}"
+stamp_live() {
+  [ -n "${WHO:-}" ] || return 0
+  local proj key
+  proj="$(basename "$(dreamteam_project_root 2>/dev/null || echo "$PWD")")"
+  key="$(printf '%s__%s' "$proj" "${WHO%%@*}" | tr '/' '_')"
+  mkdir -p "$FLEET_STATE" 2>/dev/null || return 0
+  printf '%s %s\n' "$1" "$(date +%s)" > "$FLEET_STATE/$key" 2>/dev/null || true
+}
+case "$EVENT" in
+  TeammateIdle)  stamp_live idle ;;
+  SubagentStart) stamp_live working ;;
+  SubagentStop)  stamp_live stopped ;;
+esac
+
 case "$EVENT" in
   TeammateIdle)
     # Containment sweep: idle events fire constantly during fleet work, so any
     # agent that slipped past its spawn-time attach gets caught here (cheap —
-    # scope-attach only busctl's pids not already in the scope).
-    bash "$ROOT/scripts/scope-attach.sh" 2>/dev/null || true
+    # scope-attach only busctl's pids not already in the scope). DREAMTEAM_TEST
+    # guard: the suite must never create/modify REAL scopes (it did — an empty
+    # dreamteam-projx.scope appeared on the host the moment the fixtures pinned
+    # a fake project; caught live 2026-07-04).
+    [ -n "${DREAMTEAM_TEST:-}" ] || bash "$ROOT/scripts/scope-attach.sh" 2>/dev/null || true
     # Pane sweep: the harness sometimes creates an agent's tmux pane AFTER the
     # spawn's PostToolUse fires, so it stayed in the orchestrator window ("not
     # making the agents tab"). By idle time the pane exists → sweep it here.

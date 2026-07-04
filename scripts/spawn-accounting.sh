@@ -46,6 +46,18 @@ fi
 # not the host — and not any OTHER project's fleet.
 bash "$ROOT/scripts/scope-attach.sh" 2>/dev/null || true
 
+# Liveness stamp (#20): a spawn means "working" — first stamp lands here (idle/
+# stopped transitions come from team-events.sh). Same key scheme as fleet.sh.
+SPAWN_NAME="$(printf '%s' "$INPUT" | jq -r '.tool_input.name // empty' 2>/dev/null)"
+if [ -n "$SPAWN_NAME" ]; then
+  # shellcheck source=lib.sh
+  . "$ROOT/scripts/lib.sh" 2>/dev/null || true
+  FLEET_STATE="${DREAMTEAM_FLEET_STATE:-$HOME/.claude/dreamteam-fleet}"
+  _PROJ="$(basename "$(command -v dreamteam_project_root >/dev/null 2>&1 && dreamteam_project_root || echo "$PWD")")"
+  mkdir -p "$FLEET_STATE" 2>/dev/null \
+    && printf 'working %s\n' "$(date +%s)" > "$FLEET_STATE/$(printf '%s__%s' "$_PROJ" "${SPAWN_NAME%%@*}" | tr '/' '_')" 2>/dev/null || true
+fi
+
 # Build roster summary from the AUTHORITATIVE harness team config (via roster.sh)
 # — every member with its TRUE status, not just spawns this session saw. roster.sh
 # always exits 0; if it can't resolve a team, .agents is empty → blank line.
