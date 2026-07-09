@@ -472,6 +472,42 @@ spawn whenever the target team has a reusable idle agent, and names the best-fit
 > Reinforces `feedback_reuse_idle_agents.md` and `feedback_never_shutdown_active_agents.md`:
 > keep agents alive AND recycle them. Idle agents are a resource, not waste.
 
+## Local-Model Lane (ollama) — mechanical bulk, summaries, embeddings
+
+An **optional** local lane offloads work that does **not** need frontier reasoning onto
+this box's ollama (issue #16). It is **not a third agent-brain tier** — JP's 2026-07-01
+ruling stands: agent *reasoning* is Fable 5 → latest Opus, never sonnet/haiku/local. The
+lane is **default-off** (`config.json` → `.local.enabled`, read `==false`-safe) and
+degrades to a clean no-op whenever ollama is absent, so nothing in the default path depends
+on it being installed.
+
+**Belongs on the local lane** (route here to save cloud tokens / rate-limit budget):
+- **Mechanical bulk** — rename/format/comment-normalization sweeps, commit-message &
+  changelog stubs, boilerplate transforms.
+- **Cron summaries** — morning-briefing.sh / self-audit.sh digests (a 7am systemd timer
+  shouldn't spend cloud tokens on a paragraph).
+- **Embeddings** — `nomic-embed-text` vectors for palace/dreamteam search (`--embed`).
+- **Pre-filter triage** — deciding which files/logs a real agent should read next.
+
+**Never on the local lane:** architecture/design decisions, anything JP reads as a
+first-class answer, code an agent will commit without review, or any real judgement call.
+When unsure, it goes to the agent brain, not here.
+
+**How to call it** — `scripts/local-model.sh` is a consumer *seam*, not a hook, so it
+signals by **exit code** (unlike the hook scripts, which always exit 0):
+
+    OUT="$(scripts/local-model.sh "$prompt")" && use "$OUT" || fall_back_to_cloud
+    scripts/local-model.sh --embed "text"      # → JSON embedding array on stdout
+    scripts/local-model.sh --available          # exit 0 iff the lane is usable (quiet probe)
+
+`exit 0` = completion/embedding on stdout · `exit 3` = lane unavailable (disabled, ollama
+down, model/API error) → **the caller MUST fall back to cloud** · `exit 1` = no prompt.
+
+**Verification law:** anything the local lane generates that will **land in a repo** goes
+through the **oracle** (Fable/Opus) before commit — treat local output as a draft, never as
+trusted. **Memory:** a resident model is ~7-9 GB that mem-gate can't see; before arming the
+lane on a box also running fleets, bump `memory.hostReserveMB` (see `.local._notes`).
+
 ## Agent Tooling — code intelligence & browser
 
 ### LSP — code intelligence (go-to-def, find-refs, call hierarchy)
@@ -1014,7 +1050,7 @@ the transcript; this entry is the short, searchable index that points back to it
 - **Full-tool agent types for implementers** — team spawns need Bash/Edit/gh: use
   `general-purpose` or a dreamteam type (`luna`/`morpheus`/`lucid`/`nebula`, all-tools).
   `Explore`/`Plan` lack Edit/Write; read-only verification → `oracle` (§ Verify). Dream agents
-  **inherit the session model** (Fable 5; settings fallback to latest Opus) — never pin a model per agent, no Sonnet/Haiku tiers.
+  **inherit the session model** (Fable 5; settings fallback to latest Opus) — never pin a model per agent, no Sonnet/Haiku tiers. Local models are **not** an agent tier either — offload only mechanical bulk / summaries / embeddings to them via the **Local-Model Lane** (§ above), never agent reasoning.
 - **Salvage protocol when collisions happen anyway** — if you discover agents collided in the orchestrator's worktree: (1) shut all agents down with `shutdown_request` to stop further churn, (2) `git stash push -u` with a dated label to preserve all uncommitted work, (3) inspect each commit on each branch (`git log <branch> ^origin/main`) — work may have committed before the collision and only needs pushing, (4) for unpushed work, split the stash diff by file and apply each portion in a fresh isolated worktree off origin/main, then test + commit + push + PR per agent. Do not rebase or cherry-pick across collided branches — start clean.
 
 ## Context Hygiene

@@ -39,5 +39,20 @@
     "memorySwapMax": "8G",
     "autoAttach": true,
     "_notes": "Caps for BOTH containment paths: launch-dreamteam.sh (whole-session scope) and scope-attach.sh (autoAttach=true: every spawn attaches THIS PROJECT'S live agent procs into dreamteam-<project>.scope via AttachProcessesToUnit \u2014 per-project since #19, so scope==project for fleet attribution and one project's runaway can't throttle another's fleet; before that, one shared dreamteam-agents.scope held everyone, added after the 2026-07-01 16:06 oomd kill). Name precedence: DREAMTEAM_SCOPE_NAME env > scope.name (add here to pin) > dreamteam-<repo basename, sanitized>. Caps apply PER SCOPE \u2014 N projects can nominally reserve N*MemoryHigh; the host RED-tier floor and systemd-oomd remain the global guards. MemoryHigh = throttle; MemoryMax = hard kill inside the agents' cgroup (orchestrators stay outside and survive); MemorySwapMax bounds the team's swap. Size to leave the GUI/host a few GB."
+  },
+  "local": {
+    "enabled": false,
+    "host": "http://localhost:11434",
+    "model": "qwen2.5:14b-instruct-q4_K_M",
+    "embedModel": "nomic-embed-text:v1.5",
+    "timeoutSec": 120,
+    "_notes": {
+      "enabled": "The OPTIONAL local-model (ollama) lane — issue #16. DEFAULT false = the whole lane is a clean no-op and NOTHING in the default path touches ollama. scripts/local-model.sh reads this ==false-safe: only a literal `true` arms it (absent/null/false all stay off), sidestepping the jq `// true` trap that once made speech.enabled un-disableable. This is NOT a third agent-brain tier — JP's 2026-07-01 ruling stands (agent reasoning = Fable 5 → latest Opus; no sonnet/haiku/local). The lane is ONLY for work that doesn't need frontier reasoning: mechanical bulk, cron summaries (morning-briefing/self-audit), embeddings, and pre-filter triage. Anything it generates that lands in a repo goes through the oracle (Fable/Opus) before commit. Env DREAMTEAM_LOCAL_ENABLED overrides per-invocation.",
+      "model": "Default generation model. qwen2.5:14b-instruct-q4_K_M (~9 GB, fits the 11 GiB 2080 Ti) is on-disk here and issue-endorsed. The lane NEVER auto-pulls — a missing model just fails the call (exit 3 → caller falls back to cloud). For a dedicated coder model, `ollama pull qwen2.5-coder:7b` and repoint this. Env DREAMTEAM_LOCAL_MODEL / --model override.",
+      "embedModel": "Embeddings model for the --embed path (palace/dreamteam search). nomic-embed-text:v1.5 (768-dim) is on-disk. Env DREAMTEAM_LOCAL_EMBED_MODEL override.",
+      "host": "ollama HTTP API base URL. Env DREAMTEAM_LOCAL_HOST override.",
+      "timeoutSec": "Per-request curl cap in seconds (a cold model load can take tens of seconds on the first call). Env DREAMTEAM_LOCAL_TIMEOUT override.",
+      "memoryAccounting": "OPEN (issue #16 bullet 3, out of THIS change's scope): a resident ollama model is ~7-9 GB of RSS/VRAM that mem-gate CANNOT see (it counts only claude procs). Dormant while enabled=false. Before arming the lane on a box that also runs fleets, bump memory.hostReserveMB to cover the resident model, or attach the ollama server to the containment scope — else admission math under-counts by a whole model."
+    }
   }
 }
