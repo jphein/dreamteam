@@ -800,7 +800,9 @@ Scouts (Nebula, Haze) file issues → fixers (Morpheus, Aurora, Lucid) pick them
 **🚨 SCOPE PRESSURE** signal fires when the agents scope's `MemoryCurrent` reaches ≥85% of its
 `MemoryHigh` — that one specifically predicts a scope kill (quiesce; a kill takes the whole
 team). RED and scope-pressure additionally fire **throttled multi-channel attention** to JP —
-a desktop notification (`notify-send`) *and* one spoken Davis sentence (`speak.sh`, issue #9) —
+a desktop notification (`notify-send`) *and* one spoken Davis sentence (`speak.sh`, issue #9;
+an offline `azure → piper` fallback chain keeps that Davis voice audible when the cloud is
+down, config `speech.fallback`, issue #17) —
 both gated by the SAME marker (max one attention event per 10 min; each channel independently
 best-effort, voice detached so hooks never block; muted via config `speech.enabled=false`).
 Before this the ladder was prose no orchestrator watched —
