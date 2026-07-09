@@ -35,7 +35,8 @@ dreamteam/
 ├── scripts/
 │   ├── mem-gate.sh                ★ PreToolUse gate — blocks a spawn with no headroom
 │   ├── reuse-gate.sh              ★ PreToolUse gate — blocks a spawn when an idle teammate fits
-│   ├── idle-agents.sh             idle-agent oracle + context-affinity scorer
+│   ├── roster.sh                  authoritative team roster + liveness (--json contract)
+│   ├── idle-agents.sh             idle-agent oracle + context-affinity scorer (--json contract)
 │   ├── crash-audit.sh             SessionStart — surfaces the recovery checklist
 │   ├── spawn-accounting.sh        PostToolUse — cumulative footprint log
 │   ├── cleanup-marker.sh          SessionEnd — clears the active marker (clean exit)
@@ -62,6 +63,14 @@ dreamteam/
    own tmux server → a runaway is hard-capped within the team; host + JP's session survive.
 4. **Recovery** (`crash-audit.sh`): next session auto-surfaces "check worktrees for
    uncommitted work, reconcile the merge cascade, resume from item N."
+
+## Team-state JSON contract
+
+`roster.sh --json` and `idle-agents.sh --json` are the **public team-state oracle** —
+external tools (guildmaster, dashboards) shell out to them and parse the result. That
+JSON shape is a **frozen, versioned contract**, not an internal detail free to drift:
+see [`docs/json-contract.md`](docs/json-contract.md) for every field, type, enum, and
+the empty/exit-code guarantees — locked against drift by `tests/test-json-contract.sh`.
 
 ## Install (after review — these hooks BLOCK spawns and can KILL processes)
 
