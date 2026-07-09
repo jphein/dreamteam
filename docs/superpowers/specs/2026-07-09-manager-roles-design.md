@@ -219,3 +219,22 @@ false-flagged this session's startup).
   not part of this plan.
 - **tokentelemetry budgets** (guildmaster#11) — future Nyx input, not now.
 - Dashboard surfacing of manager presence — YAGNI until the roles prove out.
+
+## Addendum — 2026-07-09, post-approval discoveries
+
+1. **`scripts/poke.sh` already exists** (JP prototype, untracked at time of
+   writing): immediate message delivery by typing into an agent's pane, resolved
+   via its `@handle` pane footer. It names the SendMessage lag precisely
+   ("queues until the target agent's next tool round"). Design updates:
+   - Hypnos's re-delivery fallback **is `poke.sh`** — not a raw send-keys recipe.
+   - poke reaches **forks** by name too (footer match), softening §3's fork
+     limitation for short one-line nudges; the teammate rule stands for full
+     two-way comms.
+   - Implementation item: adopt/commit poke.sh (JP's call — his prototype).
+2. **spawn-standards.sh roster list** must gain `hypnos` and `nyx` — confirmed
+   live 2026-07-09: the gate correctly blocked the pilot `hypnos-agent-manager`
+   spawn as a non-roster name (escape hatch `STANDARDS-EXEMPT:` used for the
+   pilot).
+3. **Pending input:** nebula-teamwork-research (spawned same day) will propose
+   numbered spec deltas from human-team + multi-agent-AI effectiveness research;
+   fold accepted deltas here before writing the implementation plan.
