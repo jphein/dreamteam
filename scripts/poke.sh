@@ -42,7 +42,11 @@ if [ "$dry" = 1 ]; then
   exit 0
 fi
 
-# Type the message literally, then submit with Enter.
+# Type the message literally, then submit with Enter. A brief settle between the
+# paste and the Enter is REQUIRED: without it the Enter can arrive while the TUI is
+# still ingesting the paste, so the text lands in the input box but never submits
+# ("queued-without-submit"). 0.4s reliably lets the paste register first.
 tmux send-keys -t "$target" -l "$msg"
+sleep 0.4
 tmux send-keys -t "$target" Enter
 echo "poked @${agent} -> ${target}: ${msg}"
