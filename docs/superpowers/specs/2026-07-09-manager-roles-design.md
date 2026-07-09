@@ -238,3 +238,13 @@ false-flagged this session's startup).
 3. **Pending input:** nebula-teamwork-research (spawned same day) will propose
    numbered spec deltas from human-team + multi-agent-AI effectiveness research;
    fold accepted deltas here before writing the implementation plan.
+4. **Dedicated `manager` window (JP directive, same day):** each team's manager
+   runs in its own tmux window named `manager` in the team's session — mirroring
+   JP's fleet-coordinator prototype (rune:3). After spawning the manager, break
+   its pane out (`tmux break-pane -d -s <pane> -n manager`) and retile `agents`.
+   `pane-organizer.sh` already never reclaims a `manager`-named window (guard
+   landed in 97c5612), so the convention is sweep-safe. §4's startup sequence
+   gains this as a post-spawn step. Corollary from performing the move live:
+   pane indexes shift as teammates join (Hypnos had drifted 2.2→2.4 within the
+   hour) — resolve panes by `@handle` footer match at use time (`poke.sh
+   --dry-run`); never store static pane indexes in the roster as truth.
