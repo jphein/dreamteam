@@ -258,15 +258,21 @@ detailed one, `/dreamteam-incident` the forensic one after a kill.
 branches=(fix/262-chroma-cache-close feat/261-injectable-backend perf/266-kg-stats-backing-tables perf/267-status-sql-groupby)
 agents=(lucid     vesper                       haze                          reverie)
 
-# Step 2 — fetch the base ref so worktrees branch off the right tip
-git fetch origin main
-
-# Step 3 — create one worktree per agent off origin/main
+# Step 2+3 — create one worktree per agent, CWD-INDEPENDENTLY (repo-root-anchored).
+# Use scripts/worktree-provision.sh: it resolves the repo TOPLEVEL and creates the
+# worktree at an ABSOLUTE  <root>/.claude/worktrees/<agent>-<branch-basename>  path,
+# fetching origin/main first. This is robust to your cwd being a SUBDIRECTORY — the old
+# relative-path recipe (`git worktree add … ".claude/worktrees/…" origin/main`) created
+# worktrees NESTED inside the working tree when run from e.g. rust/clock, so the agent
+# "couldn't isolate and ran in-place" (the 2026-07-08 breakage). The script prints the
+# ABSOLUTE worktree path (use it verbatim in Step 5); it is idempotent.
+declare -A WT
 for i in "${!agents[@]}"; do
-  git worktree add -b "${branches[$i]}" ".claude/worktrees/${agents[$i]}-${branches[$i]##*/}" origin/main
+  WT[${agents[$i]}]=$("$CLAUDE_PLUGIN_ROOT/scripts/worktree-provision.sh" "${agents[$i]}" "${branches[$i]}")
+  echo "  ${agents[$i]} -> ${WT[${agents[$i]}]}"
 done
 
-# Step 4 — verify (must show one entry per agent)
+# Step 4 — verify (must show one entry per agent, all under <root>/.claude/worktrees/)
 git worktree list
 ```
 
