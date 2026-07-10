@@ -143,19 +143,29 @@ J="$(run --team faketeam --roster-md "$TMP/does-not-exist.md" --json)"
 [ "$(top '.overlay')" = "null" ] && ok "missing overlay ⇒ overlay null (graceful)" || bad "missing overlay=$(top '.overlay')"
 [ "$(top '.agents | length')" = "6" ] && ok "missing overlay ⇒ agents still listed" || bad "missing overlay agents=$(top '.agents|length')"
 
-# ── bare (no --team): HARD-REQUIRED — fail-closed, non-zero exit, does NOT proceed ──
+# ── bare (no --team): MODE-DEPENDENT — --json fails closed, human warns+proceeds ──
+# --json + no --team → ERROR + non-zero exit (22): a machine consumer never sees a
+# stderr warning, so fail-closed rather than feed it wrong-team data (the R4 footgun).
 run --json >/dev/null 2>&1; rc=$?
-[ "$rc" -ne 0 ]  && ok "bare: no --team ⇒ non-zero exit (fail-closed, R4)" || bad "bare: expected non-zero exit, got $rc"
-[ "$rc" = "22" ] && ok "bare: exit code 22 (client error)"                 || bad "bare: expected exit 22, got $rc"
+[ "$rc" -ne 0 ]  && ok "bare --json: non-zero exit (fail-closed, R4)" || bad "bare --json: expected non-zero exit, got $rc"
+[ "$rc" = "22" ] && ok "bare --json: exit code 22 (client error)"     || bad "bare --json: expected exit 22, got $rc"
 ERR="$(run --json 2>&1 >/dev/null)"
-echo "$ERR" | grep -qi "REQUIRED" && ok "bare: stderr states --team is REQUIRED" || bad "bare: no REQUIRED error ($ERR)"
-# fail-closed contract: a --json consumer (guildmaster) gets NOTHING on stdout — never
-# wrong-team data. This is the whole point of exiting instead of warn+proceed.
+echo "$ERR" | grep -qi "REQUIRED" && ok "bare --json: stderr states --team is REQUIRED" || bad "bare --json: no REQUIRED error ($ERR)"
 OUT="$(run --json 2>/dev/null)"
-[ -z "$OUT" ] && ok "bare: stdout empty (no wrong-team data reaches a JSON consumer)" || bad "bare: stdout not empty ($OUT)"
-# a real --team still works (control: the guard isn't vacuously blocking everything)
+[ -z "$OUT" ] && ok "bare --json: stdout empty (no wrong-team data reaches a JSON consumer)" || bad "bare --json: stdout not empty ($OUT)"
+
+# human mode + no --team → WARN then PROCEED (exit 0): the operator sees the warning, so
+# the interactive convenience is kept. It resolves the newest team from the engine rows.
+run >/dev/null 2>&1; rc=$?
+[ "$rc" = "0" ] && ok "bare human: warns then PROCEEDS (exit 0, not fail-closed)" || bad "bare human: expected exit 0, got $rc"
+ERR="$(run 2>&1 >/dev/null)"
+echo "$ERR" | grep -qi "smol-team" && ok "bare human: stderr warns about the smol-team bug" || bad "bare human: no warning ($ERR)"
+H="$(run 2>/dev/null)"
+echo "$H" | grep -q "realtime roster — team 'faketeam'" && ok "bare human: proceeds against newest team (resolved faketeam)" || bad "bare human: no output ($H)"
+
+# a real --team still works (control: neither guard is vacuously blocking everything)
 J="$(run --team faketeam --roster-md "$TMP/roster-fmt2.md" --json 2>/dev/null)"
-[ "$(top '.team')" = "faketeam" ] && ok "control: --team faketeam still produces output" || bad "control: --team faketeam broke ($(top '.team'))"
+[ "$(top '.team')" = "faketeam" ] && ok "control: --team faketeam --json still produces output" || bad "control: --team faketeam broke ($(top '.team'))"
 
 # ── human render ─────────────────────────────────────────────────────────────────
 H="$(run --team faketeam --roster-md "$TMP/roster-fmt2.md" 2>/dev/null)"

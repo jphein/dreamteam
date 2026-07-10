@@ -22,15 +22,18 @@
 #   assignment overlay and the presentation. No pane-resolution logic is duplicated
 #   here — it reads the engine's JSON.
 #
-# --team IS REQUIRED (fail-closed). Bare selection would fall back to the most-recently-
+# --team requirement is MODE-DEPENDENT. Bare selection falls back to the most-recently-
 #   modified team config — the "smol-team bug": in a multi-team session the newest config
-#   is usually the WRONG team. A warn-then-proceed is invisible to a --json consumer
-#   (guildmaster), so it could silently feed wrong-team data. Instead we ERROR on stderr
-#   and EXIT 22 when --team is omitted — never proceed. (Manager-role R4 / personas #43
-#   already mandate --team; this enforces it at the tool boundary.)
+#   is usually the WRONG team. The split:
+#     • --json + no --team → ERROR on stderr + EXIT 22. A machine consumer (Nyx kills,
+#       dashboards, gm peek) never sees a stderr warning, so fail-closed rather than
+#       silently feed wrong-team data (the R4 footgun; personas #43 mandate --team).
+#     • human mode + no --team → warn loudly on stderr, then PROCEED against the newest
+#       team. The operator SEES the warning, so keep the interactive convenience.
 #
-# Usage: roster-live.sh --team NAME [--json] [--roster-md PATH] [--no-overlay]
-#   --team NAME      team config to resolve against (REQUIRED — no default).
+# Usage: roster-live.sh [--team NAME] [--json] [--roster-md PATH] [--no-overlay]
+#   --team NAME      team config to resolve against (REQUIRED with --json; human mode
+#                    warns then proceeds against the newest team).
 #   --json           machine output (contract for manager roles / dashboards).
 #   --roster-md PATH explicit assignment-overlay file (else auto-discovered by team).
 #   --no-overlay     skip the roster.md overlay entirely (pane-truth only).
@@ -55,10 +58,15 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -z "$TEAM" ]; then
-  echo "roster-live: --team <session> is REQUIRED — bare selection resolves the newest-mtime" >&2
-  echo "             team = the smol-team bug (usually the WRONG team). Refusing to guess." >&2
-  echo "             Find yours under ~/.claude/teams/ (e.g. session-xxxxxxxx)." >&2
-  exit 22                                          # client error: fail-closed, do NOT proceed
+  if [ "$FMT" = "json" ]; then
+    # machine consumers never see a stderr warning → fail-closed (the R4 footgun)
+    echo "roster-live: --team <session> is REQUIRED with --json — bare selection resolves the" >&2
+    echo "             newest-mtime team = the smol-team bug. Refusing to feed a consumer wrong-team data." >&2
+    exit 22                                        # client error: do NOT proceed
+  fi
+  # human/interactive: the operator SEES this, so warn loudly but proceed for convenience
+  echo "roster-live: ⚠ no --team given — using the newest team config, which is often the" >&2
+  echo "             WRONG team in a multi-team session (the smol-team bug). Pass --team NAME." >&2
 fi
 
 ACT_JSON="$(bash "$ENGINE" ${TEAM:+--team "$TEAM"} --json 2>/dev/null || true)"
@@ -75,8 +83,8 @@ fmt = os.environ.get("FMT") or "human"
 roster_md = os.environ.get("ROSTER_MD") or ""
 projects_dir = os.environ.get("PROJECTS_DIR") or ""
 
-# --team is required (the bash guard exits 22 when it's empty), so team_arg is always
-# set here; the rows fallback is belt-and-suspenders for a direct/programmatic call.
+# --json requires --team (the bash guard exits 22 there); in human mode a bare call
+# proceeds against the newest team, whose name we recover from the engine rows here.
 team = team_arg or (act[0].get("team") if act else "") or ""
 
 def normkey(s):

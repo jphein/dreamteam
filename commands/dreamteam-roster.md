@@ -1,6 +1,6 @@
 ---
 description: Realtime agent roster — live names, panes, and pane-trusted status, plus reusable idle agents.
-argument-hint: "<team-name> — REQUIRED; bare fails closed (exit 22) to avoid the smol-team bug"
+argument-hint: "<team-name> — required with --json (fails closed); human mode warns + proceeds"
 ---
 
 The **realtime roster**: who is on the team, what pane each agent is in, and its
@@ -8,10 +8,11 @@ pane-trusted status (ACTIVE / IDLE / queued / stale-isActive / no-pane / dead) �
 from the LIVE pane, not a stale hook-stamp — joined to each agent's assignment
 (issue / branch / task) from `scratch/<team>/roster.md`.
 
-**`--team` is required.** Bare invocation would fall back to the most-recently-modified
-team config — usually the *wrong* team in a multi-team session (the smol-team bug) — so
-it instead **fails closed** (errors to stderr, exits 22) rather than feed a `--json`
-consumer wrong-team data. Find your team name under `~/.claude/teams/` (e.g.
+**Always pass the team.** Bare invocation falls back to the most-recently-modified team
+config — usually the *wrong* team in a multi-team session (the smol-team bug). With
+`--json` (machine consumers, who never see a stderr warning) a missing `--team`
+**fails closed** — errors to stderr and exits 22. In human mode it warns loudly and
+proceeds against the newest team. Find your team name under `~/.claude/teams/` (e.g.
 `session-xxxxxxxx`).
 
 ```bash
