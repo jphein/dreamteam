@@ -416,7 +416,7 @@ Voice: en-US-Brian:DragonHDLatestNeural, quality hd, subtitle_color green.
   (never blocks) and applies the offline fallback (#17) + --timeout (#52). Use your persona's
   plain *Neural id here — the DragonHD ids 400 through the CLI in this region.
 - To HEAR JP when blocked on a decision: do NOT take the mic yourself (ONE shared mic). Ask
-  Sandman to run scripts/listen.sh and relay JP's spoken reply (see "Agent Voice I/O").
+  Hypnos (the mic arbiter) to run scripts/listen.sh and relay JP's spoken reply (see "Agent Voice I/O").
 
 WORKTREE — absolute requirement:
 - Your worktree is at: /home/jp/Projects/<repo>/.claude/worktrees/lucid-262-chroma-cache-close
@@ -704,9 +704,10 @@ Captures JP's spoken reply so an agent blocked on a decision can **ask aloud and
 
 ⛔ **ONE MIC — hard rule.** There is a single microphone on the host, shared by every session
 and project. `listen.sh` serializes on a **global flock**, but the *policy* is: a **worker
-agent NEVER grabs the mic itself**. When blocked, it SendMessages **Sandman** (or the standing
-manager, Hypnos), who runs `listen.sh` once and relays JP's answer back. This keeps turns from
-fighting over the mic and keeps one coherent voice conversation. `listen.sh` waits up to
+agent NEVER grabs the mic itself**. **The mic arbiter is Hypnos** (the standing manager): a
+blocked agent SendMessages **Hypnos**, who runs `listen.sh` once and relays JP's spoken answer
+back — falling back to **Sandman** only if no manager is up. This keeps turns from fighting
+over the mic and keeps one coherent voice conversation. `listen.sh` waits up to
 `--lock-wait` then returns **exit 3 (mic busy)** rather than blocking; missing mic/creds →
 graceful no-op (empty stdout, exit 0). Muted with the same `speech.enabled=false` as speak.
 
