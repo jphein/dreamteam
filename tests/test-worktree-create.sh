@@ -110,5 +110,45 @@ run_hook "$(payload x "$TMP/not-a-repo")"
 [ "$HRC" -ne 0 ] && pass "non-repo cwd → non-zero exit (creation fails cleanly, no phantom success)" \
   || fail "non-repo cwd should fail — got exit 0, out '$OUT'"
 
+# ── (7) #66 REGRESSION GUARD: the WorktreeCreate matcher must contain EXACTLY ONE
+#        hook — the path producer. #66's root cause: a 2nd (async team-events) hook
+#        shared the matcher, and the runtime consumed the logger (no path) instead of
+#        the path producer → "hook succeeded but returned no worktree path", no worktree
+#        (verified live: no dream/* branch ever created). This fails if a second hook is
+#        re-added to WorktreeCreate. Negative control: team-events must STILL be wired
+#        elsewhere (proves we removed it from ONE matcher, not unwired it globally).
+WCINV="$(python3 - "$ROOT/hooks/hooks.json" <<'PY'
+import json,sys
+h=json.load(open(sys.argv[1])).get("hooks",{})
+cmds=[x.get("command","") for g in h.get("WorktreeCreate",[]) for x in g.get("hooks",[])]
+prob=[]
+if len(cmds)!=1: prob.append("WorktreeCreate has %d hooks, must be exactly 1"%len(cmds))
+if not (cmds and "worktree-create-hook.sh" in cmds[0]): prob.append("sole hook must be worktree-create-hook.sh")
+if any("team-events" in c for c in cmds): prob.append("team-events still shares the WorktreeCreate matcher (#66)")
+te_elsewhere=any("team-events" in x.get("command","")
+  for ev,a in h.items() if ev!="WorktreeCreate" for g in a for x in g.get("hooks",[]))
+if not te_elsewhere: prob.append("team-events unwired from ALL events (over-removed)")
+print("OK" if not prob else "BAD: "+"; ".join(prob))
+PY
+)"
+[ "$WCINV" = "OK" ] && pass "#66: WorktreeCreate is a single path-producer hook (team-events still wired elsewhere)" \
+  || fail "#66 matcher invariant — $WCINV"
+
+# ── (8) #66: the sole hook now self-logs the WorktreeCreate event (team-events used to,
+#        from the shared matrix). Logging must go to events.log, NEVER stdout (stdout is
+#        the path the runtime reads). DREAMTEAM_EVENTS_LOG seam redirects the log here.
+EVL="$TMP/events.log"; : > "$EVL"
+OUT="$(printf '%s' "$(payload logtest "$REPO")" \
+  | CLAUDE_PLUGIN_ROOT="$ROOT" DREAMTEAM_PROVISION="$ROOT/scripts/worktree-provision.sh" \
+    DREAMTEAM_EVENTS_LOG="$EVL" bash "$HOOK" 2>/dev/null)"
+if grep -q '"event":"WorktreeCreate"' "$EVL" && grep -q '"who":"logtest"' "$EVL"; then
+  pass "#66: hook self-logs WorktreeCreate to events.log (observability preserved)"
+else
+  fail "#66: WorktreeCreate not logged — [$(cat "$EVL")]"
+fi
+[ "$OUT" = "$REPO/.claude/worktrees/logtest" ] \
+  && pass "#66: stdout remains EXACTLY the path (event log did not leak to stdout)" \
+  || fail "#66: stdout polluted — expected path, got [$OUT]"
+
 echo "── worktree-create: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
