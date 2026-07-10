@@ -23,6 +23,11 @@
 # Prints the ABSOLUTE worktree path on stdout (embed it verbatim in the agent's prompt).
 # All git chatter goes to stderr so stdout is JUST the path.
 # Idempotent: an already-registered worktree at the target path is reused (re-print + exit 0).
+#
+# Env seams (used by the #26 WorktreeCreate hook adapter, scripts/worktree-create-hook.sh):
+#   WORKTREE_NAME   if set, names the worktree dir directly (overrides <agent>-<branch>).
+# Opt-in per-repo marker <root>/.claude/worktree-copy: newline-separated repo-relative
+#   paths (git-ignored build inputs) copied into every new worktree so it compiles.
 set -euo pipefail
 
 AGENT="${1:?usage: worktree-provision.sh <agent> <branch> [base-ref] [repo-dir]}"
@@ -34,7 +39,7 @@ REPODIR="${4:-$PWD}"
 ROOT="$(git -C "$REPODIR" rev-parse --show-toplevel 2>/dev/null)" || {
   echo "worktree-provision: '$REPODIR' is not inside a git repository" >&2; exit 1; }
 
-NAME="${AGENT}-${BRANCH##*/}"                 # e.g. lucid-262-chroma-cache-close
+NAME="${WORKTREE_NAME:-${AGENT}-${BRANCH##*/}}"  # env override (#26 hook adapter); else <agent>-<branch-basename>
 DEST="$ROOT/.claude/worktrees/$NAME"          # ABSOLUTE, repo-root-anchored
 
 # 2. Idempotent: reuse an existing registered worktree at DEST.
@@ -61,6 +66,32 @@ if git -C "$ROOT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
   git -C "$ROOT" worktree add "$DEST" "$BRANCH" >&2
 else
   git -C "$ROOT" worktree add -b "$BRANCH" "$DEST" "$BASE" >&2
+fi
+
+# 5. Opt-in: copy git-ignored build inputs the new worktree needs to COMPILE (#26).
+#    A fresh worktree off the base lacks git-ignored files (e.g. board.rs/secrets.rs),
+#    so it won't build (exactly the failure in #26). Per-repo marker
+#    <root>/.claude/worktree-copy lists repo-relative paths to copy verbatim into the
+#    worktree. GENERIC + opt-in: no marker → no-op (dreamteam needs none; candela lists
+#    its board.rs/secrets.rs). Best-effort — a missing/failed entry warns, never aborts.
+COPY_MARKER="$ROOT/.claude/worktree-copy"
+if [ -f "$COPY_MARKER" ]; then
+  while IFS= read -r rel || [ -n "$rel" ]; do
+    rel="${rel#"${rel%%[![:space:]]*}"}"        # ltrim
+    rel="${rel%"${rel##*[![:space:]]}"}"        # rtrim (internal spaces preserved)
+    case "$rel" in ''|'#'*) continue;; esac     # skip blanks + comments
+    src="$ROOT/$rel"; dst="$DEST/$rel"
+    if [ -e "$src" ]; then
+      mkdir -p "$(dirname "$dst")" 2>/dev/null || true
+      if cp -a "$src" "$dst" 2>/dev/null; then
+        echo "worktree-provision: copied ignored input $rel" >&2
+      else
+        echo "worktree-provision: WARN failed to copy ignored input $rel" >&2
+      fi
+    else
+      echo "worktree-provision: WARN worktree-copy lists missing path $rel" >&2
+    fi
+  done < "$COPY_MARKER"
 fi
 
 echo "$DEST"

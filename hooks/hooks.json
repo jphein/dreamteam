@@ -1,5 +1,5 @@
 {
-  "description": "Dreamteam OOM + reuse guardrails and team-awareness. PreToolUse(Agent|Task) = reuse gate THEN mem gate (either exit 2 blocks); PreToolUse(TaskStop) = check-the-pane reminder. PostToolUse = footprint accounting + pane organizer (async). TeammateIdle/SubagentStop = live roster injection. Pre/PostCompact = HANDOFF snapshot + post-compaction roster re-arm. Task*/Worktree*/SubagentStart = async event log. SessionStart = roster + crash recovery. SessionEnd = marker clear.",
+  "description": "Dreamteam OOM + reuse guardrails and team-awareness. PreToolUse(Agent|Task) = reuse gate THEN mem gate (either exit 2 blocks); PreToolUse(TaskStop) = check-the-pane reminder. PostToolUse = footprint accounting + pane organizer (async). TeammateIdle/SubagentStop = live roster injection. Pre/PostCompact = HANDOFF snapshot + post-compaction roster re-arm. WorktreeCreate = SYNC provision adapter (prints the worktree path the runtime consumes, #26) + async event log; Task*/WorktreeRemove/SubagentStart = async event log. SessionStart = roster + crash recovery. SessionEnd = marker clear.",
   "hooks": {
     "PreToolUse": [
       {
@@ -127,6 +127,11 @@
     "WorktreeCreate": [
       {
         "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/worktree-create-hook.sh\"",
+            "timeout": 30000
+          },
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/team-events.sh\"",
