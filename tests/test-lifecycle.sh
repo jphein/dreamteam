@@ -215,6 +215,41 @@ esac
 echo '{"hook_event_name":"PreCompact","trigger":"manual","cwd":"'"$ROOT"'","team_name":"faketeam"}' | run_cg >/dev/null
 { grep -q "team-lead" "$TMP/state/HANDOFF-auto.md" && ! grep -q "decoy-lead" "$TMP/state/HANDOFF-auto.md"; } && ok "compact-guard: team_name routes snapshot roster to faketeam" || bad "compact-guard team threading ($(grep -E 'lead' "$TMP/state/HANDOFF-auto.md" 2>/dev/null))"
 
+# ── crash-audit.sh: #54 shared-checkout guard + #58 silent-death (SessionStart) ──
+bash -n "$ROOT/scripts/crash-audit.sh" && ok "bash -n crash-audit.sh" || bad "bash -n crash-audit.sh"
+CA_STATE="$TMP/ca-state"; CA_TEAMS="$TMP/ca-teams"; mkdir -p "$CA_STATE" "$CA_TEAMS/t1"
+# crash-audit reads DREAMTEAM_STATE (marker) + DREAMTEAM_TEAMS_DIR (via roster.sh) + DREAMTEAM_CWD (#54).
+run_ca() { DREAMTEAM_STATE="$CA_STATE" DREAMTEAM_TEAMS_DIR="$CA_TEAMS" DREAMTEAM_CWD="$1" CLAUDE_PLUGIN_ROOT="$ROOT" bash "$ROOT/scripts/crash-audit.sh" 2>/dev/null; }
+
+# #58: a dead member (bogus agentId → no live pid) triggers the silent-death advisory.
+cat > "$CA_TEAMS/t1/config.json" <<'EOF'
+{"members":[
+  {"name":"team-lead","agentType":"team-lead","agentId":"lead-x","cwd":"/tmp"},
+  {"name":"ghost","agentId":"no-such-agent-id-000","isActive":false,"cwd":"/tmp"}
+]}
+EOF
+OUT=$(run_ca "$TMP")   # $TMP isn't a git repo → #54 stays silent, isolating #58
+case "$OUT" in *"DREAMTEAM LIVENESS"*) ok "#58: crash-audit flags a silently-dead member";; *) bad "#58: dead-member advisory missing ($OUT)";; esac
+# non-vacuous control: an all-live team (lead only) → NO advisory.
+rm -rf "${CA_TEAMS:?}"/*; mkdir -p "$CA_TEAMS/t2"
+printf '{"members":[{"name":"team-lead","agentType":"team-lead","agentId":"lead-y","cwd":"/tmp"}]}\n' > "$CA_TEAMS/t2/config.json"
+OUT=$(run_ca "$TMP")
+case "$OUT" in *"DREAMTEAM LIVENESS"*) bad "#58: false silent-death advisory on all-live team ($OUT)";; *) ok "#58: no advisory when nobody is dead (non-vacuous)";; esac
+
+# #54: real temp git repo. On default → silent; off-default → warn; linked worktree → skip.
+CA_REPO="$TMP/ca-repo"; mkdir -p "$CA_REPO"
+git -C "$CA_REPO" init -q -b main 2>/dev/null
+git -C "$CA_REPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
+OUT=$(run_ca "$CA_REPO")   # on 'main' (== default fallback) → silent
+case "$OUT" in *"DREAMTEAM CHECKOUT"*) bad "#54: false checkout warn on the default branch ($OUT)";; *) ok "#54: on default branch → silent (non-vacuous)";; esac
+git -C "$CA_REPO" checkout -q -b feature/x 2>/dev/null
+OUT=$(run_ca "$CA_REPO")   # off default → warn
+case "$OUT" in *"DREAMTEAM CHECKOUT"*"feature/x"*) ok "#54: off-default shared checkout → warn";; *) bad "#54: off-default warn missing ($OUT)";; esac
+# a LINKED worktree on a feature branch is expected → must NOT warn (exemption non-vacuous).
+git -C "$CA_REPO" worktree add -q "$TMP/ca-wt" -b feature/wt >/dev/null 2>&1
+OUT=$(run_ca "$TMP/ca-wt")
+case "$OUT" in *"DREAMTEAM CHECKOUT"*) bad "#54: warned inside a linked worktree — should skip ($OUT)";; *) ok "#54: linked worktree on a feature branch → skipped";; esac
+
 echo "────────────────────────────────────────"
 echo "SUMMARY: $PASS passed, $FAIL failed, $((PASS+FAIL)) total"
 [ "$FAIL" -eq 0 ]

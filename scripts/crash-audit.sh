@@ -27,6 +27,45 @@ case "$ROSTER_OUT" in
     ;;
 esac
 
+# ── #58 (spec S8): proactive silent-death detection ─────────────────────────
+# An OOM SIGKILL skips the SubagentStop hook, so a dead agent can be treated as
+# live for a whole session. roster.sh --json marks a member "dead" when its
+# agentId has no live pid; surface those explicitly. SessionStart fires on
+# startup AND /clear, so this also reconciles a mid-session context reset.
+ROSTER_JSON=$(bash "$ROOT/scripts/roster.sh" --json 2>/dev/null || true)
+DEAD=$(printf '%s' "$ROSTER_JSON" | jq -r '(.agents // [])[] | select(.status=="dead") | .name' 2>/dev/null || true)
+if [ -n "$DEAD" ]; then
+  N=$(printf '%s\n' "$DEAD" | grep -c .)
+  echo "⚠️  DREAMTEAM LIVENESS — $N roster member(s) are DEAD (agentId has no live process):"
+  printf '       • %s\n' $DEAD
+  echo "    An OOM SIGKILL skips SubagentStop, so a silently-dead agent still looks live to reuse/roster."
+  echo "    Do NOT route work to these — mark them dead in roster.md; re-spawn only if work is unfinished."
+  echo ""
+fi
+
+# ── #54: shared-checkout branch guard (non-blocking warn) ───────────────────
+# No-worktree agents (reused workers, standing managers) inherit the shared
+# checkout's branch; if it's left off the default they can commit onto a stale
+# base. SessionStart can't fix it, but it surfaces it. $PWD = the session cwd =
+# the shared checkout; a LINKED worktree is expected on a feature branch (its
+# git-dir != git-common-dir), so skip it. DREAMTEAM_CWD overrides for tests.
+CWD="${DREAMTEAM_CWD:-$PWD}"
+if git -C "$CWD" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  GD=$(git -C "$CWD" rev-parse --git-dir 2>/dev/null || true)
+  GCD=$(git -C "$CWD" rev-parse --git-common-dir 2>/dev/null || true)
+  if [ "$GD" = "$GCD" ]; then   # main checkout, not a linked worktree
+    CUR=$(git -C "$CWD" branch --show-current 2>/dev/null || true)
+    DEF=$(git -C "$CWD" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+    DEF="${DEF#origin/}"; [ -z "$DEF" ] && DEF="main"
+    if [ -n "$CUR" ] && [ "$CUR" != "$DEF" ]; then
+      echo "⚠️  DREAMTEAM CHECKOUT — shared checkout '$CWD' is on '$CUR', not the default '$DEF'."
+      echo "    No-worktree agents (reused workers, standing managers) inherit '$CUR' and can commit"
+      echo "    onto a stale base. Return before spawning:  git -C '$CWD' checkout $DEF"
+      echo ""
+    fi
+  fi
+fi
+
 [ -f "$MARKER" ] || exit 0   # clean — nothing to recover
 
 TEAM=$(jq -r '.team // "unknown"' "$MARKER" 2>/dev/null || echo unknown)
