@@ -155,6 +155,62 @@ grep -q "DBUS=unix:" "$TMP/notify.log" && ok "#51: notify-send gets a DBUS sessi
 # now supplies a bus address too — it referenced no DBUS at all before the fix.
 grep -q 'DBUS_SESSION_BUS_ADDRESS' "$ROOT/scripts/morning-briefing.sh" && ok "#51: morning-briefing.sh notify() also supplies a DBUS bus (both call-sites fixed)" || bad "#51: morning-briefing.sh notify-send has no DBUS bus"
 
+# ── #57: tier→Nyx routing (S7) — durable blackboard + RED poke ─────────────────────
+# Fixture: a team WITH a nyx member (roster.sh --team resolves it by agentType/name) + a
+# poke stub (records args; the DREAMTEAM_POKE seam lets the RED path fire without typing
+# into a real pane). Blackboard lands in $TMP/state/tier-status (DREAMTEAM_STATE).
+mkdir -p "$TMP/teams/nyxteam"
+cat > "$TMP/teams/nyxteam/config.json" <<'EOF'
+{"members":[
+  {"name":"team-lead","agentType":"team-lead","agentId":"lead-n"},
+  {"name":"nyx-resource-manager","agentType":"dreamteam:nyx","agentId":"nyx-n","isActive":true}
+]}
+EOF
+printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "%s/poke.log"\n' "$TMP" > "$TMP/bin/poke-stub"; chmod +x "$TMP/bin/poke-stub"
+
+# blackboard: RED writes it, atomically, with tier=RED + a ts
+rm -f "$TMP/state/tier-status" "$TMP/state/.last-notify"
+echo '{"hook_event_name":"SubagentStop","agent_id":"x","team_name":"nyxteam"}' | FAKE_AVAIL=5000 run_ev >/dev/null
+[ -f "$TMP/state/tier-status" ] && ok "#57: RED writes the durable blackboard" || bad "#57: no blackboard on RED"
+grep -q '"tier":"RED"' "$TMP/state/tier-status" && ok "#57: blackboard records tier=RED" || bad "#57: blackboard tier ($(cat "$TMP/state/tier-status" 2>/dev/null))"
+grep -q '"ts":' "$TMP/state/tier-status" && ok "#57: blackboard carries ts (for staleness)" || bad "#57: blackboard ts missing"
+ls "$TMP/state/".tier-status.* >/dev/null 2>&1 && bad "#57: atomic-write temp file leaked" || ok "#57: atomic write leaves no temp file"
+
+# precedence: scope-only → SCOPE; ORANGE → ORANGE; green → NO write (staleness handles clear)
+rm -f "$TMP/state/tier-status" "$TMP/state/.last-notify"
+echo '{"hook_event_name":"SubagentStop","agent_id":"x","team_name":"nyxteam"}' | FAKE_SCOPE=pressure run_ev >/dev/null
+grep -q '"tier":"SCOPE"' "$TMP/state/tier-status" && ok "#57: scope-only writes tier=SCOPE" || bad "#57: scope tier ($(cat "$TMP/state/tier-status" 2>/dev/null))"
+rm -f "$TMP/state/tier-status" "$TMP/state/.last-notify"
+echo '{"hook_event_name":"SubagentStop","agent_id":"x","team_name":"nyxteam"}' | FAKE_AVAIL=10000 run_ev >/dev/null
+grep -q '"tier":"ORANGE"' "$TMP/state/tier-status" && ok "#57: ORANGE writes tier=ORANGE" || bad "#57: orange tier ($(cat "$TMP/state/tier-status" 2>/dev/null))"
+rm -f "$TMP/state/tier-status" "$TMP/state/.last-notify"
+echo '{"hook_event_name":"SubagentStop","agent_id":"x","team_name":"nyxteam"}' | run_ev >/dev/null
+[ -f "$TMP/state/tier-status" ] && bad "#57: green should NOT write the blackboard" || ok "#57: green → no blackboard write (resolved tier read as stale by age)"
+
+# RED pokes the nyx member (best-effort low-latency nudge) via the DREAMTEAM_POKE seam
+rm -f "$TMP/state/.last-notify"; : > "$TMP/poke.log"
+echo '{"hook_event_name":"SubagentStop","agent_id":"x","team_name":"nyxteam"}' | DREAMTEAM_POKE="$TMP/bin/poke-stub" FAKE_AVAIL=5000 run_ev >/dev/null
+grep -q 'nyx-resource-manager' "$TMP/poke.log" && ok "#57: RED pokes the nyx member (low-latency urgency)" || bad "#57: RED did not poke nyx ($(cat "$TMP/poke.log" 2>/dev/null))"
+# ORANGE must NOT poke (RED-only)
+: > "$TMP/poke.log"; rm -f "$TMP/state/.last-notify"
+echo '{"hook_event_name":"SubagentStop","agent_id":"x","team_name":"nyxteam"}' | DREAMTEAM_POKE="$TMP/bin/poke-stub" FAKE_AVAIL=10000 run_ev >/dev/null
+[ -s "$TMP/poke.log" ] && bad "#57: ORANGE must not poke (RED-only)" || ok "#57: ORANGE does not poke (RED-only)"
+# nyx ABSENT → no poke, but blackboard STILL written (Sandman backstop)
+: > "$TMP/poke.log"; rm -f "$TMP/state/tier-status" "$TMP/state/.last-notify"
+echo '{"hook_event_name":"SubagentStop","agent_id":"x","team_name":"faketeam"}' | DREAMTEAM_POKE="$TMP/bin/poke-stub" FAKE_AVAIL=5000 run_ev >/dev/null
+[ -s "$TMP/poke.log" ] && bad "#57: nyx-absent must not poke" || ok "#57: nyx-absent → no poke"
+grep -q '"tier":"RED"' "$TMP/state/tier-status" && ok "#57: nyx-absent → blackboard STILL written (Sandman backstop)" || bad "#57: nyx-absent blackboard missing"
+
+# tier-status.sh reader — reports the recorded tier + age/staleness; 'none' when absent
+run_ts() { DREAMTEAM_STATE="$TMP/state" CLAUDE_PLUGIN_ROOT="$ROOT" bash "$ROOT/scripts/tier-status.sh" "$@"; }
+bash -n "$ROOT/scripts/tier-status.sh" && ok "bash -n tier-status.sh" || bad "bash -n tier-status.sh"
+run_ts --json | jq -e '.tier=="RED"' >/dev/null 2>&1 && ok "#57: tier-status.sh --json reports the recorded tier" || bad "#57: tier-status --json tier ($(run_ts --json))"
+run_ts --json | jq -e '.ageSec >= 0 and .stale==false' >/dev/null 2>&1 && ok "#57: tier-status reports age; fresh tier not stale" || bad "#57: tier-status age/stale ($(run_ts --json))"
+printf '{"ts":%s,"tier":"RED","avail":5000,"floor":8000,"scopeCur":null,"scopeHigh":null,"host":"t"}\n' "$(( $(date +%s) - 9999 ))" > "$TMP/state/tier-status"
+run_ts --json | jq -e '.stale==true' >/dev/null 2>&1 && ok "#57: an aged tier reads STALE (pressure likely cleared)" || bad "#57: aged tier not stale"
+rm -f "$TMP/state/tier-status"
+run_ts --json | jq -e '.tier=="none"' >/dev/null 2>&1 && ok "#57: tier-status.sh → none when no blackboard" || bad "#57: absent tier-status ($(run_ts --json))"
+
 # team-events #52: the RED-tier voice attention call passes a short --timeout (reverie's
 # speak.sh contract) so a hung synth can't pin a proc for speak.sh's 180s manual default.
 # Voice is DREAMTEAM_TEST-suppressed, so assert on the source call site.
