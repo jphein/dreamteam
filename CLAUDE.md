@@ -7,7 +7,7 @@ Claude Code plugin for memory-gated parallel agent orchestration. Spawns named d
 - `plugin.json` — manifest (name, version, description)
 - `config.json` — tunables (perAgentMB, balloonReserveMB, hostReserveMB, maxAgents)
 - `hooks/hooks.json` — PreToolUse gates (reuse → mem-gate chain), PostToolUse accounting, TeammateIdle/SubagentStop roster injection, Pre/PostCompact HANDOFF guard, async Task*/Worktree* event log, SessionStart/End lifecycle
-- `scripts/` — gate scripts, budget calculator, scope-attach (automatic cgroup containment), dashboard data generator, statusline (wired via user settings `statusLine`), shared lib
+- `scripts/` — gate scripts, budget calculator, scope-attach (automatic cgroup containment), dashboard data generator, statusline (wired via user settings `statusLine`), local-model lane seam (optional ollama, `local-model.sh`), shared lib
 - `skills/dreamteam/SKILL.md` — full orchestration skill (~900 lines)
 - `agents/` — custom agent type definitions (luna, morpheus, lucid, nebula)
 - `commands/` — slash commands (dreamteam, dreamteam-status, dreamteam-roster)
