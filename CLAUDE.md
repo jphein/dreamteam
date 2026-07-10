@@ -6,7 +6,7 @@ Claude Code plugin for memory-gated parallel agent orchestration. Spawns named d
 
 - `plugin.json` — manifest (name, version, description)
 - `config.json` — tunables (perAgentMB, balloonReserveMB, hostReserveMB, maxAgents)
-- `hooks/hooks.json` — PreToolUse gates (reuse → mem-gate chain), PostToolUse accounting, TeammateIdle/SubagentStop roster injection, Pre/PostCompact HANDOFF guard, async Task*/Worktree* event log, SessionStart/End lifecycle
+- `hooks/hooks.json` — PreToolUse gates (reuse → mem-gate chain), PostToolUse accounting, TeammateIdle/SubagentStop roster injection, Pre/PostCompact HANDOFF guard, sync WorktreeCreate provision adapter (returns the worktree path, #26) + async Task*/WorktreeRemove event log, SessionStart/End lifecycle
 - `scripts/` — gate scripts, budget calculator, scope-attach (automatic cgroup containment), dashboard data generator, statusline (wired via user settings `statusLine`), local-model lane seam (optional ollama, `local-model.sh`), shared lib
 - `skills/dreamteam/SKILL.md` — full orchestration skill (~900 lines)
 - `agents/` — custom agent type definitions (luna, morpheus, lucid, nebula)
@@ -39,6 +39,7 @@ bash tests/run.sh          # runs every suite, exits non-zero on any failure
 - `tests/test-gates.sh` — mem-gate (RAM-floor block, count-cap block, non-Agent passthrough) + reuse-gate (block on live idle teammate, allow on FRESH-SPAWN / no team). Includes negative controls proving the block-paths aren't vacuous.
 - `tests/test-roster.sh` — roster.sh status classification (lead/idle/dead) against a fixture, the **spawn-accounting line-21 crash regression** (restricted `ps` must not crash the hook), and a **defaults-agreement guard** (dashboard-data.sh vs mem-budget.sh fallback defaults must match — catches the 600/4000 drift class).
 - `tests/test-dashboard.sh` — dashboard-data.sh `--json` output contract (every key dashboard.html reads) + `--inject` render + template standalone sanity.
+- `tests/test-worktree-create.sh` — the #26 WorktreeCreate hook adapter (`worktree-create-hook.sh`): asserts **stdout is exactly the worktree path** (the command-hook contract that was missing), cwd-independence, branch-off-HEAD, opt-in git-ignored-input copy (`.claude/worktree-copy`), name sanitization, and a clean **non-zero exit on failure** (no phantom "succeeded but no path").
 
 Quick static checks:
 
