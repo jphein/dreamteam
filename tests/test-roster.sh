@@ -109,27 +109,34 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-echo "== defaults agreement: dashboard-data.sh vs mem-budget.sh =="
+echo "== defaults agreement: dashboard-data / mem-budget / mem-gate (+ scope caps) =="
 # Guards the 600/4000 drift class. Anchored on the default LITERALS themselves —
 #   dashboard-data.sh:  m("KEY", N)
 #   mem-budget.sh:      getcfg KEY N
+#   mem-gate.sh:        getcfg KEY N   (#55 — the ACTUAL admission gate)
 # — so a concurrent edit that moves the roster section doesn't affect this parse.
-DASH="$ROOT/scripts/dashboard-data.sh"; BUD="$ROOT/scripts/mem-budget.sh"
+DASH="$ROOT/scripts/dashboard-data.sh"; BUD="$ROOT/scripts/mem-budget.sh"; GATE="$ROOT/scripts/mem-gate.sh"
 extract_dash(){ grep -oE "m\\(\"$1\", *[0-9]+\\)" "$DASH" | head -1 | grep -oE '[0-9]+' | head -1; }
 extract_bud(){  grep -oE "getcfg +$1 +[0-9]+"      "$BUD"  | head -1 | grep -oE '[0-9]+' | head -1; }
+extract_gate(){ grep -oE "getcfg +$1 +[0-9]+"      "$GATE" | head -1 | grep -oE '[0-9]+' | head -1; }
+# All THREE consumers of the .memory defaults must agree. mem-gate.sh is the
+# PreToolUse admission gate — if its baked default drifts from mem-budget /
+# dashboard, the gate ADMITS on a different budget than /dreamteam-status and the
+# dashboard REPORT (#55: same drift class, on the script that decides admission).
 for k in perAgentMB hostReserveMB balloonReserveMB minAvailableMB maxAgents; do
-  d="$(extract_dash "$k")"; b="$(extract_bud "$k")"
+  d="$(extract_dash "$k")"; b="$(extract_bud "$k")"; g="$(extract_gate "$k")"
   if   [ -z "$d" ]; then fail "defaults: '$k' default not found in dashboard-data.sh"
   elif [ -z "$b" ]; then fail "defaults: '$k' default not found in mem-budget.sh"
-  elif [ "$d" = "$b" ]; then pass "defaults agree: $k = $d"
-  else fail "defaults DRIFT: $k dashboard-data=$d mem-budget=$b"
+  elif [ -z "$g" ]; then fail "defaults: '$k' default not found in mem-gate.sh"
+  elif [ "$d" = "$b" ] && [ "$b" = "$g" ]; then pass "defaults agree: $k = $d (dashboard-data, mem-budget, mem-gate)"
+  else fail "defaults DRIFT: $k dashboard-data=$d mem-budget=$b mem-gate=$g"
   fi
 done
 
 # Local-lane reserve (#37): .local.reserveMB is read in THREE places — dashboard-data
 # (ml("reserveMB", N)), mem-budget + mem-gate (getlocal reserveMB N). All must agree,
 # or the dashboard shows a budget the gate won't enforce (same drift class, new knob).
-GATE="$ROOT/scripts/mem-gate.sh"
+# (GATE defined above, with DASH/BUD.)
 dl="$(grep -oE 'ml\("reserveMB", *[0-9]+\)' "$DASH" | grep -oE '[0-9]+' | head -1)"
 bl="$(grep -oE 'getlocal +reserveMB +[0-9]+'  "$BUD"  | grep -oE '[0-9]+' | head -1)"
 gl="$(grep -oE 'getlocal +reserveMB +[0-9]+'  "$GATE" | grep -oE '[0-9]+' | head -1)"
@@ -138,6 +145,32 @@ elif [ -z "$bl" ]; then fail "defaults: '.local.reserveMB' default not found in 
 elif [ -z "$gl" ]; then fail "defaults: '.local.reserveMB' default not found in mem-gate.sh"
 elif [ "$dl" = "$bl" ] && [ "$bl" = "$gl" ]; then pass "defaults agree: .local.reserveMB = $dl (dashboard-data, mem-budget, mem-gate)"
 else fail "defaults DRIFT: reserveMB dashboard-data=$dl mem-budget=$bl mem-gate=$gl"
+fi
+
+# ── scope caps agreement (#55) ───────────────────────────────────────────────
+# memoryHigh/memoryMax set the cgroup ceiling in BOTH launch-dreamteam.sh (getcfg,
+# reads .scope) and scope-attach.sh (getscope), and are REPORTED by mem-budget.sh
+# (getscope). memorySwapMax is set by launch + scope-attach only. Drift = the
+# whole-session scope and the per-spawn attach cap the team differently — a silent
+# containment inconsistency in the config-absent fallback path. Same literal-anchored
+# parse as above; values carry a unit (20G/24G/8G).
+LAUNCH="$ROOT/scripts/launch-dreamteam.sh"; ATTACH="$ROOT/scripts/scope-attach.sh"
+sval(){ grep -oE "$2 +$1 +[0-9]+[A-Za-z]*" "$3" | head -1 | grep -oE '[0-9]+[A-Za-z]*' | head -1; }
+for k in memoryHigh memoryMax; do
+  l="$(sval "$k" getcfg "$LAUNCH")"; a="$(sval "$k" getscope "$ATTACH")"; m="$(sval "$k" getscope "$BUD")"
+  if   [ -z "$l" ]; then fail "scope: '$k' default not found in launch-dreamteam.sh"
+  elif [ -z "$a" ]; then fail "scope: '$k' default not found in scope-attach.sh"
+  elif [ -z "$m" ]; then fail "scope: '$k' default not found in mem-budget.sh"
+  elif [ "$l" = "$a" ] && [ "$a" = "$m" ]; then pass "scope caps agree: $k = $l (launch, scope-attach, mem-budget)"
+  else fail "scope caps DRIFT: $k launch=$l scope-attach=$a mem-budget=$m"
+  fi
+done
+# memorySwapMax: launch + scope-attach only (mem-budget doesn't cap swap).
+sl="$(sval memorySwapMax getcfg "$LAUNCH")"; sa="$(sval memorySwapMax getscope "$ATTACH")"
+if   [ -z "$sl" ]; then fail "scope: 'memorySwapMax' default not found in launch-dreamteam.sh"
+elif [ -z "$sa" ]; then fail "scope: 'memorySwapMax' default not found in scope-attach.sh"
+elif [ "$sl" = "$sa" ]; then pass "scope caps agree: memorySwapMax = $sl (launch, scope-attach)"
+else fail "scope caps DRIFT: memorySwapMax launch=$sl scope-attach=$sa"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
