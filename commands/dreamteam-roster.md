@@ -1,6 +1,6 @@
 ---
 description: Realtime agent roster — live names, panes, and pane-trusted status, plus reusable idle agents.
-argument-hint: "[team-name] — STRONGLY recommended; bare resolves the newest team (smol-team bug)"
+argument-hint: "<team-name> — REQUIRED; bare fails closed (exit 22) to avoid the smol-team bug"
 ---
 
 The **realtime roster**: who is on the team, what pane each agent is in, and its
@@ -8,9 +8,11 @@ pane-trusted status (ACTIVE / IDLE / queued / stale-isActive / no-pane / dead) �
 from the LIVE pane, not a stale hook-stamp — joined to each agent's assignment
 (issue / branch / task) from `scratch/<team>/roster.md`.
 
-**Always pass the team.** Bare selection falls back to the most-recently-modified team
-config, which in a multi-team session is usually the *wrong* team (the smol-team bug).
-Find your team name under `~/.claude/teams/` (e.g. `session-xxxxxxxx`).
+**`--team` is required.** Bare invocation would fall back to the most-recently-modified
+team config — usually the *wrong* team in a multi-team session (the smol-team bug) — so
+it instead **fails closed** (errors to stderr, exits 22) rather than feed a `--json`
+consumer wrong-team data. Find your team name under `~/.claude/teams/` (e.g.
+`session-xxxxxxxx`).
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/roster-live.sh" --team "$ARGUMENTS"

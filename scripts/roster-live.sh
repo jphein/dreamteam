@@ -22,13 +22,15 @@
 #   assignment overlay and the presentation. No pane-resolution logic is duplicated
 #   here — it reads the engine's JSON.
 #
-# ALWAYS PASS --team. Bare selection falls back to the most-recently-modified team
-#   config, which is the "smol-team bug": in a multi-team session the newest config is
-#   often the WRONG team. We warn loudly on stderr when --team is omitted, then proceed
-#   against the newest team so the command is still usable.
+# --team IS REQUIRED (fail-closed). Bare selection would fall back to the most-recently-
+#   modified team config — the "smol-team bug": in a multi-team session the newest config
+#   is usually the WRONG team. A warn-then-proceed is invisible to a --json consumer
+#   (guildmaster), so it could silently feed wrong-team data. Instead we ERROR on stderr
+#   and EXIT 22 when --team is omitted — never proceed. (Manager-role R4 / personas #43
+#   already mandate --team; this enforces it at the tool boundary.)
 #
-# Usage: roster-live.sh [--team NAME] [--json] [--roster-md PATH] [--no-overlay]
-#   --team NAME      team config to resolve against (STRONGLY recommended).
+# Usage: roster-live.sh --team NAME [--json] [--roster-md PATH] [--no-overlay]
+#   --team NAME      team config to resolve against (REQUIRED — no default).
 #   --json           machine output (contract for manager roles / dashboards).
 #   --roster-md PATH explicit assignment-overlay file (else auto-discovered by team).
 #   --no-overlay     skip the roster.md overlay entirely (pane-truth only).
@@ -53,8 +55,10 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -z "$TEAM" ]; then
-  echo "roster-live: ⚠ no --team given — using the newest team config, which is often the" >&2
-  echo "             WRONG team in a multi-team session (the smol-team bug). Pass --team NAME." >&2
+  echo "roster-live: --team <session> is REQUIRED — bare selection resolves the newest-mtime" >&2
+  echo "             team = the smol-team bug (usually the WRONG team). Refusing to guess." >&2
+  echo "             Find yours under ~/.claude/teams/ (e.g. session-xxxxxxxx)." >&2
+  exit 22                                          # client error: fail-closed, do NOT proceed
 fi
 
 ACT_JSON="$(bash "$ENGINE" ${TEAM:+--team "$TEAM"} --json 2>/dev/null || true)"
@@ -71,8 +75,8 @@ fmt = os.environ.get("FMT") or "human"
 roster_md = os.environ.get("ROSTER_MD") or ""
 projects_dir = os.environ.get("PROJECTS_DIR") or ""
 
-# team resolved from the engine's rows when --team was omitted (so the overlay glob
-# targets the SAME team the status came from, not a second guess).
+# --team is required (the bash guard exits 22 when it's empty), so team_arg is always
+# set here; the rows fallback is belt-and-suspenders for a direct/programmatic call.
 team = team_arg or (act[0].get("team") if act else "") or ""
 
 def normkey(s):
