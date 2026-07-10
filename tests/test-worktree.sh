@@ -41,18 +41,36 @@ fail() { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
 
 # ── temp sandbox: fixture configs only (read via env seams), cleaned on exit ──
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+
+# #48: the relative-path BLOCK test (test 10) resolves a relative file_path against
+# the guard's real $PWD and asserts a BLOCK — so it must cd into a REAL directory
+# and root the 'rel' member's worktree there. The guard ALWAYS allows /tmp/* and
+# */scratch/* (correct product behavior), so if that base sits under one of those
+# the block can NEVER fire and the assertion FAILS SPURIOUSLY — exactly what happens
+# when the suite is run from a git-worktree extraction under /tmp (mktemp's default;
+# hit while verifying #47). So DON'T root it at $ROOT (the repo may live under /tmp):
+# pin it to a dedicated NON-exempt dir under $HOME, independent of where the repo is
+# checked out. If no non-exempt base is obtainable (pathological — $HOME itself under
+# /tmp/scratch, or uncreatable), RELBASE is emptied and test 10 skips-with-note —
+# never a false FAIL.
+RELBASE="$(mktemp -d "${HOME:-/nonexistent-home}/.dreamteam-reltest-XXXXXX" 2>/dev/null || true)"
+case "${RELBASE:-}" in
+  ''|/tmp/*|*/scratch/*) RELBASE="" ;;   # unobtainable or itself guard-exempt → skip test 10
+  *) mkdir -p "$RELBASE" ;;
+esac
+trap 'rm -rf "$TMP" ${RELBASE:+"$RELBASE"}' EXIT
 
 # Team config: a WORKTREE-mode member (cwd under .claude/worktrees → guarded),
 # a SHARED-mode member (plain cwd → exempt), and a member for the relative-path
-# case whose worktree cwd is rooted at the REAL repo ($ROOT) so we can cd into a
-# real directory to exercise $PWD resolution (see the relative test below).
+# case whose worktree cwd is rooted at the NON-exempt $RELBASE (see #48 note above)
+# so we can cd into a real directory to exercise $PWD resolution (test 10 below).
+REL_CWD="${RELBASE:-$ROOT}/.claude/worktrees/luna-rel"
 mkdir -p "$TMP/teams/testteam"
 cat > "$TMP/teams/testteam/config.json" <<JSON
 {"members":[
   {"name":"luna","agentType":"lucid","isActive":false,"agentId":"luna@testteam","cwd":"/work/repo/.claude/worktrees/luna-1","prompt":"task: worktree member"},
   {"name":"morpheus","agentType":"morpheus","isActive":false,"agentId":"morpheus@testteam","cwd":"/work/repo","prompt":"task: shared-checkout member"},
-  {"name":"rel","agentType":"lucid","isActive":false,"agentId":"rel@testteam","cwd":"$ROOT/.claude/worktrees/luna-rel","prompt":"task: relative-resolution member"}
+  {"name":"rel","agentType":"lucid","isActive":false,"agentId":"rel@testteam","cwd":"$REL_CWD","prompt":"task: relative-resolution member"}
 ]}
 JSON
 
@@ -171,16 +189,24 @@ else
 fi
 
 # 10) BLOCK: relative file_path is resolved against the hook's real $PWD, then
-#     evaluated. We cd into the REAL repo root ($ROOT) — the 'rel' member's
-#     worktree is $ROOT/.claude/worktrees/luna-rel, so a bare "reltest.kt"
-#     resolves to $ROOT/reltest.kt (outside the worktree) → BLOCK. Proves the
-#     relative→absolute resolution feeds the decision. (Note: bash normalizes
-#     $PWD to the real cwd on startup, so PWD can't be faked via env — hence cd.)
-run_gate_cd "$ROOT" "rel@testteam" "$(edit reltest.kt)"
-if [ "$GRC" -eq 2 ]; then
-  pass "BLOCKS (exit 2) a relative file_path that resolves outside the worktree (\$PWD resolution)"
+#     evaluated. We cd into $RELBASE (a REAL, guard-NON-exempt dir) — the 'rel'
+#     member's worktree is $RELBASE/.claude/worktrees/luna-rel, so a bare
+#     "reltest.kt" resolves to $RELBASE/reltest.kt (outside the worktree) → BLOCK.
+#     Proves the relative→absolute resolution feeds the decision. (Note: bash
+#     normalizes $PWD to the real cwd on startup, so PWD can't be faked via env —
+#     hence cd. #48: rooted at $RELBASE, NOT $ROOT, so a repo living under /tmp
+#     doesn't hit the guard's /tmp exemption and spuriously flip the block to allow.)
+if [ -n "$RELBASE" ]; then
+  run_gate_cd "$RELBASE" "rel@testteam" "$(edit reltest.kt)"
+  if [ "$GRC" -eq 2 ]; then
+    pass "BLOCKS (exit 2) a relative file_path that resolves outside the worktree (\$PWD resolution)"
+  else
+    fail "should resolve+block relative out-of-worktree path — got exit $GRC; stderr: $(head -1 "$TMP/err")"
+  fi
 else
-  fail "should resolve+block relative out-of-worktree path — got exit $GRC; stderr: $(head -1 "$TMP/err")"
+  # No non-exempt base available (e.g. suite run with \$HOME under /tmp): the guard
+  # correctly exempts /tmp & */scratch/*, so a block is untestable here. Skip, don't FAIL.
+  echo "SKIP: relative-path block test — no non-exempt resolution base available (#48; guard correctly exempts /tmp & scratch)"
 fi
 
 # 11) FAIL-OPEN: identity resolves to a team with no config on disk → allow.
