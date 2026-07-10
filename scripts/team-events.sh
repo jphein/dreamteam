@@ -120,6 +120,35 @@ notify_red() {
   touch "$marker" 2>/dev/null || true
 }
 
+# #57: durable per-project memory-tier blackboard — the RELIABLE path to route tier
+# state to Nyx (the shed-authority actor). tier_note's systemMessage only reaches the
+# session whose hook fired (S7: often NOT Nyx); this file, in the shared per-project
+# $STATE, is read by Nyx's poll (scripts/tier-status.sh) regardless of which session
+# crossed the tier. ATOMIC write (temp + rename) so a concurrent reader never sees a
+# half-written state. Best-effort; never fails the hook.
+write_tier_blackboard() {   # $1=tier(RED|SCOPE|ORANGE) $2=avail $3=floor $4=scopeCur $5=scopeHigh (bytes|"")
+  local tmp="$STATE/.tier-status.$$"
+  mkdir -p "$STATE" 2>/dev/null || return 0
+  jq -cn --arg tier "$1" --argjson ts "$(date +%s)" \
+        --argjson avail "${2:-0}" --argjson floor "${3:-0}" \
+        --arg scur "${4:-}" --arg shigh "${5:-}" --arg host "$(hostname 2>/dev/null || echo '?')" \
+        '{ts:$ts, tier:$tier, avail:$avail, floor:$floor,
+          scopeCur:(if $scur=="" then null else ($scur|tonumber) end),
+          scopeHigh:(if $shigh=="" then null else ($shigh|tonumber) end),
+          host:$host}' > "$tmp" 2>/dev/null \
+    && mv -f "$tmp" "$STATE/tier-status" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
+}
+
+# #57: resolve the live team's Nyx member NAME (for the RED poke) from the harness team
+# config via roster.sh --team (R4 — never a bare resolve). Match agentType/name ~ "nyx".
+# Empty when no Nyx present (asymmetric activation — Nyx only spawns under pressure per
+# spec D4); the poke is then skipped and the blackboard + notify_red cover Sandman.
+resolve_nyx() {
+  [ -n "${TEAM:-}" ] || return 0
+  bash "$ROOT/scripts/roster.sh" --team "$TEAM" --json 2>/dev/null \
+    | jq -r 'first(.agents[]? | select(((.agentType // "") | ascii_downcase | test("nyx")) or ((.name // "") | ascii_downcase | test("nyx"))) | .name) // empty' 2>/dev/null || true
+}
+
 # Memory-tier check — gives the skill's degradation tiers an ACTOR. Before the
 # 2026-07-01 16:06 oomd kill, admitted agents grew ~10GB of build-tool memory
 # while no orchestrator was watching /dreamteam-status; the tiers were prose.
@@ -127,6 +156,7 @@ notify_red() {
 # the tier warning here means every active orchestrator hears it in-context.
 tier_note() {
   local avail floor cfg cur high nd_desk="" nd_voice=""
+  local tier="" nyx scope_cur="" scope_high="" red_hit="" orange_hit="" scope_hit=""   # #57
   cfg="${DREAMTEAM_CONFIG:-$ROOT/config.json}"
 
   # Scope-pressure tier (#3): THIS PROJECT'S containment cgroup ($DT_SCOPE, #19)
@@ -146,6 +176,7 @@ tier_note() {
       # would touch the shared marker and throttle-drop that RED.
       nd_desk="SCOPE PRESSURE: $(human_bytes "$cur")/$(human_bytes "$high") MemoryHigh — quiesce, a scope kill takes the whole team"
       nd_voice="Scope pressure: team memory near the cap."
+      scope_hit=1; scope_cur="$cur"; scope_high="$high"    # #57: record for the blackboard
     fi
   fi
 
@@ -158,8 +189,10 @@ tier_note() {
       # the pending notify so the single delivery is the more-urgent one.
       nd_desk="RED TIER: ${avail}MiB avail < ${floor}MiB floor — checkpoint WIP + shed agents"
       nd_voice="Dreamteam red tier: ${avail} megabytes available — checkpoint and shed now."
+      red_hit=1                                            # #57: record for the blackboard
     elif [ "$avail" -lt $(( floor * 3 / 2 )) ]; then
       printf ' ⚠ ORANGE TIER: %sMiB avail — quiesce: no new tasks, let in-flight agents finish + merge, investigate any balloon (incl. gradle/build daemons).' "$avail"
+      orange_hit=1                                         # #57: record for the blackboard
     fi
   fi
 
@@ -167,6 +200,27 @@ tier_note() {
   # a single multi-channel delivery (RED prioritized), so the shared 600s marker can
   # no longer drop the more-urgent RED. ORANGE never notifies (stdout only) — unchanged.
   [ -n "$nd_desk" ] && notify_red "$nd_desk" "$nd_voice"
+
+  # #57 (S7): route the tier to Nyx (the shed-authority actor). The systemMessage above
+  # only reaches the session whose hook fired — often NOT Nyx. So record the CURRENT
+  # pressure to the durable per-project blackboard Nyx polls (survives a wrong-session
+  # firing), and on RED also best-effort poke her for low latency. Precedence RED >
+  # SCOPE > ORANGE. Green does NOT write (a resolved tier is seen as stale by age —
+  # tier-status.sh). The poke is guarded so the suite never types into a real pane.
+  if   [ "$red_hit"    = 1 ]; then tier="RED"
+  elif [ "$scope_hit"  = 1 ]; then tier="SCOPE"
+  elif [ "$orange_hit" = 1 ]; then tier="ORANGE"
+  fi
+  if [ -n "$tier" ]; then
+    write_tier_blackboard "$tier" "${avail:-0}" "${floor:-0}" "$scope_cur" "$scope_high"
+    if [ "$tier" = "RED" ]; then
+      nyx="$(resolve_nyx)"
+      if [ -n "$nyx" ] && { [ -z "${DREAMTEAM_TEST:-}" ] || [ -n "${DREAMTEAM_POKE:-}" ]; }; then
+        bash "${DREAMTEAM_POKE:-$ROOT/scripts/poke.sh}" "$nyx" \
+          "🚨 RED TIER: ${avail}MiB avail < ${floor}MiB — checkpoint + shed now (dreamteam auto-alert)" >/dev/null 2>&1 || true
+      fi
+    fi
+  fi
 }
 
 # ── liveness stamps (#20; hardened for #21): these hooks report agent state to
