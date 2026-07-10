@@ -122,24 +122,27 @@ def pane_of(pid):
 def cap(sock, addr, scroll):
     return sh("tmux", "-S", sock, "capture-pane", "-p", "-t", addr, "-S", str(scroll))
 
-# STRUCTURAL footer match — MIRRORS scripts/lib/pane-resolve.sh's pr_footer_matches
-# (issue #53/#61; the two languages share this ONE rule, guarded by the footer-rule
-# table in tests/test-pane-resolve.sh). A genuine footer is a horizontal-rule line
-# whose ONLY non-rule content is the "@name" token — "──── @name ────" OR
-# "@name ────────". A line matches iff the WHOLE line is box-dashes/space around @name
-# (rejecting a content line that merely mentions @name — a roster listing, a log line,
-# or the agent's own typed command, the old `@name anywhere AND ─ anywhere` bug behind
-# #61's wrong-pane resolution) AND it contains at least one box-dash (rejecting a bare
-# "@name" mention). The whole-line anchor also boundaries the name (@name2 ≠ @name).
+# STRUCTURAL footer match — MIRRORS scripts/lib/pane-resolve.sh's PR_FOOTER_ERE VERBATIM
+# (issue #53/#61). The two languages share this ONE rule; tests/test-pane-resolve.sh
+# extracts THIS function and runs the SAME fixture table through both it and the bash
+# matcher, asserting identical verdicts — so the mirror can't silently drift (the
+# non-vacuous anti-drift lock team-lead mandated). A genuine footer is a horizontal-rule
+# line whose ONLY non-rule content is the "@name" token — "──── @name ────" OR
+# "@name ────────": ≥1 box-dash before @name, OR ≥1 after; either way the WHOLE line is
+# box-dashes/space around @name and nothing else. REJECTS a content line that merely
+# mentions @name (roster/log line, or the #61 self-poke command "echo ──── @name ────")
+# and a bare "@name"; word-boundaries the name (@name2 ≠ @name). Keep byte-for-byte in
+# sync with pane-resolve.sh's PR_FOOTER_ERE.
 def _footer_re(name):
-    return re.compile(r"^[─ \t]*@%s[─ \t]*$" % re.escape(name))
+    e = re.escape(name)
+    return re.compile(r"^[─ \t]*─[─ \t]*@%s[─ \t]*$|^[─ \t]*@%s[─ \t]*─[─ \t]*$" % (e, e))
 
 def handle_pane(name):
     # Fallback ONLY: used when the pid-walk finds no pane (wrapped shell / detached).
     pat = _footer_re(name)
     for sock, addr, _ in panes:
         for line in cap(sock, addr, -5).splitlines():
-            if pat.match(line) and "─" in line:
+            if pat.search(line):
                 return (sock, addr)
     return None
 

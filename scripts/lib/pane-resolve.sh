@@ -79,24 +79,29 @@ pr_pane_of() {
   return 1
 }
 
-# pr_footer_matches <sock> <addr> <agent> — STRUCTURAL footer match (#61).
-#   The genuine footer is a horizontal-rule line whose ONLY non-rule content is the
-#   "@name" token — either "──── @name ────" or "@name ────────". Rule (two anchored
-#   passes, single-line-sound):
-#     1. grep -E "^[─ \t]*@name[─ \t]*$"  → the WHOLE line is box-dashes/space around
-#        @name and nothing else. A content line ("roster: @name is idle", "echo ────
-#        @name ────", the #61 self-poke command) has other text → rejected here. This
-#        also word-boundaries the name (@name2 ≠ @name: the trailing char isn't ─/space).
-#     2. grep '─'  → the surviving line has at least one box-dash, so a bare "@name"
-#        mention (no rule) is rejected. Because pass 1 already reduced input to
-#        footer-shaped lines, this dash check is on THOSE lines only — no cross-line
-#        leak (the bug in the old "@name anywhere AND ─ anywhere" two-grep, which
-#        caused #61's wrong-pane delivery). -S -5 limits the capture to the footer.
+# PR_FOOTER_ERE <name-ere> — the CANONICAL structural-footer regex (#61). This ONE
+#   expression is the single source of truth for "what is a real footer"; agent-activity.sh's
+#   Python matcher mirrors it verbatim and tests/test-pane-resolve.sh runs the SAME fixture
+#   table through BOTH and asserts identical verdicts (the non-vacuous anti-drift lock).
+#   A genuine footer is a horizontal-rule line whose ONLY non-rule content is the "@name"
+#   token — "──── @name ────" OR "@name ────────". The two alternatives require ≥1 box-dash
+#   BEFORE @name, or ≥1 box-dash AFTER it; either way the WHOLE line is box-dashes/space
+#   around @name and nothing else. This REJECTS a content line that merely mentions @name
+#   (a roster line, a log line, or the #61 self-poke command "echo ──── @name ────" — all
+#   have other text so neither anchor holds) AND a bare "@name" (no dash), and it
+#   word-boundaries the name (@name2 ≠ @name). Keep byte-for-byte in sync with
+#   agent-activity.sh's _footer_re.
+PR_FOOTER_ERE() {
+  printf '^[─[:space:]]*─[─[:space:]]*@%s[─[:space:]]*$|^[─[:space:]]*@%s[─[:space:]]*─[─[:space:]]*$' "$1" "$1"
+}
+
+# pr_footer_matches <sock> <addr> <agent> — 0 iff the pane's footer structurally names @agent.
+# -S -5 limits the capture to the footer region.
 pr_footer_matches() {
-  local sock="$1" addr="$2" agent="$3"
-  local esc; esc="$(pr__ere_escape "$agent")"
+  local sock="$1" addr="$2" agent="$3" esc
+  esc="$(pr__ere_escape "$agent")"
   tmux -S "$sock" capture-pane -p -t "$addr" -S -5 2>/dev/null \
-    | grep -E "^[─[:space:]]*@${esc}[─[:space:]]*\$" | grep -q '─'
+    | grep -qE "$(PR_FOOTER_ERE "$esc")"
 }
 
 # pr_resolve_footer <agent> — first PR_PANES entry whose footer matches (exit 0), else 1.

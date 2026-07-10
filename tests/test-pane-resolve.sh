@@ -85,29 +85,46 @@ FTABLE=(
   "──── @lucid2 ────|lucid|0"                 # name boundary: @lucid2 ≠ @lucid → REJECT
   "──── @lucid ────|lucid|1"                  # canonical
 )
-for row in "${FTABLE[@]}"; do
-  line="${row%%|*}"; rest="${row#*|}"; ag="${rest%%|*}"; exp="${rest##*|}"
-  printf '%s\n' "$line" > "$TMP/foot/dream:1.7"
-  if pr_footer_matches "$TMP/tmux/default" "dream:1.7" "$ag"; then got=1; else got=0; fi
-  if [ "$got" = "$exp" ]; then ok "footer[bash] exp=$exp: «$line»"; else bad "footer[bash] exp=$exp got=$got: «$line»"; fi
-done
-
-# ── PYTHON-PARITY: the SAME table through agent-activity.sh's mirrored regex ────
-# The rule must be byte-identical in effect across the bash lib and the Python engine.
-py_parity() {
-python3 - "$@" <<'PY'
+# ── NON-VACUOUS anti-drift lock (team-lead's key ask) ──────────────────────────
+# For every fixture, run it through BOTH the REAL bash matcher (lib pr_footer_matches)
+# AND the REAL Python matcher EXTRACTED from scripts/agent-activity.sh (not a hand-copy
+# — this is the whole point: if either file's rule changes, the verdicts diverge and
+# this test FAILS). Assert bash == python == expected on each row.
+#
+# py_verdict <line> <agent> → prints "1"/"0" from agent-activity.sh's SHIPPED _footer_re.
+AA="$ROOT/scripts/agent-activity.sh"
+py_verdict() {
+python3 - "$AA" "$1" "$2" <<'PY'
 import re, sys
-def footer_re(name): return re.compile(r"^[─ \t]*@%s[─ \t]*$" % re.escape(name))
-line, name, exp = sys.argv[1], sys.argv[2], sys.argv[3]
-pat = footer_re(name)
-got = "1" if (pat.match(line) and "─" in line) else "0"
-sys.exit(0 if got == exp else 1)
+src, line, name = sys.argv[1], sys.argv[2], sys.argv[3]
+text = open(src, encoding="utf-8").read()
+# extract the shipped _footer_re function verbatim (def line + its indented body)
+m = re.search(r"^def _footer_re\(name\):\n(?:[ ]{4}.*\n)+", text, re.M)
+if not m: sys.stderr.write("EXTRACT_FAIL: _footer_re not found in agent-activity.sh\n"); sys.exit(2)
+ns = {"re": re}
+exec(m.group(0), ns)
+print("1" if ns["_footer_re"](name).search(line) else "0")
 PY
 }
 for row in "${FTABLE[@]}"; do
   line="${row%%|*}"; rest="${row#*|}"; ag="${rest%%|*}"; exp="${rest##*|}"
-  if py_parity "$line" "$ag" "$exp"; then ok "footer[python-parity] exp=$exp: «$line»"; else bad "footer[python-parity] MISMATCH exp=$exp: «$line»"; fi
+  printf '%s\n' "$line" > "$TMP/foot/dream:1.7"
+  if pr_footer_matches "$TMP/tmux/default" "dream:1.7" "$ag"; then bgot=1; else bgot=0; fi
+  pgot="$(py_verdict "$line" "$ag")"
+  if [ "$bgot" = "$exp" ] && [ "$pgot" = "$exp" ] && [ "$bgot" = "$pgot" ]; then
+    ok "footer bash==python==$exp: «$line»"
+  else
+    bad "footer DRIFT/expected: exp=$exp bash=$bgot python=$pgot: «$line»"
+  fi
 done
+
+# Meta: prove the parity check is NON-VACUOUS — a line where the two matchers WOULD
+# disagree under the OLD lax rule ("@name" + any dash) but AGREE (both reject) under the
+# structural rule. If someone reverts either side to the lax rule, bash≠python here.
+printf '%s\n' "log: saw @lucid ──── earlier" > "$TMP/foot/dream:1.7"
+pr_footer_matches "$TMP/tmux/default" "dream:1.7" lucid; b=$?
+p="$(py_verdict "log: saw @lucid ──── earlier" lucid)"
+{ [ "$b" -ne 0 ] && [ "$p" = "0" ]; } && ok "anti-drift: both reject a lax-only decoy (lock is live)" || bad "anti-drift decoy: bash-exit=$b python=$p"
 
 # ── resolve_footer picks the matching pane ─────────────────────────────────────
 printf '%s\n' "roster: @lucid mentioned"     > "$TMP/foot/dream:1.0"
