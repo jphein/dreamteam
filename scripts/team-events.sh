@@ -148,11 +148,30 @@ tier_note() {
   fi
 }
 
-# ── liveness stamps (#20): these hooks KNOW working/idle — record it where the
-# cross-project fleet observer reads it (fleet.sh LIVE column; stamp beats its
-# CPU-time heuristic). One tiny file per agent in a GLOBAL dir — every project's
-# session writes here, fleet.sh joins on project+agent and age-prunes old files.
-# Content: "<state> <epoch>". Never blocks, never fails the hook.
+# ── liveness stamps (#20; hardened for #21): these hooks report agent state to
+# the cross-project fleet observer (fleet.sh LIVE column; a stamp beats its
+# CPU-time heuristic). One tiny "<state> <epoch>" file per agent in a GLOBAL dir,
+# keyed <project>__<agent>; fleet.sh joins on project+agent and age-prunes.
+# Never blocks, never fails the hook.
+#
+# #21 — WHY TeammateIdle is NOT stamped "idle": TeammateIdle is a TURN-BOUNDARY
+# event. It fires every time a teammate ends a turn and waits for input, which
+# recurs CONTINUOUSLY throughout active work (events.log: one live teammate fired
+# it ~20× across hours of work) — it is NOT proof the agent is done/available.
+# 51f0f07 stamped a hard "idle" here; but the only name-keyed "working" writer is
+# the one-shot spawn (SubagentStart is keyed by agent_id — a DIFFERENT file; the
+# two event families share no join key), so the stamp LATCHED working→idle at the
+# first turn boundary and never returned — reporting a live, working teammate as
+# "idle" for the rest of its life. We stamp only from the UNAMBIGUOUS signals and
+# treat a turn boundary as "still working" (the SAFE direction — never falsely
+# "free" for reuse):
+#   TaskCreated / SubagentStart / (spawn) → working  ("picked up / doing work")
+#   TeammateIdle                          → working  (turn boundary ≠ idle)
+#   TaskCompleted                         → idle      (the one HONEST "task done,
+#                                                       now reusable" signal)
+#   SubagentStop                          → stopped
+# Ground-truth idle for pure-SendMessage teammates (queued-inbox / transcript
+# inspection) is a documented follow-up (issue #21 remedy a/c).
 FLEET_STATE="${DREAMTEAM_FLEET_STATE:-$HOME/.claude/dreamteam-fleet}"
 stamp_live() {
   [ -n "${WHO:-}" ] || return 0
@@ -163,8 +182,10 @@ stamp_live() {
   printf '%s %s\n' "$1" "$(date +%s)" > "$FLEET_STATE/$key" 2>/dev/null || true
 }
 case "$EVENT" in
-  TeammateIdle)  stamp_live idle ;;
+  TeammateIdle)  stamp_live working ;;   # #21: turn boundary ≠ idle (was: idle)
+  TaskCreated)   stamp_live working ;;   # #21: name-keyed "picked up work"
   SubagentStart) stamp_live working ;;
+  TaskCompleted) stamp_live idle ;;      # #21: the honest "task done → reusable"
   SubagentStop)  stamp_live stopped ;;
 esac
 
@@ -185,7 +206,12 @@ case "$EVENT" in
     # sweep under test to never reorganize JP's / a sibling's real panes.
     [ -n "${DREAMTEAM_TEST:-}" ] || bash "$ROOT/scripts/pane-organizer.sh" --sweep </dev/null 2>/dev/null || true
     R="$(roster_line)"; T="$(tier_note)"
-    jq -n --arg msg "🕯 dreamteam: ${WHO:-a teammate} is IDLE — reusable via SendMessage (zero new RAM, warm context). Roster: ${R:-n/a}${T}" \
+    # #21: TeammateIdle is a TURN BOUNDARY, not a "task complete / free" signal —
+    # it fires whenever a teammate ends a turn (incl. between steps while an inbox
+    # message is queued). Announcing "is IDLE — reusable" here misled the
+    # orchestrator into retasking a live, working agent (issue #21). State it as a
+    # heartbeat and route reuse decisions through the authoritative live check.
+    jq -n --arg msg "🕯 dreamteam: ${WHO:-a teammate} hit a turn boundary (alive; may still be mid-task — a teammate between turns is NOT done). Don't retask on this signal alone: confirm it's genuinely free via /dreamteam-roster \"<task>\" (live isActive) or its tmux pane first. Roster: ${R:-n/a}${T}" \
       '{"systemMessage": $msg}'
     ;;
   SubagentStop)
