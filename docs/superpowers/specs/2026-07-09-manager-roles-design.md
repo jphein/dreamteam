@@ -248,3 +248,101 @@ false-flagged this session's startup).
    pane indexes shift as teammates join (Hypnos had drifted 2.2→2.4 within the
    hour) — resolve panes by `@handle` footer match at use time (`poke.sh
    --dry-run`); never store static pane indexes in the roster as truth.
+
+---
+
+## Revision 2 — review integration (2026-07-10)
+
+Consolidates the **Oracle spec-review** (verdict APPROVE-WITH-CHANGES; 5 required,
+9 suggested) and **Nebula's teamwork research** (8 deltas). Where a required
+change conflicts with an earlier section, THIS revision governs. Oracle and Nebula
+independently converged on four points (marked ⇄) — treat those as high-confidence.
+
+### Required corrections (blocking — spec was factually wrong/unsafe as written)
+
+- **R1 — persona-enforcement gap (the important one).** `spawn-standards.sh` has
+  two lists: ROSTER (name allowed) and TYPED (forces `subagent_type: dreamteam:<name>`,
+  which is what makes the persona arrive as a system prompt). `nyx` is *already* in
+  ROSTER; `hypnos` is missing. Neither is in TYPED. As written, `hypnos-agent-manager`
+  with no `subagent_type` passes the gate **with no persona** — exactly what §3 tries
+  to prevent (and what the live pilot hit: it spawned general-purpose via
+  `STANDARDS-EXEMPT`). **Fix:** add `hypnos` to ROSTER **and** `hypnos|nyx` to TYPED.
+  (§2's "rule 1b unchanged" is wrong — TYPED must change.)
+- **R2 — worktree-guard is NOT the manager enforcement point.** `worktree-guard.sh`
+  early-`exit 0`s unless the cwd is a `.claude/worktrees/*` path, and its allowlist is
+  {assigned-worktree, /tmp, */scratch/*} — no `state/`. So a no-worktree manager is
+  *unconstrained*, not restricted to `state/`, and a worktree agent writing `state/`
+  would be *blocked*. §4's "the guard's allowlist is the enforcement point" is deleted.
+  Restricting managers to `state/` + `scratch/` needs NEW guard logic (a
+  manager-identity branch), which the implementation plan must design — or we accept
+  managers as trusted-by-convention (they run no untrusted code) and drop the
+  hard-restriction claim. **Decision for the plan:** convention + a soft check, not a
+  new hard gate (managers are first-party personas; a new gate is over-engineering).
+- **R3 — roster.md location.** Canon is `scratch/<team>/roster.md` (SKILL.md:80/299-300,
+  compact-guard.sh, crash-audit.sh) — NOT `state/`. §4/§7 are corrected: roster.md
+  stays in scratch (already guard-allowed), gains the role column there. No migration.
+- **R4 — team-targeting (⇄ pilot-confirmed live).** Every manager roster read MUST pass
+  `--team <own-team>`: bare `roster.sh`/`idle-agents.sh`/`dashboard-data.sh` resolve to
+  the most-recently-modified team config, which during the pilot returned the *smol*
+  team. A per-team manager reading bare roster can act on another team's agents. This
+  is prerequisite to the per-team-scope decision actually holding. Pin via `--team` (or
+  a `DREAMTEAM_TEAM` env seam the plan can add).
+- **R5 — kill-safety (⇄ Nebula D5).** Nyx has sole kill authority on a 2–5 min-stale
+  roster while Hypnos holds pane-sight. Corrections: (a) managers are **shed-exempt and
+  not-killable-by-Nyx** (only Sandman may kill a manager); (b) before any **non-RED**
+  TaskStop, Nyx must get pane-state confirmation (the SKILL.md:828-830 "check the pane
+  before escalating" guard is carried into Nyx's persona); (c) Nyx sends her own
+  checkpoint/quiesce requests directly (+poke fallback) — the emergency path does NOT
+  depend on Hypnos being alive/responsive (Nebula D5).
+
+### Accepted research deltas (Nebula) + convergent suggestions (Oracle)
+
+- **D1 / S3 (⇄) — cadence & token budget.** Drop the vestigial "every 15 min" Hypnos
+  audit (it can't catch the >5-min-silent it escalates on); run audit on the existing
+  poll. Replace tight fixed polls with **event-driven-first + long idle-poll fallback**
+  (ScheduleWakeup, SKILL.md:840-851). The spec now budgets *tokens* (hundreds of wake
+  cycles/night) alongside the +600 MB RAM.
+- **D2 / S9 (⇄) — delivery fallback = `poke.sh`, and commit the working-tree version.**
+  Never the raw `send-keys … Enter` recipe (omits the 0.4s settle → poke's own
+  queued-without-submit bug). Adopting poke.sh means committing the **working-tree**
+  version (with the settle), not HEAD.
+- **D3 — closed-loop ACK.** Assignments end "reply `ACK <task>`"; escalate on missing
+  ACK, not pane reaction (an idle agent may never process a queued SendMessage). *Note:
+  this is now understood as mitigating the queue-until-tool-round + transient-API-error
+  modes; the earlier "per-edge addressing fault" was refuted by pane inspection.*
+- **D4 / S2 (⇄) — asymmetric activation** *(JP DECISION — see below).* Hypnos (the
+  responsiveness lever) spawns at `minTeamSize`; **Nyx is gated on scale/pressure**
+  (≥5 workers OR after a wave hits Yellow), preferring promotion of an idle agent under
+  pressure. Resolves both reviewers' "3 is aggressive / managers = 40% of a 3-team."
+- **D6 — single-writer roster.md.** Sandman writes it at startup, then ownership
+  transfers to Hypnos for the run (documented handoff); the two never write concurrently.
+- **D7 / F-fail-5 — promotion restates role in-message.** A promoted manager has no
+  system-prompt persona (unlike a typed spawn or oracle's enforced toolset); the
+  promotion-prompt template must restate acting role + boundaries, and Hypnos
+  re-asserts them periodically. Fresh typed-spawn stays the default.
+- **D8 — ship gate.** Reeve requires an oracle/`ultrareview` pass before merge, not
+  just clean+green CI (green tests the happy path). Lowest priority; adjacent to §5.
+- **S4 — balloon forensics.** Managers are in-scope for Nyx's balloon forensics; state
+  the Sandman-kills-a-ballooning-manager path (Nyx won't self-kill; Hypnos can't).
+- **S5 — test placement.** Per-team marker regression → test-lifecycle.sh (logic lives
+  in crash-audit.sh/cleanup-marker.sh); the "role column" test targets roster.md
+  (scratch markdown), not roster.sh (which reads the harness config, no role field).
+- **S6 — finish the Argus sweep.** Also retire the name in crash-audit.sh:54 and
+  SKILL.md:903 (crash-HANDOFF template), not just the overnight table.
+- **S7/S8 — signal routing & manager-death.** Verify ORANGE/RED tier warnings reach
+  Nyx (team-events.sh injects on the *triggering* session's context — routing to Nyx is
+  unverified); add a proactive Sandman manager-liveness check (an OOM-killed manager may
+  not fire SubagentStop).
+
+### Two decisions requiring JP (resolved provisionally, flagged)
+
+1. **minTeamSize / asymmetric activation** — resolved as **asymmetric** (Hypnos at 3,
+   Nyx at ≥5-or-pressure). Both reviewers converged; it directly serves the
+   responsiveness goal (comms manager early, resource manager only when scale/pressure
+   justifies her 300 MB). *JP may override to a flat minTeamSize.*
+2. **Hypnos doc-steward duty** — Oracle flagged it as scope creep (S1: it's the only
+   manager-worktree exception + grants Edit/Write to a "no-edits" role). **KEPT**,
+   because JP explicitly asked for a manager that "updates dreamteam and guildmaster as
+   it goes along." Made honest: Hypnos gets scoped Edit/Write for `state/lessons-*.md`
+   and a deliberate lazy session-end docs worktree — stated as the one exception, not
+   hidden. *JP may trim it to lessons-append-only per Oracle S1.*
