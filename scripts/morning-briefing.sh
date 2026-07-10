@@ -47,7 +47,14 @@ speak() {   # lucid: scripts/speak.sh "<text>" --voice davis
   [ -f "$ROOT/scripts/speak.sh" ] && bash "$ROOT/scripts/speak.sh" "$1" --voice davis >/dev/null 2>&1 || true
 }
 notify() {  # best-effort desktop toast; needs a session bus (may be absent under cron)
-  command -v notify-send >/dev/null 2>&1 && notify-send "🕯 Dreamteam briefing" "$1" >/dev/null 2>&1 || true
+  # #51: hook/cron contexts inherit NO session-bus address → notify-send silently
+  # no-ops (can't reach the user's D-Bus). Point it at the systemd user bus (respect an
+  # inherited value); add DISPLAY. Same fix as team-events.sh notify_red — this is the
+  # briefing's toast call-site (the second half of #51). Harmless no-op when absent.
+  local bus="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}"
+  command -v notify-send >/dev/null 2>&1 \
+    && DBUS_SESSION_BUS_ADDRESS="$bus" DISPLAY="${DISPLAY:-:0}" \
+       notify-send "🕯 Dreamteam briefing" "$1" >/dev/null 2>&1 || true
 }
 
 # ── gather ─────────────────────────────────────────────────────────────────

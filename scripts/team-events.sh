@@ -95,17 +95,27 @@ human_bytes() {
 # channel is independently best-effort; voice is detached (never blocks) and is
 # suppressed under DREAMTEAM_TEST so the suite never speaks.
 notify_red() {
-  local marker="$STATE/.last-notify" now mtime
+  local marker="$STATE/.last-notify" now mtime bus
   if [ -f "$marker" ]; then
     now=$(date +%s 2>/dev/null || printf 0)
     mtime=$(stat -c %Y "$marker" 2>/dev/null || printf 0)
     [ $(( now - mtime )) -lt 600 ] && return 0    # inside throttle window → all channels quiet
   fi
-  # channel 1 — desktop notification (best-effort; an absent notify-send is fine)
-  command -v notify-send >/dev/null 2>&1 && notify-send -u critical "dreamteam" "$1" >/dev/null 2>&1 || true
+  # channel 1 — desktop notification (best-effort; an absent notify-send is fine).
+  # #51: hook/cron contexts inherit NO session-bus address, so notify-send silently
+  # no-ops (it can't reach the user's D-Bus). Point it at the systemd user bus
+  # (/run/user/<uid>/bus), respecting an already-inherited value; add DISPLAY too.
+  # Harmless when the socket is absent (headless) — notify-send just fails → || true.
+  bus="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}"
+  command -v notify-send >/dev/null 2>&1 \
+    && DBUS_SESSION_BUS_ADDRESS="$bus" DISPLAY="${DISPLAY:-:0}" \
+       notify-send -u critical "dreamteam" "$1" >/dev/null 2>&1 || true
   # channel 2 — voice (SAME attention event; detached so it never blocks; quiet in tests)
   if [ -z "${DREAMTEAM_TEST:-}" ] && [ -n "${2:-}" ]; then
-    bash "$ROOT/scripts/speak.sh" "$2" --voice davis >/dev/null 2>&1 || true
+    # #52: cap the attention utterance short — it's one sentence, and a hung synth
+    # must not pin a proc for speak.sh's 180s manual default at the worst moment.
+    # (--timeout <sec> is reverie's speak.sh contract; ignored until that lands.)
+    bash "$ROOT/scripts/speak.sh" "$2" --voice davis --timeout 15 >/dev/null 2>&1 || true
   fi
   touch "$marker" 2>/dev/null || true
 }
@@ -116,7 +126,7 @@ notify_red() {
 # TeammateIdle/SubagentStop fire constantly during fleet work, so piggybacking
 # the tier warning here means every active orchestrator hears it in-context.
 tier_note() {
-  local avail floor cfg cur high
+  local avail floor cfg cur high nd_desk="" nd_voice=""
   cfg="${DREAMTEAM_CONFIG:-$ROOT/config.json}"
 
   # Scope-pressure tier (#3): THIS PROJECT'S containment cgroup ($DT_SCOPE, #19)
@@ -131,21 +141,32 @@ tier_note() {
     if [ -n "$cur" ] && [ -n "$high" ] && [ "$high" -gt 0 ] && [ "$cur" -ge $(( high * 85 / 100 )) ]; then
       printf ' 🚨 SCOPE PRESSURE: %s of %s MemoryHigh — reclaim throttling imminent and a scope kill takes the WHOLE team; quiesce now (no new tasks, let agents finish + merge).' \
         "$(human_bytes "$cur")" "$(human_bytes "$high")"
-      notify_red "SCOPE PRESSURE: $(human_bytes "$cur")/$(human_bytes "$high") MemoryHigh — quiesce, a scope kill takes the whole team" \
-                 "Scope pressure: team memory near the cap."
+      # #50: accumulate — do NOT fire notify_red here. A co-firing RED (host-floor
+      # breach) is more urgent and must win the single 600s-gated slot; firing here
+      # would touch the shared marker and throttle-drop that RED.
+      nd_desk="SCOPE PRESSURE: $(human_bytes "$cur")/$(human_bytes "$high") MemoryHigh — quiesce, a scope kill takes the whole team"
+      nd_voice="Scope pressure: team memory near the cap."
     fi
   fi
 
   floor=$(jq -r '.memory.minAvailableMB // 8000' "$cfg" 2>/dev/null); floor=${floor//[!0-9]/}; floor=${floor:-8000}
   avail=$(free -m 2>/dev/null | awk '/^Mem:/{print $7}'); avail=${avail//[!0-9]/}
-  [ -n "$avail" ] || return 0
-  if [ "$avail" -lt "$floor" ]; then
-    printf ' 🚨 RED TIER: %sMiB avail < %sMiB floor — CHECKPOINT NOW (commit+push WIP), then shutdown_request newest/lowest-priority agents until pressure clears.' "$avail" "$floor"
-    notify_red "RED TIER: ${avail}MiB avail < ${floor}MiB floor — checkpoint WIP + shed agents" \
-               "Dreamteam red tier: ${avail} megabytes available — checkpoint and shed now."
-  elif [ "$avail" -lt $(( floor * 3 / 2 )) ]; then
-    printf ' ⚠ ORANGE TIER: %sMiB avail — quiesce: no new tasks, let in-flight agents finish + merge, investigate any balloon (incl. gradle/build daemons).' "$avail"
+  if [ -n "$avail" ]; then
+    if [ "$avail" -lt "$floor" ]; then
+      printf ' 🚨 RED TIER: %sMiB avail < %sMiB floor — CHECKPOINT NOW (commit+push WIP), then shutdown_request newest/lowest-priority agents until pressure clears.' "$avail" "$floor"
+      # #50: RED (host floor → OOM imminent) OUTRANKS scope-pressure — it overwrites
+      # the pending notify so the single delivery is the more-urgent one.
+      nd_desk="RED TIER: ${avail}MiB avail < ${floor}MiB floor — checkpoint WIP + shed agents"
+      nd_voice="Dreamteam red tier: ${avail} megabytes available — checkpoint and shed now."
+    elif [ "$avail" -lt $(( floor * 3 / 2 )) ]; then
+      printf ' ⚠ ORANGE TIER: %sMiB avail — quiesce: no new tasks, let in-flight agents finish + merge, investigate any balloon (incl. gradle/build daemons).' "$avail"
+    fi
   fi
+
+  # #50: exactly ONE notify_red per event. Co-firing scope-pressure + RED collapse to
+  # a single multi-channel delivery (RED prioritized), so the shared 600s marker can
+  # no longer drop the more-urgent RED. ORANGE never notifies (stdout only) — unchanged.
+  [ -n "$nd_desk" ] && notify_red "$nd_desk" "$nd_voice"
 }
 
 # ── liveness stamps (#20; hardened for #21): these hooks report agent state to
@@ -169,9 +190,21 @@ tier_note() {
 #   TeammateIdle                          → working  (turn boundary ≠ idle)
 #   TaskCompleted                         → idle      (the one HONEST "task done,
 #                                                       now reusable" signal)
-#   SubagentStop                          → stopped
+#   SubagentStop                          → working   (#56: per-turn boundary ≠ death)
 # Ground-truth idle for pure-SendMessage teammates (queued-inbox / transcript
 # inspection) is a documented follow-up (issue #21 remedy a/c).
+#
+# #56 — SubagentStop is ALSO a per-turn boundary, NOT death. It fires at every
+# subagent response-end (a real events.log showed 892 stops vs 105 starts; the
+# payload carries the per-response Stop-hook fields), so stamping "stopped" here
+# false-latched a live, working subagent to "stopped" in the id-keyed stamp that
+# fleet.sh actually reads. Treat it like TeammateIdle → "working"; genuine death is
+# caught by age-out (fleet --stale) / #58, never by this per-turn event.
+# NOTE (deferred, #56 follow-up): the name-keyed stamps above are still not read by
+# fleet.sh — in-process teammates SHARE the parent CWD and expose no fleet-visible
+# per-agent key (teammate_name isn't in their process signature; worktree-dir name ≠
+# dream name), so there is no join key. Surfacing them needs fleet.sh to read the team
+# config's teammate_name mapping — a design change, not a dual-key hack. Not here.
 FLEET_STATE="${DREAMTEAM_FLEET_STATE:-$HOME/.claude/dreamteam-fleet}"
 stamp_live() {
   [ -n "${WHO:-}" ] || return 0
@@ -186,7 +219,7 @@ case "$EVENT" in
   TaskCreated)   stamp_live working ;;   # #21: name-keyed "picked up work"
   SubagentStart) stamp_live working ;;
   TaskCompleted) stamp_live idle ;;      # #21: the honest "task done → reusable"
-  SubagentStop)  stamp_live stopped ;;
+  SubagentStop)  stamp_live working ;;   # #56: per-turn boundary, not death (was: stopped)
 esac
 
 case "$EVENT" in
