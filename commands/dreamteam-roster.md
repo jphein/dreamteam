@@ -1,21 +1,48 @@
 ---
-description: Show reusable idle agents (and, for a task, the best context-affinity match).
-argument-hint: "[task description] — optional; ranks idle agents by fit"
+description: Realtime agent roster — live names, panes, and pane-trusted status, plus reusable idle agents.
+argument-hint: "<team-name> — required with --json (fails closed); human mode warns + proceeds"
 ---
 
-Before spawning anything, check who's already idle and warm. Reusing an idle agent
-costs zero new RAM and keeps its existing context — always prefer it over a fresh spawn
-(the reuse-gate hook enforces this; this command is the manual view).
+The **realtime roster**: who is on the team, what pane each agent is in, and its
+pane-trusted status (ACTIVE / IDLE / queued / stale-isActive / no-pane / dead) — read
+from the LIVE pane, not a stale hook-stamp — joined to each agent's assignment
+(issue / branch / task) from `scratch/<team>/roster.md`.
+
+**Always pass the team.** Bare invocation falls back to the most-recently-modified team
+config — usually the *wrong* team in a multi-team session (the smol-team bug). With
+`--json` (machine consumers, who never see a stderr warning) a missing `--team`
+**fails closed** — errors to stderr and exits 22. In human mode it warns loudly and
+proceeds against the newest team. Find your team name under `~/.claude/teams/` (e.g.
+`session-xxxxxxxx`).
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/idle-agents.sh" --task "$ARGUMENTS"
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/roster-live.sh" --team "$ARGUMENTS"
 ```
 
-- With no argument: lists all reusable idle agents in the current team.
-- With a task: ranks them by context affinity (same cwd = strong, shared task keywords =
-  weak) so you assign the best-fit agent via `SendMessage` instead of spawning.
+- **Names** come from the harness team config (the authoritative membership).
+- **Panes** are resolved by **pid-ancestry** (pane-peek #32's technique: all tmux
+  sockets, PPid walk, closest-wins) — collision-resistant, unlike an `@handle`
+  name-match that false-hits across duplicate window titles.
+- **Status trusts the live pane** (agent-activity.sh #34): a spinner line = ACTIVE, a
+  past-tense completion + bare prompt = IDLE; queued input is reported orthogonally, and
+  a `⚠` flags where the config's `isActive` disagrees with the screen.
+- **Assignments** (issue / branch / task) overlay from the human-maintained
+  `scratch/<team>/roster.md`; the roster's core truth (name / pane / status) never
+  depends on it.
+
+Add `--json` for machine output (manager roles / dashboards), `--no-overlay` for
+pane-truth only, or `--roster-md PATH` to point at a specific assignment file.
+
+## Reuse before you spawn
+
+Reusing an idle agent costs zero new RAM and keeps its context — always prefer it over a
+fresh spawn (the reuse-gate hook enforces this). To rank idle agents by fit for a task:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/idle-agents.sh" --task "<task description>"
+```
 
 If the right idle agent exists, `SendMessage({to:"<name>", message:"<new task>"})`. Only
 spawn fresh when the task needs an isolated worktree, is genuinely independent parallel
-work, or no idle agent has usable context — and then add `FRESH-SPAWN: <reason>` to the
+work, or no idle agent has usable context — then add `FRESH-SPAWN: <reason>` to the
 spawn prompt so the reuse-gate lets it through.
