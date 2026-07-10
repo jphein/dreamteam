@@ -91,6 +91,16 @@ PER_AGENT = m("perAgentMB", 400);  HOST_RES = m("hostReserveMB", 6000)
 BALLOON   = m("balloonReserveMB", 8000); MIN_AVAIL = m("minAvailableMB", 8000)
 MAX_AGENTS= m("maxAgents", 30)
 
+# local-model lane reserve (#37) — held back only when the ollama lane is armed.
+# Default 9000 MUST match mem-gate.sh + mem-budget.sh (test-roster.sh guards it).
+local_cfg = _full_cfg.get("local", {}) if isinstance(_full_cfg.get("local"), dict) else {}
+def ml(k, d):
+    try: return int(local_cfg.get(k, d))
+    except Exception: return d
+LOCAL_RESERVE = ml("reserveMB", 9000)
+LOCAL_ARMED   = local_cfg.get("enabled") is True          # ==false-safe: only literal true arms it
+LOCAL_EFF     = LOCAL_RESERVE if LOCAL_ARMED else 0
+
 # ── team scope (auto-containment cgroup) — the TRUE footprint incl. child procs ──
 # MemoryCurrent counts the gradle/JVM children the claude-proc RSS accounting is
 # blind to (the 2026-07-01 16:06 oomd root cause; postmortem §5). Config caps pass
@@ -123,8 +133,8 @@ for line in run(["ps","-eo","rss,args"]).splitlines():
         except Exception: pass
 rss_total //= 1024  # KiB → MiB
 
-# budget math — identical to mem-budget.sh
-budget = max(0, (avail - HOST_RES - BALLOON) // PER_AGENT)
+# budget math — identical to mem-budget.sh (incl. the #37 local-lane reserve)
+budget = max(0, (avail - HOST_RES - BALLOON - LOCAL_EFF) // PER_AGENT)
 cap    = min(MAX_AGENTS, budget)
 room   = max(0, cap - live)
 if avail < MIN_AVAIL:
@@ -271,6 +281,7 @@ out = {
         "swapTotalMb": swt, "swapUsedMb": swu, "agentTotalRssMb": rss_total,
         "perAgentMb": PER_AGENT, "hostReserveMb": HOST_RES, "balloonReserveMb": BALLOON,
         "minAvailableMb": MIN_AVAIL, "maxAgents": MAX_AGENTS,
+        "localReserveMb": LOCAL_RESERVE, "localArmed": LOCAL_ARMED, "localEffectiveReserveMb": LOCAL_EFF,
         "budget": budget, "cap": cap, "liveAgents": live, "room": room,
         "thresholds": {"redBelowMb": red_below, "orangeBelowMb": orange_below, "yellowBelowMb": yellow_below},
         "scopeActive": scope_active, "scopeCurrentMb": scope_cur_mb,

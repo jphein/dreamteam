@@ -32,17 +32,28 @@ MAX_AGENTS=$(getcfg maxAgents 30)
 SCOPE_ONLY=$(getcfg scopeToDreamteam false)
 if [ "$SCOPE_ONLY" = "true" ] && [ ! -f "$STATE/active" ]; then exit 0; fi
 
+# Local-model lane reserve (#37): when the ollama lane is ARMED (.local.enabled ==
+# true), hold back reserveMB for the resident model. Its RSS/VRAM is invisible to
+# this gate (which counts only claude procs) and the load is latent/bursty, so we
+# reserve whether or not the model is currently loaded — exactly as BALLOON reserves
+# for post-admission growth. ==false-safe (only a literal true arms it); zero effect
+# when the lane is off (the default).
+getlocal() { jq -r --arg k "$1" --arg d "$2" ".local[\$k] // \$d" "$CFG" 2>/dev/null || printf '%s' "$2"; }
+LOCAL_ARMED=$(jq -r 'if .local.enabled == true then 1 else 0 end' "$CFG" 2>/dev/null || echo 0)
+LOCAL_RESERVE=$(getlocal reserveMB 9000); LOCAL_RESERVE=${LOCAL_RESERVE//[!0-9]/}; [ -n "$LOCAL_RESERVE" ] || LOCAL_RESERVE=9000
+if [ "$LOCAL_ARMED" = 1 ]; then LOCAL_EFF=$LOCAL_RESERVE; LOCAL_NOTE="  local_reserve=${LOCAL_RESERVE} (ollama lane armed)"; else LOCAL_EFF=0; LOCAL_NOTE=""; fi
+
 # --- measure RAM (instant — this is the real OOM guard, runs BEFORE the count) ---
 AVAIL=$(free -m | awk '/^Mem:/{print $7}')
 SWAP_USED=$(free -m | awk '/^Swap:/{print $3}')
-HEADROOM=$(( AVAIL - HOST_RESERVE - BALLOON ))
+HEADROOM=$(( AVAIL - HOST_RESERVE - BALLOON - LOCAL_EFF ))
 BUDGET=$(( HEADROOM / PER_AGENT )); [ "$BUDGET" -lt 0 ] && BUDGET=0
 
 block() {
   {
     echo "🚫 DREAMTEAM MEMORY GATE — spawn blocked: $1"
     echo "   avail=${AVAIL}MiB  swap_used=${SWAP_USED}MiB  agents=${2:-?}  budget=${BUDGET} more"
-    echo "   (per_agent=${PER_AGENT}  host_reserve=${HOST_RESERVE}  balloon_reserve=${BALLOON}  floor=${MIN_AVAIL})"
+    echo "   (per_agent=${PER_AGENT}  host_reserve=${HOST_RESERVE}  balloon_reserve=${BALLOON}  floor=${MIN_AVAIL}${LOCAL_NOTE})"
     echo "   Recover headroom: let in-flight agents finish + merge, reuse an idle teammate"
     echo "   (/dreamteam-roster), close Waydroid (waydroid session stop) + the browser, or"
     echo "   batch this agent into a later wave. Re-check: /dreamteam-status"

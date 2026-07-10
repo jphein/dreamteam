@@ -118,6 +118,41 @@ if [ "$GRC" -eq 2 ] && grep -qi 'cap' "$TMP/err"; then
 else
   fail "mem-gate should block on count cap — got exit $GRC; stderr: $(head -1 "$TMP/err")"
 fi
+
+# ── local-model lane reserve (#37) ───────────────────────────────────────────
+# Standalone fixtures (no .memory) → baked defaults (perAgent 400, host 6000,
+# balloon 8000, floor 8000). avail=20000 is ABOVE the floor and leaves budget when
+# the ollama lane is OFF, but the +9000 armed reserve zeroes it → a matched pair
+# where ONLY .local.enabled flips the decision (proves the block isn't vacuous).
+LOCAL_OFF="$TMP/local-off.json"; printf '%s' '{"local":{"enabled":false,"reserveMB":9000}}' > "$LOCAL_OFF"
+LOCAL_ON="$TMP/local-on.json";   printf '%s' '{"local":{"enabled":true,"reserveMB":9000}}'  > "$LOCAL_ON"
+
+# 4b) lane OFF at avail 20000 → ALLOW (reserve not applied)
+DREAMTEAM_CONFIG="$LOCAL_OFF" FAKE_AVAIL=20000 FAKE_PGREP_COUNT=1 \
+  run_gate "$MEM_GATE" '{"tool_name":"Agent","tool_input":{"prompt":"x"}}'
+if [ "$GRC" -eq 0 ]; then
+  pass "mem-gate ALLOWS (exit 0) at avail 20000MiB when the ollama lane is OFF (no reserve)"
+else
+  fail "lane-off control should allow — got exit $GRC; stderr: $(head -1 "$TMP/err")"
+fi
+
+# 4c) lane ARMED at the SAME 20000 → BLOCK, and the message names local_reserve
+DREAMTEAM_CONFIG="$LOCAL_ON" FAKE_AVAIL=20000 FAKE_PGREP_COUNT=1 \
+  run_gate "$MEM_GATE" '{"tool_name":"Agent","tool_input":{"prompt":"x"}}'
+if [ "$GRC" -eq 2 ] && grep -qi 'no budget' "$TMP/err" && grep -qi 'local_reserve' "$TMP/err"; then
+  pass "mem-gate BLOCKS (exit 2, msg shows local_reserve) at 20000MiB when the lane is ARMED (#37, non-vacuous vs 4b)"
+else
+  fail "lane-armed should block w/ local_reserve note — got exit $GRC; stderr: $(head -2 "$TMP/err")"
+fi
+
+# 4d) armed is a SUBTRACTION, not a kill-switch — ample RAM (40000) still admits
+DREAMTEAM_CONFIG="$LOCAL_ON" FAKE_AVAIL=40000 FAKE_PGREP_COUNT=1 \
+  run_gate "$MEM_GATE" '{"tool_name":"Agent","tool_input":{"prompt":"x"}}'
+if [ "$GRC" -eq 0 ]; then
+  pass "mem-gate ALLOWS (exit 0) lane-armed at 40000MiB — reserve subtracts headroom, doesn't hard-block"
+else
+  fail "lane-armed w/ ample RAM should allow — got exit $GRC; stderr: $(head -1 "$TMP/err")"
+fi
 unset FAKE_AVAIL FAKE_SWAP_USED FAKE_PGREP_COUNT
 
 echo "── reuse-gate.sh (reuse-before-spawn gate) ──────────────────────"
