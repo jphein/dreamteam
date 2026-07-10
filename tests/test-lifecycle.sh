@@ -78,8 +78,14 @@ read -r ST _EP < "$TMP/fleet/projx__luna" 2>/dev/null || ST=missing
 read -r ST _EP < "$TMP/fleet/projx__wisp" 2>/dev/null || ST=missing
 [ "$ST" = "working" ] && ok "SubagentStart stamps working" || bad "working stamp: $ST"
 read -r ST EPOCH < "$TMP/fleet/projx__lucid" 2>/dev/null || ST=missing
-[ "$ST" = "stopped" ] && ok "SubagentStop stamps stopped, @team stripped (lucid@s1 → lucid)" || bad "stopped stamp: $ST"
+[ "$ST" = "working" ] && ok "#56: SubagentStop stamps working not stopped (per-turn boundary ≠ death; @team stripped lucid@s1→lucid)" || bad "#56 SubagentStop stamp should be working, got: $ST"
 case "${EPOCH:-x}" in ''|*[!0-9]*) bad "stamp epoch not numeric (${EPOCH:-empty})";; *) ok "stamp carries numeric epoch";; esac
+# #56 regression — SubagentStop must NOT flip a working subagent to "stopped" (it's a
+# per-turn response-end, not death; 892 stops vs 105 starts in the wild). wisp was
+# stamped working by SubagentStart above; a following SubagentStop must keep it working.
+echo '{"hook_event_name":"SubagentStop","agent_id":"wisp"}' | run_ev >/dev/null
+read -r ST _EP < "$TMP/fleet/projx__wisp" 2>/dev/null || ST=missing
+[ "$ST" = "working" ] && ok "#56: SubagentStop keeps a working subagent working (no false-stopped latch)" || bad "#56: SubagentStop flipped working→'$ST'"
 
 # #21 regression — the liveness stamp must not LATCH a working teammate to "idle".
 # TeammateIdle is a turn boundary; the name-keyed stamp had no "working" writer
@@ -144,6 +150,10 @@ rm -f "$TMP/state/.last-notify"; : > "$TMP/notify.log"
 ( unset DBUS_SESSION_BUS_ADDRESS
   echo '{"hook_event_name":"SubagentStop","agent_id":"x"}' | FAKE_AVAIL=5000 run_ev >/dev/null )
 grep -q "DBUS=unix:" "$TMP/notify.log" && ok "#51: notify-send gets a DBUS session-bus addr even when none is inherited" || bad "#51: DBUS unset on notify-send ($(cat "$TMP/notify.log"))"
+# #51 covers BOTH notify-send call-sites (team-lead: the whole #51 is mine). No standalone
+# harness for morning-briefing.sh (it gathers gh/PR state), so static-guard that its toast
+# now supplies a bus address too — it referenced no DBUS at all before the fix.
+grep -q 'DBUS_SESSION_BUS_ADDRESS' "$ROOT/scripts/morning-briefing.sh" && ok "#51: morning-briefing.sh notify() also supplies a DBUS bus (both call-sites fixed)" || bad "#51: morning-briefing.sh notify-send has no DBUS bus"
 
 # team-events #52: the RED-tier voice attention call passes a short --timeout (reverie's
 # speak.sh contract) so a hung synth can't pin a proc for speak.sh's 180s manual default.

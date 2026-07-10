@@ -190,9 +190,21 @@ tier_note() {
 #   TeammateIdle                          → working  (turn boundary ≠ idle)
 #   TaskCompleted                         → idle      (the one HONEST "task done,
 #                                                       now reusable" signal)
-#   SubagentStop                          → stopped
+#   SubagentStop                          → working   (#56: per-turn boundary ≠ death)
 # Ground-truth idle for pure-SendMessage teammates (queued-inbox / transcript
 # inspection) is a documented follow-up (issue #21 remedy a/c).
+#
+# #56 — SubagentStop is ALSO a per-turn boundary, NOT death. It fires at every
+# subagent response-end (a real events.log showed 892 stops vs 105 starts; the
+# payload carries the per-response Stop-hook fields), so stamping "stopped" here
+# false-latched a live, working subagent to "stopped" in the id-keyed stamp that
+# fleet.sh actually reads. Treat it like TeammateIdle → "working"; genuine death is
+# caught by age-out (fleet --stale) / #58, never by this per-turn event.
+# NOTE (deferred, #56 follow-up): the name-keyed stamps above are still not read by
+# fleet.sh — in-process teammates SHARE the parent CWD and expose no fleet-visible
+# per-agent key (teammate_name isn't in their process signature; worktree-dir name ≠
+# dream name), so there is no join key. Surfacing them needs fleet.sh to read the team
+# config's teammate_name mapping — a design change, not a dual-key hack. Not here.
 FLEET_STATE="${DREAMTEAM_FLEET_STATE:-$HOME/.claude/dreamteam-fleet}"
 stamp_live() {
   [ -n "${WHO:-}" ] || return 0
@@ -207,7 +219,7 @@ case "$EVENT" in
   TaskCreated)   stamp_live working ;;   # #21: name-keyed "picked up work"
   SubagentStart) stamp_live working ;;
   TaskCompleted) stamp_live idle ;;      # #21: the honest "task done → reusable"
-  SubagentStop)  stamp_live stopped ;;
+  SubagentStop)  stamp_live working ;;   # #56: per-turn boundary, not death (was: stopped)
 esac
 
 case "$EVENT" in
