@@ -37,9 +37,10 @@ case "$*" in
 esac
 EOF
 chmod +x "$TMP/bin/systemctl"
-# Stub `notify-send` → record each invocation to a log instead of hitting the real
-# desktop bus (RED/scope tier events call it; tests must not spam JP's desktop).
-printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "%s/notify.log"\n' "$TMP" > "$TMP/bin/notify-send"
+# Stub `notify-send` → record each invocation (args + the DBUS addr it was given, for
+# the #51 assertion) to a log instead of hitting the real desktop bus (RED/scope tier
+# events call it; tests must not spam JP's desktop).
+printf '#!/bin/bash\nprintf "%%s DBUS=%%s\\n" "$*" "${DBUS_SESSION_BUS_ADDRESS:-UNSET}" >> "%s/notify.log"\n' "$TMP" > "$TMP/bin/notify-send"
 chmod +x "$TMP/bin/notify-send"
 # DREAMTEAM_PROJECT_DIR pins the derived project/scope name (hermetic against
 # whatever REAL dreamteam-<cwd>.scope is live on the host); DREAMTEAM_FLEET_STATE
@@ -116,6 +117,39 @@ OUT=$(echo '{"hook_event_name":"TeammateIdle","teammate_name":"luna"}' | FAKE_AV
 case "$OUT" in *"ORANGE TIER"*) ok "10000MiB avail → ORANGE (quiesce) warning";; *) bad "ORANGE tier ($OUT)";; esac
 OUT=$(echo '{"hook_event_name":"SubagentStop","agent_id":"x"}' | FAKE_AVAIL=5000 run_ev)
 case "$OUT" in *"RED TIER"*"shutdown_request"*) ok "5000MiB avail → RED (shed) warning";; *) bad "RED tier ($OUT)";; esac
+
+# team-events #50: co-firing scope-pressure + RED must collapse to ONE notify_red
+# delivery, and it must be the MORE-URGENT RED — not dropped by scope-pressure's
+# shared 600s marker touch. Clear marker + log first so the throttle can't hide it.
+rm -f "$TMP/state/.last-notify"; : > "$TMP/notify.log"
+echo '{"hook_event_name":"SubagentStop","agent_id":"x"}' | FAKE_SCOPE=pressure FAKE_AVAIL=5000 run_ev >/dev/null
+NL=$(wc -l < "$TMP/notify.log" 2>/dev/null || echo 0)
+[ "$NL" -eq 1 ] && ok "#50: co-firing scope+RED → exactly ONE notify_red (not two)" || bad "#50: expected 1 notify, got $NL ($(cat "$TMP/notify.log" 2>/dev/null))"
+grep -q "RED TIER" "$TMP/notify.log" && ok "#50: the single delivery is the more-urgent RED" || bad "#50: RED not delivered ($(cat "$TMP/notify.log"))"
+grep -q "SCOPE PRESSURE" "$TMP/notify.log" && bad "#50: scope-pressure consumed the slot, dropping RED (regression)" || ok "#50: scope-pressure did not displace RED"
+OUT=$(echo '{"hook_event_name":"SubagentStop","agent_id":"x"}' | FAKE_SCOPE=pressure FAKE_AVAIL=5000 run_ev)
+case "$OUT" in *"SCOPE PRESSURE"*"RED TIER"*) ok "#50: in-context systemMessage still shows BOTH tiers (additive)";; *) bad "#50: both tiers should appear in-context ($OUT)";; esac
+# negative control — RED alone (no scope) still delivers exactly one RED notify
+rm -f "$TMP/state/.last-notify"; : > "$TMP/notify.log"
+echo '{"hook_event_name":"SubagentStop","agent_id":"x"}' | FAKE_AVAIL=5000 run_ev >/dev/null
+grep -q "RED TIER" "$TMP/notify.log" && ok "#50 control: RED-only still notifies" || bad "#50 control: RED-only notify missing"
+
+# team-events #51: notify-send must carry a session-bus address (DBUS) so the desktop
+# toast doesn't silently no-op in the hook/cron context (no inherited DBUS). The stub
+# records DBUS=<addr|UNSET>; the fix supplies /run/user/<uid>/bus when none is inherited.
+# Unset DBUS in a subshell to mimic a real hook/cron ctx (no inherited bus) — makes
+# this NON-VACUOUS: unfixed code → notify-send sees no bus → stub logs UNSET; the fix
+# supplies /run/user/<uid>/bus. (Without the unset, a graphical test env would pass hollow.)
+rm -f "$TMP/state/.last-notify"; : > "$TMP/notify.log"
+( unset DBUS_SESSION_BUS_ADDRESS
+  echo '{"hook_event_name":"SubagentStop","agent_id":"x"}' | FAKE_AVAIL=5000 run_ev >/dev/null )
+grep -q "DBUS=unix:" "$TMP/notify.log" && ok "#51: notify-send gets a DBUS session-bus addr even when none is inherited" || bad "#51: DBUS unset on notify-send ($(cat "$TMP/notify.log"))"
+
+# team-events #52: the RED-tier voice attention call passes a short --timeout (reverie's
+# speak.sh contract) so a hung synth can't pin a proc for speak.sh's 180s manual default.
+# Voice is DREAMTEAM_TEST-suppressed, so assert on the source call site.
+grep -Eq 'speak\.sh.*--voice davis.*--timeout' "$ROOT/scripts/team-events.sh" \
+  && ok "#52: attention voice call passes --timeout (short cap)" || bad "#52: --timeout missing on speak.sh attention call"
 
 # spawn-accounting: first spawn writes the crash marker (incident-#2 fix);
 # a second spawn must not overwrite it
