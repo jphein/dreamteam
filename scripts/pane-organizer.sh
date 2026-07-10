@@ -29,6 +29,13 @@ fi
 SESSION=$(tmux display-message -p '#{session_name}' 2>/dev/null || true)
 ORCH_WIN=$(tmux display-message -p '#{window_index}' 2>/dev/null || true)
 [ -n "$SESSION" ] && [ -n "$ORCH_WIN" ] || exit 0
+
+# Never disturb a dedicated 'manager' window — the fleet-coordinator agent lives
+# there on purpose (its own tab). Without this, the sweep reclaims it into 'agents'
+# (esp. when the async hook lacks TMUX_PANE so the SELF_PANE skip below misses).
+if [ "$(tmux display-message -p -t "$SESSION:$ORCH_WIN" '#{window_name}' 2>/dev/null || true)" = "manager" ]; then
+  exit 0
+fi
 SELF_PANE="${TMUX_PANE:-}"
 
 # Is this pane's process tree an agent? (pane pid, a child, or a grandchild

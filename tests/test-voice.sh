@@ -91,6 +91,77 @@ env DREAMTEAM_CONFIG="$TMP/cfg-missing.json" bash "$SPEAK" "hi" --voice davis; r
 env DREAMTEAM_CONFIG="$TMP/cfg-off.json" bash "$SPEAK" "hi" --voice davis; rc=$?
 { [ "$rc" -eq 0 ] && no_rec; } && pass "speak.sh speech.enabled=false → muted (exit 0, ==false switch works)" || fail "mute switch (rc=$rc, rec: $(cat "$REC"))"
 
+echo "── engine fallback chain (#17): SPEECH_ENGINE seam + azure→piper ──"
+
+# Engine-aware fake tts.py: records "<SPEECH_ENGINE>\t<AZURE_SPEECH_VOICE>\t
+# <PIPER_VOICE>\t<argv>" per call and EXITS NON-ZERO for any engine named in the
+# $CTL control file — the exact upstream contract the fallback drives on (missing
+# creds / synth failure → non-zero → try next engine). Never touches Azure/audio.
+RECE="$TMP/tts-eng-rec.log"; CTL="$TMP/fail-engines"; : > "$CTL"
+cat > "$TMP/tts-eng.py" <<PY
+import sys, os
+eng = os.environ.get("SPEECH_ENGINE", "")
+try:
+    fail = open("$CTL").read().strip()
+except Exception:
+    fail = ""
+with open("$RECE", "a") as f:
+    f.write("\t".join([eng, os.environ.get("AZURE_SPEECH_VOICE", ""),
+                       os.environ.get("PIPER_VOICE", ""), " ".join(sys.argv[1:])]) + "\n")
+sys.exit(1 if eng and eng in fail.split(",") else 0)
+PY
+cat > "$TMP/cfg-chain.json" <<J
+{"speech":{"ttsPath":"$TMP/tts-eng.py","engine":"azure","fallback":["piper"]}}
+J
+cat > "$TMP/cfg-chain-override.json" <<J
+{"speech":{"ttsPath":"$TMP/tts-eng.py","engine":"azure","fallback":["piper"],"voices":{"davis":{"piper":"en_US-custom-low"}}}}
+J
+# poll an arbitrary record file for >= n lines (chain fires detached, like speak).
+wait_file(){ local f="$1" n="$2" i; for i in $(seq 1 40); do [ -f "$f" ] && [ "$(wc -l < "$f" 2>/dev/null || echo 0)" -ge "$n" ] && return 0; sleep 0.1; done; return 1; }
+
+# 6) azure HEALTHY (exits 0) → speaks once via azure, SPEECH_ENGINE=azure seam set,
+#    davis→en-US-DavisNeural; piper stays DORMANT — the zero-behavior-change guarantee.
+: > "$RECE"; : > "$CTL"
+env DREAMTEAM_CONFIG="$TMP/cfg-chain.json" bash "$SPEAK" "chain hi" --voice davis
+if wait_file "$RECE" 1; then sleep 0.4
+  n="$(wc -l < "$RECE")"; e1="$(sed -n 1p "$RECE" | cut -f1)"; v1="$(sed -n 1p "$RECE" | cut -f2)"
+  { [ "$n" -eq 1 ] && [ "$e1" = azure ] && [ "$v1" = en-US-DavisNeural ]; } \
+    && pass "chain azure-healthy → single azure call (SPEECH_ENGINE=azure, davis), piper dormant (zero behavior change)" \
+    || fail "azure-healthy chain (n=$n e1=$e1 v1=$v1)"
+else fail "azure-healthy chain: nothing recorded"; fi
+
+# 7) azure DOWN (exits 1) → falls back to piper; the davis alias keeps ONE identity
+#    across engines — en-US-DavisNeural (azure) then en_US-ryan-high (piper).
+: > "$RECE"; printf 'azure' > "$CTL"
+env DREAMTEAM_CONFIG="$TMP/cfg-chain.json" bash "$SPEAK" "chain hi" --voice davis
+if wait_file "$RECE" 2; then
+  e1="$(sed -n 1p "$RECE" | cut -f1)"; v1="$(sed -n 1p "$RECE" | cut -f2)"
+  e2="$(sed -n 2p "$RECE" | cut -f1)"; v2="$(sed -n 2p "$RECE" | cut -f3)"
+  { [ "$e1" = azure ] && [ "$v1" = en-US-DavisNeural ] && [ "$e2" = piper ] && [ "$v2" = en_US-ryan-high ]; } \
+    && pass "chain azure-down → falls back to piper; davis stays one identity (azure DavisNeural → piper ryan)" \
+    || fail "azure→piper fallback (e1=$e1 v1=$v1 e2=$e2 v2=$v2)"
+else fail "azure→piper fallback: <2 lines (rec: $(tr '\t' '|' < "$RECE"))"; fi
+
+# 8) ALL engines down → speak.sh walks the WHOLE chain and STILL exits 0 (a dead
+#    voice path must never brick a hook — the core silent-no-op contract holds).
+: > "$RECE"; printf 'azure,piper' > "$CTL"
+env DREAMTEAM_CONFIG="$TMP/cfg-chain.json" bash "$SPEAK" "chain hi" --voice davis; rc=$?
+if [ "$rc" -eq 0 ] && wait_file "$RECE" 2; then
+  e1="$(sed -n 1p "$RECE" | cut -f1)"; e2="$(sed -n 2p "$RECE" | cut -f1)"
+  { [ "$e1" = azure ] && [ "$e2" = piper ]; } \
+    && pass "chain all-engines-down → walks full azure→piper chain, speak.sh exits 0 (never bricks a hook)" \
+    || fail "all-down chain order (e1=$e1 e2=$e2)"
+else fail "all-down chain (rc=$rc, rec: $(tr '\t' '|' < "$RECE"))"; fi
+
+# 9) config .speech.voices.<alias>.<engine> overrides the baked piper identity.
+: > "$RECE"; printf 'azure' > "$CTL"
+env DREAMTEAM_CONFIG="$TMP/cfg-chain-override.json" bash "$SPEAK" "chain hi" --voice davis
+if wait_file "$RECE" 2; then
+  v2="$(sed -n 2p "$RECE" | cut -f3)"
+  [ "$v2" = en_US-custom-low ] && pass "config .speech.voices.davis.piper overrides the baked piper identity" \
+    || fail "piper voice override (v2=$v2)"
+else fail "piper voice override: <2 lines (rec: $(tr '\t' '|' < "$RECE"))"; fi
+
 echo "── team-events.sh RED / scope attention → voice (shared throttle) ─"
 
 # tier-path stubs (mirror test-lifecycle): free=controllable avail, scope
