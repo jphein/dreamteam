@@ -410,7 +410,13 @@ Agent({
   // agents. Worktree must be created manually before this call.
   prompt: """You are Lucid on team <project>-dreamteam.
 Voice: en-US-Brian:DragonHDLatestNeural, quality hd, subtitle_color green.
-Speak at key moments — start, blockers, completion. First word: your name.
+- SPEAK at key moments only (start · blocker · completion — never chatty), first word = your name:
+    bash "$CLAUDE_PLUGIN_ROOT/scripts/speak.sh" "Lucid — <one line>" --voice en-US-BrianNeural
+  The MCP voice tools are NOT wired into subagent sessions; this bash seam IS. It detaches
+  (never blocks) and applies the offline fallback (#17) + --timeout (#52). Use your persona's
+  plain *Neural id here — the DragonHD ids 400 through the CLI in this region.
+- To HEAR JP when blocked on a decision: do NOT take the mic yourself (ONE shared mic). Ask
+  Sandman to run scripts/listen.sh and relay JP's spoken reply (see "Agent Voice I/O").
 
 WORKTREE — absolute requirement:
 - Your worktree is at: /home/jp/Projects/<repo>/.claude/worktrees/lucid-262-chroma-cache-close
@@ -672,6 +678,37 @@ change renders, driving a web dashboard (e.g. candela-launcher), or testing a we
 end-to-end. Reserve it for agents that genuinely need browser access (it's heavier than
 headless checks); most agents don't. Pairs well with Luna (UI verification) and Cirrus
 (dashboard/infra).
+
+### Agent Voice I/O — speak (out) + listen (in)
+
+JP identifies agents by **voice**, so agents talk to him over the actual audio channel —
+the speech-to-cli **CLI**, not the MCP tools (`speak`/`listen`/`converse` are **not** wired
+into subagent sessions; the bash seams are). Two scripts, one shared microphone.
+
+**SPEAK — every agent, directly (`scripts/speak.sh`, #9/#17/#52).**
+```bash
+bash "$CLAUDE_PLUGIN_ROOT/scripts/speak.sh" "Reverie — PR is green, merging." --voice en-US-EmmaNeural
+```
+Use it at **key moments only** — task start, a blocker that needs JP, completion — first word
+your name. It resolves the voice, applies the offline `azure→piper` fallback (#17) and the
+per-call `--timeout` (#52), and **detaches** (returns instantly, never blocks a hook or a
+turn). Silent no-op if python/tts/creds are absent. Use your persona's **plain `*Neural`** id
+(the `DragonHD` ids 400 through the CLI in this region). Don't narrate every step — voice is
+for the moments JP would want to look up.
+
+**LISTEN — coordinator/manager-MEDIATED (`scripts/listen.sh`, #71).**
+```bash
+text=$(bash "$CLAUDE_PLUGIN_ROOT/scripts/listen.sh" --mode whisper --seconds 8)   # transcript on stdout
+```
+Captures JP's spoken reply so an agent blocked on a decision can **ask aloud and hear back**.
+
+⛔ **ONE MIC — hard rule.** There is a single microphone on the host, shared by every session
+and project. `listen.sh` serializes on a **global flock**, but the *policy* is: a **worker
+agent NEVER grabs the mic itself**. When blocked, it SendMessages **Sandman** (or the standing
+manager, Hypnos), who runs `listen.sh` once and relays JP's answer back. This keeps turns from
+fighting over the mic and keeps one coherent voice conversation. `listen.sh` waits up to
+`--lock-wait` then returns **exit 3 (mic busy)** rather than blocking; missing mic/creds →
+graceful no-op (empty stdout, exit 0). Muted with the same `speech.enabled=false` as speak.
 
 ## Spec-Driven Development
 

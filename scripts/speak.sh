@@ -2,6 +2,16 @@
 # dreamteam — speak.sh: fire-and-forget VOICE seam for attention events.
 # Contract:  speak.sh "<text>" [--voice <voice-or-alias>] [--timeout <sec>]
 #
+# AGENT USAGE (#71): dream agents speak DIRECTLY through this bash seam — the MCP
+# voice tools are NOT wired into subagent sessions, but speak.sh is bash-invokable by
+# any agent. Call it with your persona voice alias at KEY MOMENTS only (task start, a
+# blocker, completion) — never chatty:
+#     bash "$CLAUDE_PLUGIN_ROOT/scripts/speak.sh" \
+#          "Reverie — branch is green, opening the PR." --voice en-US-EmmaNeural
+# It resolves the voice, applies the offline fallback (#17) + --timeout (#52), and
+# detaches — returns instantly, never blocks you. listen.sh is the INPUT half; see
+# SKILL.md "Agent Voice I/O" for the voice roster + the one-mic serialization rule.
+#
 # Audio channel for RED-tier / scope-pressure attention (team-events.sh). DETACHED
 # + hard-timeout so a HOOK NEVER BLOCKS; SILENT NO-OP (exit 0) when python3/tts.py/
 # creds are missing or synth fails — attention must never brick a hook.
