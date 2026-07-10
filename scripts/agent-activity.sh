@@ -132,7 +132,9 @@ def cap(sock, addr, scroll):
 # box-dashes/space around @name and nothing else. REJECTS a content line that merely
 # mentions @name (roster/log line, or the #61 self-poke command "echo ──── @name ────")
 # and a bare "@name"; word-boundaries the name (@name2 ≠ @name). Keep byte-for-byte in
-# sync with pane-resolve.sh's PR_FOOTER_ERE.
+# sync with pane-resolve.sh's PR_FOOTER_ERE. Whitespace class is [ \t] (space+tab only)
+# == bash [:blank:] — NOT \s / [:space:] (which span \n\r\f\v and would diverge on
+# CR/FF/VT; Oracle #70 blind-spot fix). The CR fixture in test-pane-resolve.sh guards it.
 def _footer_re(name):
     e = re.escape(name)
     return re.compile(r"^[─ \t]*─[─ \t]*@%s[─ \t]*$|^[─ \t]*@%s[─ \t]*─[─ \t]*$" % (e, e))

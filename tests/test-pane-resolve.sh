@@ -84,6 +84,11 @@ FTABLE=(
   "@lucid|lucid|0"                            # bare mention, no rule → REJECT
   "──── @lucid2 ────|lucid|0"                 # name boundary: @lucid2 ≠ @lucid → REJECT
   "──── @lucid ────|lucid|1"                  # canonical
+  $'──\r── @lucid ────|lucid|0'               # CR is NOT footer whitespace → REJECT.
+                                              # Guards the whitespace-class (Oracle #70):
+                                              # [:space:] would treat \r as space and MATCH
+                                              # (diverging from Python's [ \t]); [:blank:]
+                                              # rejects it, matching Python — parity holds.
 )
 # ── NON-VACUOUS anti-drift lock (team-lead's key ask) ──────────────────────────
 # For every fixture, run it through BOTH the REAL bash matcher (lib pr_footer_matches)
