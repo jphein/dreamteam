@@ -34,12 +34,13 @@ The orchestrator is **Sandman** — the one who brings the dreams. Uses Davis vo
 
 ### Naming rules
 
-- **Agent `name` field**: `<dreamname>-<task>` — the dream name + a short kebab-case task slug. Examples: `morpheus-checkreviews`, `luna-1135`, `echo-reviews`, `drift-live-regions`. This makes agent panes, logs, and tmux titles self-documenting at a glance.
+- **Agent `name` field**: `<dreamname>-<role>` — the dream name + a short kebab-case **role** slug that says what the agent *is*, not which ticket it holds. Examples: `lucid-debugger`, `luna-ui`, `morpheus-architect`, `reeve-merge-warden`, `hypnos-agent-manager`, `nyx-resource-manager`. Role-suffixed names stay accurate across reuse/reassignment (the reuse-first workflow makes that routine), and keep panes, logs, and tmux titles self-documenting. The spawn-standards gate only checks *dream name + non-empty kebab suffix* — roles are an open vocabulary.
 - First word of every utterance is the agent's dream name: "Luna here —", "Sandman —"
-- Never reuse names within a session
+- Never reuse names within a session — two agents in the **same role** take two dream names (`lucid-debugger`, `wisp-debugger`), never one name twice.
 - Davis voice is **Sandman-only** — never assign to dream agents
 - Voice quality always `hd`; subtitle_color matches the roster color
-- Names evoke dreams — if you need more, draw from: Twilight, Solace, Onyx, Zephyr, Muse, Starling, Slumber, Dusk, Mirage, Phantasm, Phoenix, Cassia, Solara, Yara, Lyra, Nyx, Ember, Sage, Fern
+- Names evoke dreams — if you need more, draw from: Twilight, Solace, Onyx, Zephyr, Muse, Starling, Slumber, Dusk, Mirage, Phantasm, Phoenix, Cassia, Solara, Yara, Lyra, Ember, Sage, Fern
+- **Hypnos** and **Nyx** are reserved fixed-role names — the two standing managers (see § Manager roles). Never hand them to a worker agent; Nyx is deliberately kept out of the worker pool above so she can't be assigned as a fixer.
 
 ## Startup Sequence
 
@@ -66,6 +67,12 @@ The orchestrator is **Sandman** — the one who brings the dreams. Uses Davis vo
 3. Tasks            TaskCreate per issue — one task per agent
 4. Worktrees        Manually create one worktree per agent (MANDATORY — see below)
 5. Verify           `git worktree list` must show one entry per agent
+5.5 Managers        BEFORE the worker wave: if the planned worker count ≥
+                    `config.json .managers.minTeamSize` (default 3), spawn **Hypnos**
+                    (agent manager) as a typed teammate. Spawn **Nyx** (resource
+                    manager) only under scale/pressure — ≥5 workers OR after a wave
+                    hit Yellow — preferring to PROMOTE an idle agent under pressure.
+                    No worktree at spawn. See § Manager roles (standing).
 6. Spawn            All agents at once, background, name + team + general-purpose.
                     DO NOT pass `isolation: "worktree"` — it silently fails.
                     Every prompt MUST embed the absolute worktree path, the spec
@@ -304,23 +311,33 @@ stays MANDATORY. **Immediately after spawning all agents**, write `scratch/<team
 mkdir -p ~/.claude/projects/<project-hash>/scratch/<team>/
 ```
 
-Write the file with this format:
+Write the file with this format. The **Role** column records the *acting* role — for a
+typed agent it mirrors the name suffix; for a **promoted** manager (see § Manager roles) it
+records the role the agent is acting as, which differs from its birth name:
 
 ```markdown
 # Dream Team Roster — <team-name>
 Updated: <timestamp>
 
-| Agent ID | Dream Name | Issue | Worktree | Branch | Status | Current Task |
-|----------|------------|-------|----------|--------|--------|--------------|
-| luna-1234 | Luna | #1234 | .claude/worktrees/luna-1234 | feat/1234-share-quotes | working | Share quotes feature |
-| echo-1227 | Echo | #1227 | .claude/worktrees/echo-1227 | feat/1227-catalog-search | working | AI catalog search |
+| Agent ID | Dream Name | Role | Issue | Worktree | Branch | Status | Current Task |
+|----------|------------|------|-------|----------|--------|--------|--------------|
+| luna-ui | Luna | ui | #1234 | .claude/worktrees/luna-1234-share-quotes | feat/1234-share-quotes | working | Share quotes feature |
+| echo-sync | Echo | sync | #1227 | .claude/worktrees/echo-1227-catalog-search | feat/1227-catalog-search | working | AI catalog search |
+| hypnos-agent-manager | Hypnos | agent-manager (standing) | — | — | — | active | Roster flow + delivery verification |
+| drift-deps | Drift | resource-manager (promoted) | — | — | — | active | Acting Nyx under memory pressure |
 ...
 ```
 
-**Update the roster on every status change**:
+**Single-writer handoff (D6):** **Sandman writes `roster.md` at startup**; once Hypnos is
+up, **ownership transfers to Hypnos** for the run (documented in-message at handoff). The two
+never write it concurrently — Sandman resumes ownership only if Hypnos dies. This lives at
+`scratch/<team>/roster.md` (already inside the worktree-guard allowlist).
+
+**Update the roster on every status change** (the current owner does this):
 - Agent reports idle → update status to `idle`
 - Agent gets reassigned → update issue, branch, task
 - Agent's PR merges → update status to `merged`
+- Agent promoted/demoted to a manager role → update the **Role** column (acting role)
 - New agent spawned → add row
 
 **After compaction**, the injected roster.sh already names every live agent (identity +
@@ -330,10 +347,12 @@ who's alive, the other says what each was doing.
 
 **Recovery tiers** (try in order):
 
-1. **Injected roster / `bash scripts/roster.sh`** (AUTOMATED, primary) — the authoritative
-   harness team config: every member + live status. Injected at SessionStart, each spawn,
-   TeammateIdle, SubagentStop, and Pre/PostCompact, so it's usually already in context. This
-   is identity + liveness — the layer that used to require the manual `ps` scan.
+1. **Injected roster / `bash scripts/roster.sh --team <team>`** (AUTOMATED, primary) — the
+   authoritative harness team config: every member + live status. Injected at SessionStart,
+   each spawn, TeammateIdle, SubagentStop, and Pre/PostCompact, so it's usually already in
+   context. This is identity + liveness — the layer that used to require the manual `ps` scan.
+   **Always pass `--team <own-team>`** on a multi-team host: bare `roster.sh`/`idle-agents.sh`
+   resolve to the most-recently-modified team config, which can be a *different* team (R4).
 2. **Roster file** — `Read scratch/<team>/roster.md` for the ASSIGNMENT overlay (issue →
    branch → task → PR) that tier 1 lacks. Pair them: roster.sh says who's alive, roster.md
    says what each was doing.
@@ -381,7 +400,7 @@ tmux capture-pane -t :<window>.<pane> -p -S -50   # last 50 lines of the agent's
 
 ```
 Agent({
-  name: "lucid",
+  name: "lucid-debugger",   // <dreamname>-<role>, never bare (gate requires a suffix)
   team_name: "<project>-dreamteam",
   subagent_type: "general-purpose",
   run_in_background: true,
@@ -446,6 +465,118 @@ These belong in every agent prompt and have prevented the failure mode when foll
 > writes outside the worktree (`/tmp` + `*/scratch/*` allowed). It fails **open** on any ambiguity
 > so a bug can't brick an agent; shared-checkout spawns are exempt; kill-switch `worktree.enforce=false`.
 > Prompt discipline 1–4 stays the front line; this is the backstop.
+
+## Manager roles (standing)
+
+**Why:** Sandman is chronically busy while agents sit idle — JP's #1 orchestration complaint
+(2026-07-09: *"you are almost always busy, often there are many agents idle"*). The hooks
+**enforce** (gates) and **signal** (tier warnings), but every **action** — nudging idle
+agents, verifying delivery, acting the tier ladder, shedding load — burns Sandman's scarcest
+resource: JP-facing responsiveness. Two standing managers absorb that action so Sandman can
+stay responsive. Comms (chatty) and kill (resources) are **deliberately different agents** —
+separate blast radius.
+
+| Name | Role suffix | Voice / color | Owns | Kill authority |
+|---|---|---|---|---|
+| **Hypnos** | `agent-manager` | Andrew / cyan | Delivery verification, roster flow, idle→work matching, agent↔agent brokering, team-health audit, silence escalation, doc-steward (append `state/lessons-*.md`) | **None** |
+| **Nyx** | `resource-manager` | Ava / magenta | Tier-ladder actor, scope/containment watch, balloon forensics, admission (`mem-budget.sh` MAX per wave), stale-marker hygiene | **Sole kill authority below Sandman** |
+
+Both spawn as **typed teammates** (`dreamteam:hypnos`, `dreamteam:nyx`), get **no worktree**
+at spawn, and count against the memory budget like any agent — a 3-worker team's true
+footprint is Sandman + 3 workers + Hypnos (+ Nyx under pressure). Say so in the budget step.
+
+### Asymmetric activation (D4)
+
+- **Hypnos** — the responsiveness lever — spawns at `config.json .managers.minTeamSize`
+  (default **3** workers). Below that, Sandman wears both hats (current behavior).
+- **Nyx** — gated on scale/pressure: **≥5 workers OR after a wave hit Yellow**. Under
+  pressure, **prefer promoting an idle agent to Nyx** over a fresh spawn (her ~300 MB isn't
+  free). Fresh typed spawn is the default when no idle agent has valuable warm context.
+
+### Spawn mechanics — the fork rule
+
+- Managers are **peer-addressable typed teammates, NEVER forks.** A fork inherits Sandman's
+  full context but teammates **cannot SendMessage it back** — a manager without a working
+  inbox is broken by construction (`project_fork_not_peer_addressable.md`).
+- **Context transfer, not inheritance:** a manager boots by reading the briefing file
+  (`state/briefing-<date>.md`) + `scratch/<team>/roster.md` + `mempalace wake-up --wing
+  <project>`. Forks stay legal only for one-shot, no-inbox bursts (e.g. distilling the session
+  into the briefing file that then warms the managers).
+- A manager fresh-spawn while idle agents exist needs `FRESH-SPAWN: manager role requires
+  typed persona system prompt` to pass the reuse-gate (the promotion path is the alternative).
+
+### Promotion fallback (D7)
+
+When RAM is tight or an idle agent's warm context is valuable, promote an idle teammate via a
+SendMessage **promotion-prompt** instead of a fresh spawn. A promoted agent has **no
+system-prompt persona** (unlike a typed spawn), so the prompt MUST **restate the acting role +
+boundaries in-message**, and Hypnos re-asserts them periodically. The agent keeps its birth
+name; `roster.md`'s Role column records the acting role (e.g. `resource-manager (promoted)`).
+
+```
+PROMOTION — you are now acting <ROLE> (Hypnos | Nyx) for team <team>, in addition to / in
+place of your current task (Sandman will say which). This role has NO system-prompt persona,
+so hold these boundaries yourself:
+- OWN: <role duties — see the table above>.
+- BOUNDARIES: <e.g. Nyx: sole kill authority, polite-first, managers are shed-EXEMPT;
+  Hypnos: no code edits, no kill authority, poke.sh only into OWN-team panes>.
+- ALL roster reads pass --team <team>.  Reply `ACK <role>` to confirm you've taken it.
+```
+
+### Team-targeting (R4) — non-negotiable
+
+Every manager roster read **MUST** pass `--team <own-team>`: bare
+`roster.sh`/`idle-agents.sh`/`dashboard-data.sh` resolve to the **most-recently-modified**
+team config, which on a multi-team host returns a *different* team (pilot-confirmed: a
+per-team manager read bare roster and saw the *smol* team's agents). A per-team manager acting
+on another team's agents defeats the per-team scope. Pin `--team` on every read (or the
+`DREAMTEAM_TEAM` env seam if the implementation adds one).
+
+### Cadence & ACK (D1 / S3 / D3)
+
+- **Event-driven first, long idle-poll fallback** — NOT tight fixed polls. React to injected
+  signals (TeammateIdle/SubagentStop, tier warnings, inbound SendMessage); between events use
+  a **long** `ScheduleWakeup` (≥1200s idle, ~900s while active), not a 15-min busy-loop. The
+  old "every 15 min health audit" is dropped — it couldn't catch the >5-min-silence it was
+  meant to escalate on; run that audit on the existing poll instead.
+- **Token cost is real:** managers wake hundreds of times over a night. Budget *tokens*
+  alongside the +~300–600 MB RAM — this is why the cadence is event-driven with a long
+  fallback, not a tight poll.
+- **Closed-loop ACK (D3):** every assignment ends `reply ACK <task>`. Escalate on a **missing
+  ACK**, not on pane non-reaction — an idle agent may never process a queued SendMessage
+  (SendMessage lands in the transcript but only processes on the target's next tool round;
+  `project_sendmessage_unreliable.md`). The delivery fallback is **`poke.sh`** (types into the
+  pane, resolves it by `@handle` footer), never a raw `send-keys … Enter` (that omits poke's
+  0.4s settle and re-hits the queued-without-submit bug). Pane indexes drift as teammates
+  join — resolve panes by `@handle` footer at use time, never store static indexes.
+
+### Kill-safety (R5) — Nyx's discipline
+
+- **Managers are shed-EXEMPT and not-killable-by-Nyx.** Only **Sandman** may kill a manager
+  (including a ballooning one — Nyx won't self-kill and Hypnos has no kill authority).
+- Before any **non-RED** `TaskStop`, Nyx MUST get **pane-state confirmation** (via Hypnos or
+  `agent-activity.sh`) that the target is truly idle — carry the § Pane visibility "check the
+  pane before escalating" guard into Nyx's authority. A non-responding agent is usually
+  mid-tool-chain, not hung; `TaskStop` a working agent and you lose its in-flight work.
+- **RED tier is the only exception** to polite-first: shed immediately (`shutdown_request` →
+  ~60s → `TaskStop`), write the crash HANDOFF first. Every kill is logged to
+  `state/events.log`.
+- **Nyx sends her own checkpoint/quiesce requests directly** (+`poke.sh` fallback). The
+  emergency path does NOT depend on Hypnos being alive or responsive (D5).
+
+### Enforcement & error handling
+
+- **Restriction is by convention, not a hard gate (R2).** Managers are first-party personas
+  running no untrusted code; `worktree-guard.sh` only constrains `.claude/worktrees/*` cwds, so
+  a no-worktree manager is unconstrained by it. Managers write only under `state/` (lessons,
+  briefings, HANDOFF) + `scratch/<team>/` (roster) by convention — a new hard gate is
+  over-engineering.
+- **Manager dies:** TeammateIdle/SubagentStop injections surface it; Sandman re-spawns or
+  promotes a replacement. An OOM-killed manager may not fire SubagentStop, so Sandman also
+  keeps a proactive liveness check. If **Nyx** is down during a RED tier, **Sandman acts the
+  ladder himself** — the tier table below is the shared contract, not Nyx-private knowledge.
+- **Unreachable agent** (no ACK, pane gone): Hypnos marks it dead in `roster.md` and escalates
+  to Sandman — it never guesses.
 
 ## Agent Reuse & Context-Affinity Routing
 
@@ -810,10 +941,12 @@ Spawn these alongside the issue-working dream agents:
 
 | Name | Role | Cadence | Purpose |
 |---|---|---|---|
-| **Reeve** | Merge warden | 75s poll | Ships clean+green PRs automatically |
+| **Reeve** | Merge warden | 75s poll | Ships clean+green PRs automatically (requires an oracle/`ultrareview` pass before merge, not just clean+green CI) |
 | **Hermes** | Release herald | 2min poll | Cuts tags, installs on devices, posts Slack announcements |
-| **Argus** | Overseer | 15min | Audits team health; `URGENT` SendMessage if orchestrator silent >5min |
-| **Iona** | Conductor | 10min | Cross-teammate coordination, surfaces communication gaps |
+
+> **Overseer/conductor duties are now the standing managers'** (see § Manager roles). The old
+> Argus (team-health audit + silence escalation) and Iona (cross-teammate coordination) roles
+> are **retired** — folded into **Hypnos**, who runs on every team, not just overnight.
 
 ### Shipping autonomy
 
@@ -825,7 +958,7 @@ Per `feedback_auto_mode_authorized.md` — orchestrator makes design decisions o
 
 ### Self-sustaining triangle
 
-Scouts (Nebula, Haze) file issues → fixers (Morpheus, Aurora, Lucid) pick them up → Reeve ships clean PRs. Orchestrator only intervenes for hot files + design decisions. Argus + Iona catch what the orchestrator drops.
+Scouts (Nebula, Haze) file issues → fixers (Morpheus, Aurora, Lucid) pick them up → Reeve ships clean PRs. Orchestrator only intervenes for hot files + design decisions. The standing managers **Hypnos and Nyx** catch what the orchestrator drops.
 
 ### Memory-pressure degradation tiers
 
@@ -868,6 +1001,12 @@ controlled order below. The richer signals (psi_full, per-agent balloon size, sw
 > usually mid-tool-chain, not hung — `shutdown_request`/`TaskStop` a working agent and you
 > lose its in-flight work.
 
+> **When Nyx is up, she is the actor for this ladder** (see § Manager roles → Kill-safety),
+> not Sandman: she is sole kill authority below Sandman, sends her own checkpoint/quiesce
+> requests directly, requires **pane-state confirmation before any non-RED `TaskStop`**, and
+> treats **managers as shed-EXEMPT** (only Sandman kills a manager). RED tier is the only
+> skip-the-polite-wait case. If Nyx is down, Sandman runs the ladder himself.
+
 ### Alerting JP — PushNotification
 
 Use **PushNotification** when an agent needs JP's decision or something goes wrong (a
@@ -887,7 +1026,9 @@ progress** — that's what the voice line + tmux panes are for. Push message for
     prompt: "<the /loop or overnight directive verbatim>" })
   ```
   Use ~900s (15 min) while the team is active (stays inside the prompt-cache window enough
-  for a poll); stretch to 1800s+ when genuinely idle. Pairs with the Argus 15-min cadence.
+  for a poll); stretch to 1800s+ when genuinely idle. This is the **long idle-poll fallback**
+  the standing managers (Hypnos/Nyx) use between events — event-driven first, not a tight
+  fixed poll (see § Manager roles → Cadence & ACK).
 
 - **Durable schedules → systemd USER timers, NOT `CronCreate`** (session-only, dies on exit —
   can't survive a laptop close; JP's ruling: local systemd, not Claude artifacts). The pack lives
@@ -939,7 +1080,7 @@ A violent OOM is *sudden* — no chance to write a handoff *after*. Two layers n
      — stash anything dirty (dated label) BEFORE touching branches.
   3. `gh pr list --state merged --limit 40` + `--state open` — reconcile the cascade; find where it stopped.
   4. Re-read this HANDOFF + roster.md; tail state/dreamteam.log for the pre-crash footprint trace.
-  5. Re-spawn missing roles (Reeve/Hermes/Argus); resume from the next un-merged item.
+  5. Re-spawn missing roles — standing managers (Hypnos/Nyx) + overnight (Reeve/Hermes); resume from the next un-merged item.
 ## Notes          <merge gotchas, hot files, rebased PRs needing retarget>
 ```
 
