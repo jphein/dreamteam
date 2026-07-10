@@ -127,7 +127,9 @@ notify_red() {
 # crossed the tier. ATOMIC write (temp + rename) so a concurrent reader never sees a
 # half-written state. Best-effort; never fails the hook.
 write_tier_blackboard() {   # $1=tier(RED|SCOPE|ORANGE) $2=avail $3=floor $4=scopeCur $5=scopeHigh (bytes|"")
-  local tmp="$STATE/.tier-status.$$"
+  local bb tmp
+  bb="$(dreamteam_tier_status_file "$STATE")"      # #69: per-project path (shared lib helper)
+  tmp="${bb}.$$.tmp"
   mkdir -p "$STATE" 2>/dev/null || return 0
   jq -cn --arg tier "$1" --argjson ts "$(date +%s)" \
         --argjson avail "${2:-0}" --argjson floor "${3:-0}" \
@@ -136,7 +138,7 @@ write_tier_blackboard() {   # $1=tier(RED|SCOPE|ORANGE) $2=avail $3=floor $4=sco
           scopeCur:(if $scur=="" then null else ($scur|tonumber) end),
           scopeHigh:(if $shigh=="" then null else ($shigh|tonumber) end),
           host:$host}' > "$tmp" 2>/dev/null \
-    && mv -f "$tmp" "$STATE/tier-status" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
+    && mv -f "$tmp" "$bb" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
 }
 
 # #57: resolve the live team's Nyx member NAME (for the RED poke) from the harness team

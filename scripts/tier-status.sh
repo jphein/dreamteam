@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # tier-status.sh — read the durable memory-tier blackboard (#57 / S7).
 #
-# team-events.sh's tier_note() writes $STATE/tier-status (atomic) whenever it crosses a
+# team-events.sh's tier_note() writes a per-PROJECT tier-status-<project> under $STATE
+# (atomic; #69 — $STATE is shared host-wide, so it's namespaced per project) whenever it crosses a
 # memory tier (RED / SCOPE-pressure / ORANGE). The hook fires on WHATEVER session crossed
 # the tier — often NOT Nyx — so the in-context systemMessage can't be Nyx's source of
 # truth. This file, in the shared per-project $STATE, IS: Nyx polls it and acts on the
@@ -18,7 +19,10 @@
 set -uo pipefail
 ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 STATE="${DREAMTEAM_STATE:-$ROOT/state}"
-F="$STATE/tier-status"
+# shellcheck source=lib.sh
+. "$ROOT/scripts/lib.sh" 2>/dev/null || true
+# #69: per-project namespaced path — MUST match tier_note's writer (same lib helper).
+F="$(dreamteam_tier_status_file "$STATE" 2>/dev/null || printf '%s/tier-status' "$STATE")"
 STALE_SEC="${DREAMTEAM_TIER_STALE_SEC:-300}"
 FMT="human"; [ "${1:-}" = "--json" ] && FMT="json"
 

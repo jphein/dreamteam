@@ -31,6 +31,19 @@ dreamteam_scope_name() {
   if [ -n "$p" ]; then printf 'dreamteam-%s' "$p"; else printf 'dreamteam-agents'; fi
 }
 
+# dreamteam_tier_status_file — path to the per-PROJECT memory-tier blackboard (#57/#69).
+# The plugin $STATE dir is shared HOST-WIDE across every project using the plugin, so a
+# bare $STATE/tier-status would last-writer-wins across concurrent fleets on a multi-fleet
+# day (cross-project misattribution, #69). Namespacing by project basename fixes that.
+# BOTH the writer (team-events.sh tier_note) and the reader (tier-status.sh) call THIS so
+# the path can never drift between them. $1 = the caller's state dir.
+dreamteam_tier_status_file() {
+  local proj
+  proj="$(basename "$(dreamteam_project_root 2>/dev/null || echo "$PWD")")"
+  proj="$(printf '%s' "${proj:-unknown}" | tr -c 'A-Za-z0-9_.-' '_')"
+  printf '%s/tier-status-%s' "${1:-.}" "${proj:-unknown}"
+}
+
 # count_agents — number of live Claude agents/sessions, system-wide.
 # Combines two signals and takes the MAX, each cleaned of a distinct false-count:
 #   • pgrep  — live `claude/versions` processes, EXCLUDING `claude agents` helper
