@@ -10,7 +10,7 @@
 #   • ps + tmux are PATH-stubbed under $TMP/bin — the host process table and panes
 #     are never touched. ps serves a canned `pid args` snapshot; tmux is SOCKET-AWARE
 #     (list-panes per socket → pane_pid inventory; capture-pane -S -14 → body fixture,
-#     -S -6 → footer fixture for the fallback).
+#     -S -5 → footer fixture for the fallback, matching the shared resolver, #53).
 #   • /proc is a $TMP fixture (DREAMTEAM_PROC seam) giving PPid chains for the walk.
 #   • the team config is a $TMP fixture (DREAMTEAM_TEAMS_DIR seam).
 #   • python3 is the REAL interpreter (only ps/tmux are stubbed).
@@ -80,7 +80,7 @@ name="\$(basename "\$sock")"
 if [ "\$sub" = list-panes ]; then
   cat "$TMP/panes/\$name.panes" 2>/dev/null
 elif [ "\$sub" = capture-pane ]; then
-  if [ "\$scroll" = "-6" ]; then cat "$TMP/fix/\$addr.foot" 2>/dev/null
+  if [ "\$scroll" = "-5" ]; then cat "$TMP/fix/\$addr.foot" 2>/dev/null
   else cat "$TMP/fix/\$addr.body" 2>/dev/null; fi
 fi
 exit 0

@@ -89,26 +89,19 @@ while IFS= read -r d; do
   done < <(find "$d" -name cgroup.procs -exec cat {} + 2>/dev/null || true)
 done < <(find "$CGROOT" -maxdepth 4 -type d -name 'dreamteam-*.scope' 2>/dev/null)
 
-# ── layer 3 first: panes across every socket (pane_pid → address) ────────────
-declare -A PANE_ADDR
-for sock in "$TMUXDIR"/*; do
-  [ -S "$sock" ] || [ -e "$sock" ] || continue
-  sname="$(basename "$sock")"
-  while IFS= read -r line; do
-    addr="${line% *}"; ppid="${line##* }"
-    [ -n "$ppid" ] && PANE_ADDR[$ppid]="${sname}@${addr}"
-  done < <(tmux -S "$sock" list-panes -a -F '#{session_name}:#{window_index}.#{pane_index} #{pane_pid}' 2>/dev/null || true)
-done
+# ── layer 3 first: panes across every socket (canonical resolver, issue #53) ──
+# scripts/lib/pane-resolve.sh: pr_sweep_panes builds the pane_pid map, pr_pane_of
+# walks the PPid chain (closest-wins). Pin the lib seams to fleet's resolved values.
+DREAMTEAM_TMUX_DIR="$TMUXDIR"; DREAMTEAM_PROC="$PROC"
+# shellcheck source=lib/pane-resolve.sh
+. "$ROOT/scripts/lib/pane-resolve.sh"
+pr_sweep_panes
 
-# Walk a PID's PPid chain (via $PROC) until a pane_pid matches. Max 20 hops.
+# pane_of <pid> → "<sock-basename>@<addr>" (fleet's display form), empty on miss.
+# Thin wrapper over the shared walk so fleet's downstream contract is unchanged.
 pane_of() {
-  local p="$1" hops=0 ppid
-  while [ "$p" != "0" ] && [ "$p" != "1" ] && [ $hops -lt 20 ]; do
-    [ -n "${PANE_ADDR[$p]:-}" ] && { printf '%s' "${PANE_ADDR[$p]}"; return; }
-    ppid="$(awk '/^PPid:/{print $2}' "$PROC/$p/status" 2>/dev/null)" || return
-    [ -n "$ppid" ] || return
-    p="$ppid"; hops=$((hops+1))
-  done
+  local hit; hit="$(pr_pane_of "$1")" || return
+  printf '%s@%s' "$(basename "${hit%%$'\t'*}")" "${hit##*$'\t'}"
 }
 
 # cwd → "project|agent" (worktree-aware). Empty project for unmappable cwds.
@@ -146,14 +139,27 @@ for pid in $AGENT_PIDS; do
   scope="${PID_SCOPE[$pid]:--}"
   yours="false"; [ -n "$proj" ] && [ "$proj" = "$CALLER_PROJ" ] && yours="true"
   # Liveness: prefer the hook stamp (#20); fall back to the CPU-time heuristic.
+  # #56 facet-1 (name-keyed orphan): team-events writes the good working/idle stamp
+  # under "<proj>__<teammate_name>", but the teammate name isn't always the
+  # <agent-id>-name this reader derived — most often it's the WORKTREE DIR name. Reading
+  # only "<proj>__<agent>" orphaned those stamps. Try each candidate key and take the
+  # FRESHEST existing stamp so the signal reaches the LIVE column. Additive: <agent> is
+  # still tried first, so the prior behavior is preserved when the keys coincide.
   live="null"; liveAge=-1
-  stampf="$FLEET_STATE/$(printf '%s__%s' "$proj" "$agent" | tr '/' '_')"
-  if [ "$agent" != "-" ] && [ -f "$stampf" ]; then
+  wtname=""
+  case "$cwd" in */.claude/worktrees/*) wtname="${cwd##*/.claude/worktrees/}"; wtname="${wtname%%/*}";; esac
+  _best_epoch=-1; _best_state=""
+  for _cand in "$agent" "$wtname"; do
+    [ -n "$_cand" ] && [ "$_cand" != "-" ] || continue
+    stampf="$FLEET_STATE/$(printf '%s__%s' "$proj" "$_cand" | tr '/' '_')"
+    [ -f "$stampf" ] || continue
     read -r _lstate _lepoch < "$stampf" 2>/dev/null || true
     _lepoch="${_lepoch//[!0-9]/}"
-    if [ -n "${_lstate:-}" ] && [ -n "$_lepoch" ]; then
-      live="\"$_lstate\""; liveAge=$(( NOW_EPOCH - _lepoch )); [ "$liveAge" -lt 0 ] && liveAge=0
-    fi
+    [ -n "${_lstate:-}" ] && [ -n "$_lepoch" ] || continue
+    if [ "$_lepoch" -gt "$_best_epoch" ]; then _best_epoch="$_lepoch"; _best_state="$_lstate"; fi
+  done
+  if [ "$_best_epoch" -ge 0 ]; then
+    live="\"$_best_state\""; liveAge=$(( NOW_EPOCH - _best_epoch )); [ "$liveAge" -lt 0 ] && liveAge=0
   fi
   stale="false"
   if [ "$live" != "null" ]; then
