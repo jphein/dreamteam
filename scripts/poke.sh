@@ -63,12 +63,15 @@ print(("1" if d.get("found") else "0"), d.get("socket") or "-", d.get("pane") or
 fi
 if [ -z "$pane" ] && [ ! -f "$PANE_PEEK" ]; then
   # fallback ONLY when pane-peek is absent (else its own @handle fallback already ran):
-  # self-contained @handle footer scan on the default socket.
-  while IFS= read -r p; do
-    if tmux capture-pane -p -t "$p" -S -5 2>/dev/null | grep -F "@${agent}" | grep -q '─'; then
-      pane="$p"; break
-    fi
-  done < <(tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null)
+  # the canonical resolver's STRUCTURAL footer scan across ALL sockets (issue #53/#61) —
+  # replaces the old lax default-socket-only two-grep that false-matched a pane merely
+  # DISPLAYING "@name" (the #61 self-poke → wrong-pane delivery).
+  # shellcheck source=lib/pane-resolve.sh
+  . "$ROOT/scripts/lib/pane-resolve.sh"
+  pr_sweep_panes
+  if hit="$(pr_resolve_footer "$agent")"; then
+    socket="${hit%%$'\t'*}"; pane="${hit##*$'\t'}"
+  fi
 fi
 [ -n "$pane" ] || { echo "poke: no live pane found for @${agent}" >&2; exit 3; }
 

@@ -80,51 +80,26 @@ else:
 ' "$AGENT" 2>/dev/null || echo "0 - - -")
 R_FOUND="${R_FOUND:-0}"; R_PID="${R_PID:--}"; R_STATUS="${R_STATUS:--}"; R_CWD="${R_CWD:--}"
 
-# ── 2. sweep every socket → pane_pid map + a (sock,addr) list for the fallback ─
-declare -A PANE_ADDR                                # pane_pid → "sock\taddr"
-PANES=()                                            # "sock\taddr\tpane_pid"
-if [ -d "$TMUXDIR" ]; then
-  for sock in "$TMUXDIR"/*; do
-    [ -S "$sock" ] || [ -e "$sock" ] || continue
-    while IFS= read -r line; do
-      [ -n "$line" ] || continue
-      ppid="${line##* }"; addr="${line% *}"         # split on LAST space (session names w/ spaces)
-      [ -n "$ppid" ] || continue
-      PANE_ADDR["$ppid"]="$sock"$'\t'"$addr"
-      PANES+=("$sock"$'\t'"$addr"$'\t'"$ppid")
-    done < <(tmux -S "$sock" list-panes -a -F '#{session_name}:#{window_index}.#{pane_index} #{pane_pid}' 2>/dev/null || true)
-  done
-fi
+# ── 2. sweep every socket → pane_pid map (+ list for the footer fallback) ──────
+# Canonical resolver (issue #53): scripts/lib/pane-resolve.sh — pr_sweep_panes builds
+# PR_PANE_ADDR/PR_PANES, pr_pane_of walks the PPid chain, pr_resolve_footer does the
+# STRUCTURAL @handle match. Pin the lib's seams to this script's resolved values.
+DREAMTEAM_TMUX_DIR="$TMUXDIR"; DREAMTEAM_PROC="$PROC"
+# shellcheck source=lib/pane-resolve.sh
+. "$ROOT/scripts/lib/pane-resolve.sh"
+pr_sweep_panes
 
-# Walk a pid's PPid chain until the FIRST pane_pid matches (max 20 hops). fleet.sh's pane_of.
-pane_of() {
-  local p="$1" hops=0 ppid
-  while [ "$p" != "0" ] && [ "$p" != "1" ] && [ $hops -lt 20 ]; do
-    [ -n "${PANE_ADDR[$p]:-}" ] && { printf '%s' "${PANE_ADDR[$p]}"; return 0; }
-    ppid="$(awk '/^PPid:/{print $2}' "$PROC/$p/status" 2>/dev/null)" || return 1
-    [ -n "$ppid" ] || return 1
-    p="$ppid"; hops=$((hops+1))
-  done
-  return 1
-}
-
-# ── 3. resolve the pane: pid-ancestry first, then @handle footer ──────────────
+# ── 3. resolve the pane: pid-ancestry first, then STRUCTURAL @handle footer ────
 SOCK=""; ADDR=""; VIA=""
 if [ "$R_PID" != "-" ]; then
-  if hit="$(pane_of "$R_PID")"; then
+  if hit="$(pr_pane_of "$R_PID")"; then
     SOCK="${hit%%$'\t'*}"; ADDR="${hit##*$'\t'}"; VIA="pid"
   fi
 fi
-if [ -z "$ADDR" ]; then                             # fallback: footer @handle scan
-  for entry in "${PANES[@]:-}"; do
-    [ -n "$entry" ] || continue
-    esock="${entry%%$'\t'*}"; rest="${entry#*$'\t'}"; eaddr="${rest%%$'\t'*}"
-    # footer-only (-S -5) + box-dash guard: the "──── @name ────" line, not a listing.
-    if tmux -S "$esock" capture-pane -p -t "$eaddr" -S -5 2>/dev/null \
-         | grep -F "@${AGENT}" | grep -q '─'; then
-      SOCK="$esock"; ADDR="$eaddr"; VIA="handle"; break
-    fi
-  done
+if [ -z "$ADDR" ]; then                             # fallback: structural footer scan (#61)
+  if hit="$(pr_resolve_footer "$AGENT")"; then
+    SOCK="${hit%%$'\t'*}"; ADDR="${hit##*$'\t'}"; VIA="handle"
+  fi
 fi
 
 # ── 4a. no pane: explain WHY (dead vs. no-pane vs. unknown), exit 3 ───────────

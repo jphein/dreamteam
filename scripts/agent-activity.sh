@@ -122,13 +122,28 @@ def pane_of(pid):
 def cap(sock, addr, scroll):
     return sh("tmux", "-S", sock, "capture-pane", "-p", "-t", addr, "-S", str(scroll))
 
+# STRUCTURAL footer match — MIRRORS scripts/lib/pane-resolve.sh's PR_FOOTER_ERE VERBATIM
+# (issue #53/#61). The two languages share this ONE rule; tests/test-pane-resolve.sh
+# extracts THIS function and runs the SAME fixture table through both it and the bash
+# matcher, asserting identical verdicts — so the mirror can't silently drift (the
+# non-vacuous anti-drift lock team-lead mandated). A genuine footer is a horizontal-rule
+# line whose ONLY non-rule content is the "@name" token — "──── @name ────" OR
+# "@name ────────": ≥1 box-dash before @name, OR ≥1 after; either way the WHOLE line is
+# box-dashes/space around @name and nothing else. REJECTS a content line that merely
+# mentions @name (roster/log line, or the #61 self-poke command "echo ──── @name ────")
+# and a bare "@name"; word-boundaries the name (@name2 ≠ @name). Keep byte-for-byte in
+# sync with pane-resolve.sh's PR_FOOTER_ERE.
+def _footer_re(name):
+    e = re.escape(name)
+    return re.compile(r"^[─ \t]*─[─ \t]*@%s[─ \t]*$|^[─ \t]*@%s[─ \t]*─[─ \t]*$" % (e, e))
+
 def handle_pane(name):
-    # Fallback ONLY: scan each pane's FOOTER for the box-dash-flanked "@name ─" line
-    # (poke.sh's guard). Used when the pid-walk finds no pane (wrapped shell / detached).
+    # Fallback ONLY: used when the pid-walk finds no pane (wrapped shell / detached).
+    pat = _footer_re(name)
     for sock, addr, _ in panes:
-        foot = cap(sock, addr, -6)
-        if re.search(r"@%s\b" % re.escape(name), foot) and "─" in foot:
-            return (sock, addr)
+        for line in cap(sock, addr, -5).splitlines():
+            if pat.search(line):
+                return (sock, addr)
     return None
 
 SPIN = "·✻✶✽✢✳●✷◐◓◑◒*✺"

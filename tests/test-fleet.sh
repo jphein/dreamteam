@@ -46,6 +46,11 @@ mkproc 60  50 "$TMP/home/Projects/alpha" "bash"
 mkproc 102 61 "$TMP/home/Projects/beta/.claude/worktrees/luna-w1/src" "claude"
 mkproc 61  1  "$TMP/home/Projects/beta" "bash"
 mkproc 103 50 "$TMP/home/Projects/alpha" "claude"
+# 104 (#56 facet-1): agent-id name ('morph-diff') DIFFERS from its worktree dir
+# ('luna-w4'); its stamp is keyed by the WORKTREE DIR (beta__luna-w4). The reader must
+# still find it via the worktree-dir candidate key — else the working signal orphans.
+mkproc 104 62 "$TMP/home/Projects/beta/.claude/worktrees/luna-w4/src" "claude --agent-id morph-diff@t1"
+mkproc 62  1  "$TMP/home/Projects/beta" "bash"
 
 # tmux: one socket file, pane 50 at sess "dream" window 2 pane 1
 mkdir -p "$TMP/tmux" "$TMP/bin"
@@ -62,11 +67,12 @@ case "$pid" in
   101) echo "  500  40 409600" ;;
   102) echo " 9999   1 204800" ;;
   103) echo "  120  30 102400" ;;
+  104) echo "  120  30 102400" ;;
 esac
 EOF
 cat > "$TMP/bin/pgrep" <<'EOF'
 #!/bin/bash
-printf '101\n102\n103\n'
+printf '101\n102\n103\n104\n'
 EOF
 chmod +x "$TMP/bin/"*
 
@@ -76,6 +82,8 @@ chmod +x "$TMP/bin/"*
 mkdir -p "$TMP/fleetstate"
 printf 'working %s\n' "$(date +%s)" > "$TMP/fleetstate/alpha__lucid-x"
 printf 'idle %s\n' "$(( $(date +%s) - 99999 ))" > "$TMP/fleetstate/beta__luna-w1"
+# 104's stamp is keyed by the WORKTREE DIR (not the agent-id name) — the #56 facet-1 case.
+printf 'working %s\n' "$(date +%s)" > "$TMP/fleetstate/beta__luna-w4"
 touch -d '3 days ago' "$TMP/fleetstate/ghost__gone"
 
 run() { HOME="$TMP/home" DREAMTEAM_CGROUP_ROOT="$TMP/cg" DREAMTEAM_TMUX_DIR="$TMP/tmux" \
@@ -88,7 +96,7 @@ run() { HOME="$TMP/home" DREAMTEAM_CGROUP_ROOT="$TMP/cg" DREAMTEAM_TMUX_DIR="$TM
 J="$(run --json)"
 echo "$J" | jq -e . >/dev/null 2>&1 && ok "--json emits valid JSON" || { bad "--json invalid: $J"; exit 1; }
 [ "$(echo "$J" | jq -r '.caller')" = "alpha" ] && ok "caller project resolved (alpha)" || bad "caller: $(echo "$J" | jq -r .caller)"
-[ "$(echo "$J" | jq -r '.agents | length')" = "3" ] && ok "all 3 agents enumerated" || bad "agent count"
+[ "$(echo "$J" | jq -r '.agents | length')" = "4" ] && ok "all 4 agents enumerated" || bad "agent count"
 [ "$(echo "$J" | jq -r '.scopes | length')" = "2" ] && ok "both scopes discovered (find, not glob)" || bad "scope count"
 [ "$(echo "$J" | jq -r '.scopes[] | select(.name=="dreamteam-agents.scope") | .memMB')" = "512" ] \
   && ok "scope memory.current read (512 MiB)" || bad "scope mem"
@@ -111,12 +119,18 @@ A102='.agents[] | select(.pid==102)'
 [ "$(echo "$J" | jq -r "$A101 | .live")" = "working" ] && ok "fresh stamp read (live=working)" || bad "101 live: $(echo "$J" | jq -r "$A101|.live")"
 [ "$(echo "$J" | jq -r "$A101 | .liveAgeSec < 60")" = "true" ] && ok "stamp age computed" || bad "101 liveAge"
 [ "$(echo "$J" | jq -r "$A102 | .live")" = "idle" ] && ok "old idle stamp read on 102" || bad "102 live"
+# #56 facet-1: 104's agent name is 'morph-diff' (from --agent-id) but its stamp is keyed
+# by the worktree dir 'luna-w4'. The reader's worktree-dir candidate key must find it —
+# before the fix this orphaned to live=null.
+A104='.agents[] | select(.pid==104)'
+[ "$(echo "$J" | jq -r "$A104 | .agent")" = "morph-diff" ] && ok "104 agent name from --agent-id (differs from worktree dir)" || bad "104 agent: $(echo "$J" | jq -r "$A104|.agent")"
+[ "$(echo "$J" | jq -r "$A104 | .live")" = "working" ] && ok "#56 facet-1: worktree-dir-keyed stamp reaches fleet (was orphaned)" || bad "104 live: $(echo "$J" | jq -r "$A104|.live")"
 [ "$(echo "$J" | jq -r '.agents[] | select(.pid==103) | .live')" = "null" ] && ok "unstamped agent falls back to heuristic (live=null)" || bad "103 live"
 [ -f "$TMP/fleetstate/ghost__gone" ] && bad "ancient stamp survived age-GC" || ok "age-GC pruned the 3-day-old orphan stamp"
 [ -f "$TMP/fleetstate/alpha__lucid-x" ] && ok "fresh stamps survive GC" || bad "GC ate a fresh stamp"
 
 # ── filters ───────────────────────────────────────────────────────────────────
-[ "$(run --json --project beta | jq -r '.agents | length')" = "1" ] && ok "--project filters" || bad "--project"
+[ "$(run --json --project beta | jq -r '.agents | length')" = "2" ] && ok "--project filters" || bad "--project"
 [ "$(run --json --stale | jq -r '.agents[0].pid')" = "102" ] && ok "--stale isolates the candidate" || bad "--stale"
 
 # ── human table ───────────────────────────────────────────────────────────────
