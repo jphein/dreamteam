@@ -51,7 +51,7 @@ echo ""
 echo "  2) Reconcile the merge cascade: gh pr list --state merged --limit 40 ; gh pr list --state open"
 echo "  3) Read $STATE/HANDOFF.md (continuous checkpoint) and the team roster.md"
 echo "  4) Tail $STATE/dreamteam.log for the pre-crash footprint trace (agent count + total RSS growth)"
-echo "  5) Re-spawn missing overnight roles (Reeve/Hermes/Argus); resume from the next un-merged item."
+echo "  5) Re-spawn missing roles — standing managers (Hypnos/Nyx) + overnight (Reeve/Hermes); resume from the next un-merged item."
 echo ""
 echo "    After recovery, clear this notice:  rm '$MARKER'"
 exit 0
