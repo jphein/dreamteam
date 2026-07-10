@@ -126,6 +126,20 @@ for k in perAgentMB hostReserveMB balloonReserveMB minAvailableMB maxAgents; do
   fi
 done
 
+# Local-lane reserve (#37): .local.reserveMB is read in THREE places — dashboard-data
+# (ml("reserveMB", N)), mem-budget + mem-gate (getlocal reserveMB N). All must agree,
+# or the dashboard shows a budget the gate won't enforce (same drift class, new knob).
+GATE="$ROOT/scripts/mem-gate.sh"
+dl="$(grep -oE 'ml\("reserveMB", *[0-9]+\)' "$DASH" | grep -oE '[0-9]+' | head -1)"
+bl="$(grep -oE 'getlocal +reserveMB +[0-9]+'  "$BUD"  | grep -oE '[0-9]+' | head -1)"
+gl="$(grep -oE 'getlocal +reserveMB +[0-9]+'  "$GATE" | grep -oE '[0-9]+' | head -1)"
+if   [ -z "$dl" ]; then fail "defaults: '.local.reserveMB' default not found in dashboard-data.sh"
+elif [ -z "$bl" ]; then fail "defaults: '.local.reserveMB' default not found in mem-budget.sh"
+elif [ -z "$gl" ]; then fail "defaults: '.local.reserveMB' default not found in mem-gate.sh"
+elif [ "$dl" = "$bl" ] && [ "$bl" = "$gl" ]; then pass "defaults agree: .local.reserveMB = $dl (dashboard-data, mem-budget, mem-gate)"
+else fail "defaults DRIFT: reserveMB dashboard-data=$dl mem-budget=$bl mem-gate=$gl"
+fi
+
 # ─────────────────────────────────────────────────────────────────────────────
 echo "────────────────────────────────────────"
 printf 'summary: %d passed, %d failed\n' "$PASS" "$FAIL"

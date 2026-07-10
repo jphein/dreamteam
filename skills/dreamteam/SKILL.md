@@ -180,7 +180,8 @@ formula's *shape*, with the config keys that feed it:
 ```bash
 AVAIL=$(free -m | awk '/^Mem:/{print $7}')       # MiB available (real, incl. reclaimable)
 # perAgentMB, hostReserveMB, balloonReserveMB, maxAgents, minAvailableMB ← config.json .memory
-BUDGET=$(( (AVAIL - hostReserveMB - balloonReserveMB) / perAgentMB ))
+# localReserveMB ← config.json .local, subtracted ONLY when the ollama lane is armed (#37); else 0
+BUDGET=$(( (AVAIL - hostReserveMB - balloonReserveMB - localReserveMB) / perAgentMB ))
 MAX_AGENTS=$(( BUDGET < maxAgents ? BUDGET : maxAgents ))   # = min(count cap, RAM budget)
 ```
 
@@ -636,8 +637,12 @@ down, model/API error) → **the caller MUST fall back to cloud** · `exit 1` = 
 
 **Verification law:** anything the local lane generates that will **land in a repo** goes
 through the **oracle** (Fable/Opus) before commit — treat local output as a draft, never as
-trusted. **Memory:** a resident model is ~7-9 GB that mem-gate can't see; before arming the
-lane on a box also running fleets, bump `memory.hostReserveMB` (see `.local._notes`).
+trusted. **Memory (#37):** a resident model is ~7-9 GB that mem-gate can't see (it counts
+only `claude` procs). When the lane is armed, the gate now **automatically** holds back
+`.local.reserveMB` (default 9000) from the spawn budget — so arming it throttles the fleet
+instead of risking an OOM, no manual `hostReserveMB` tuning needed. On a GPU box where the
+model stays VRAM-resident the real RAM cost is lower; tune `.local.reserveMB` down to
+reclaim headroom (see `.local._notes`).
 
 ## Agent Tooling — code intelligence & browser
 

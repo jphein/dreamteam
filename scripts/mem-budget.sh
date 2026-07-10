@@ -14,17 +14,30 @@ PER_AGENT=$(getcfg perAgentMB 400); HOST_RESERVE=$(getcfg hostReserveMB 6000)
 BALLOON=$(getcfg balloonReserveMB 8000); MIN_AVAIL=$(getcfg minAvailableMB 8000)
 MAX_AGENTS=$(getcfg maxAgents 30)
 
+# Local-model lane reserve (#37) — held back only when the ollama lane is armed
+# (.local.enabled == true); its resident model is invisible to the claude-proc
+# accounting. ==false-safe. Default 9000 MUST match mem-gate.sh + dashboard-data.sh
+# (test-roster.sh defaults-agreement guard enforces this).
+getlocal() { jq -r --arg k "$1" --arg d "$2" ".local[\$k] // \$d" "$CFG" 2>/dev/null || printf '%s' "$2"; }
+LOCAL_ARMED=$(jq -r 'if .local.enabled == true then 1 else 0 end' "$CFG" 2>/dev/null || echo 0)
+LOCAL_RESERVE=$(getlocal reserveMB 9000); LOCAL_RESERVE=${LOCAL_RESERVE//[!0-9]/}; [ -n "$LOCAL_RESERVE" ] || LOCAL_RESERVE=9000
+[ "$LOCAL_ARMED" = 1 ] && LOCAL_EFF=$LOCAL_RESERVE || LOCAL_EFF=0
+
 AVAIL=$(free -m | awk '/^Mem:/{print $7}')
 SWAP_USED=$(free -m | awk '/^Swap:/{print $3}')
 # agent count via `claude agents --json` (real status), pgrep fallback — see lib.sh
 if command -v count_agents >/dev/null 2>&1; then NAGENTS=$(count_agents); else
   NAGENTS=$(pgrep -fc 'claude/versions' 2>/dev/null || true); NAGENTS=${NAGENTS:-0}; fi
-BUDGET=$(( (AVAIL - HOST_RESERVE - BALLOON) / PER_AGENT )); [ "$BUDGET" -lt 0 ] && BUDGET=0
+BUDGET=$(( (AVAIL - HOST_RESERVE - BALLOON - LOCAL_EFF) / PER_AGENT )); [ "$BUDGET" -lt 0 ] && BUDGET=0
 CAP=$(( BUDGET < MAX_AGENTS ? BUDGET : MAX_AGENTS ))
 ROOM=$(( CAP - NAGENTS )); [ "$ROOM" -lt 0 ] && ROOM=0
 [ "$AVAIL" -lt "$MIN_AVAIL" ] && { CAP=0; ROOM=0; }
 
 if [ "${1:-}" = "--max" ]; then echo "$CAP"; exit 0; fi
+
+# Local-lane reserve line — only rendered when the ollama lane is armed (#37).
+LOCAL_LINE=""
+[ "$LOCAL_ARMED" = 1 ] && LOCAL_LINE=$'\n'"  local reserve : ${LOCAL_RESERVE} MiB   (ollama lane armed — #37; held for the resident model)"
 
 # Team scope footprint — only when the auto-containment scope is live. MemoryCurrent
 # is the TRUE footprint: it includes the gradle/JVM child procs the claude-proc
@@ -48,7 +61,7 @@ cat <<EOF
 dreamteam memory budget
   available RAM : ${AVAIL} MiB        swap used: ${SWAP_USED} MiB
   live agents   : ${NAGENTS}
-  per-agent plan: ${PER_AGENT} MiB    host reserve: ${HOST_RESERVE} MiB    balloon reserve: ${BALLOON} MiB
+  per-agent plan: ${PER_AGENT} MiB    host reserve: ${HOST_RESERVE} MiB    balloon reserve: ${BALLOON} MiB${LOCAL_LINE}
   ─────────────────────────────────────────────
   MAX agents    : ${CAP}   (= min(count cap ${MAX_AGENTS}, memory budget ${BUDGET}))
   room for      : ${ROOM} more this wave${SCOPE_SUFFIX}

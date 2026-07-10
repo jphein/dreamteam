@@ -36,8 +36,8 @@ PATH-stubbed `free`/`ps`/`pgrep` + fixture team configs + temp state via the scr
 bash tests/run.sh          # runs every suite, exits non-zero on any failure
 ```
 
-- `tests/test-gates.sh` — mem-gate (RAM-floor block, count-cap block, non-Agent passthrough) + reuse-gate (block on live idle teammate, allow on FRESH-SPAWN / no team). Includes negative controls proving the block-paths aren't vacuous.
-- `tests/test-roster.sh` — roster.sh status classification (lead/idle/dead) against a fixture, the **spawn-accounting line-21 crash regression** (restricted `ps` must not crash the hook), and a **defaults-agreement guard** (dashboard-data.sh vs mem-budget.sh fallback defaults must match — catches the 600/4000 drift class).
+- `tests/test-gates.sh` — mem-gate (RAM-floor block, count-cap block, non-Agent passthrough, **local-lane reserve #37** — armed lane subtracts `.local.reserveMB`, matched off/armed pair) + reuse-gate (block on live idle teammate, allow on FRESH-SPAWN / no team). Includes negative controls proving the block-paths aren't vacuous.
+- `tests/test-roster.sh` — roster.sh status classification (lead/idle/dead) against a fixture, the **spawn-accounting line-21 crash regression** (restricted `ps` must not crash the hook), and a **defaults-agreement guard** (dashboard-data.sh vs mem-budget.sh fallback defaults must match — catches the 600/4000 drift class; also `.local.reserveMB` across mem-gate/mem-budget/dashboard-data, #37).
 - `tests/test-dashboard.sh` — dashboard-data.sh `--json` output contract (every key dashboard.html reads) + `--inject` render + template standalone sanity.
 - `tests/test-worktree-create.sh` — the #26 WorktreeCreate hook adapter (`worktree-create-hook.sh`): asserts **stdout is exactly the worktree path** (the command-hook contract that was missing), cwd-independence, branch-off-HEAD, opt-in git-ignored-input copy (`.claude/worktree-copy`), name sanitization, and a clean **non-zero exit on failure** (no phantom "succeeded but no path").
 
