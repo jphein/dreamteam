@@ -39,5 +39,14 @@
     "memorySwapMax": "8G",
     "autoAttach": true,
     "_notes": "Caps for BOTH containment paths: launch-dreamteam.sh (whole-session scope) and scope-attach.sh (autoAttach=true: every spawn attaches THIS PROJECT'S live agent procs into dreamteam-<project>.scope via AttachProcessesToUnit \u2014 per-project since #19, so scope==project for fleet attribution and one project's runaway can't throttle another's fleet; before that, one shared dreamteam-agents.scope held everyone, added after the 2026-07-01 16:06 oomd kill). Name precedence: DREAMTEAM_SCOPE_NAME env > scope.name (add here to pin) > dreamteam-<repo basename, sanitized>. Caps apply PER SCOPE \u2014 N projects can nominally reserve N*MemoryHigh; the host RED-tier floor and systemd-oomd remain the global guards. MemoryHigh = throttle; MemoryMax = hard kill inside the agents' cgroup (orchestrators stay outside and survive); MemorySwapMax bounds the team's swap. Size to leave the GUI/host a few GB."
+  },
+  "speech": {
+    "engine": "azure",
+    "fallback": [],
+    "timeoutSec": 180,
+    "voices": {
+      "davis": { "azure": "en-US-DavisNeural", "piper": "en_US-ryan-high" }
+    },
+    "_notes": "Voice attention seam (scripts/speak.sh, issue #9) + OFFLINE FALLBACK (issue #17). engine = primary TTS engine (default azure); fallback = ordered engines tried, in order, ONLY when the one before exits non-zero \u2014 e.g. set [\"piper\"] to keep the house audible when the cloud is down or credential-less. Default [] = single-engine azure = byte-for-byte the pre-#17 behavior (zero change when Azure is healthy). speak.sh sets SPEECH_ENGINE=<engine> per attempt and the engine's voice env (azure\u2192AZURE_SPEECH_VOICE, piper\u2192PIPER_VOICE); speech-to-cli's local-TTS support must honor SPEECH_ENGINE and exit non-zero on synth failure for the hop to fire (missing creds already exits 1; the cloud-unreachable path must too \u2014 see that repo's issue). voices.<alias>.<engine> keeps ONE identity across engines: the davis/sandman alias is Davis on Azure and Davis-adjacent (ryan) on piper; override here. timeoutSec caps each engine's synth+playback in seconds (default 180; was a fixed 10s that truncated long utterances). enabled=false mutes all voice (default on). ttsPath overrides the tts.py location (default ~/Projects/speech-to-cli/tts.py). STT (faster-whisper) reuses the same SPEECH_ENGINE seam when voice-reply lands \u2014 out of scope for #17."
   }
 }
