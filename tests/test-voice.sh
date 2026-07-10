@@ -162,6 +162,41 @@ if wait_file "$RECE" 2; then
     || fail "piper voice override (v2=$v2)"
 else fail "piper voice override: <2 lines (rec: $(tr '\t' '|' < "$RECE"))"; fi
 
+echo "── --timeout flag (#52): explicit > config > 180, positive-int guard ─"
+
+# Sleeper fake: sleeps 2s (baked), THEN records DONE. If `timeout` kills it before
+# 2s, DONE is never written — that absence is the observable that a SHORT cap took
+# effect; its presence proves the synth ran to completion under a LONG cap.
+RECS="$TMP/tts-slow-rec.log"
+cat > "$TMP/tts-slow.py" <<PY
+import time
+time.sleep(2)
+open("$RECS", "a").write("DONE\n")
+PY
+# config cap is deliberately LONG (180) so any truncation must come from the flag.
+cat > "$TMP/cfg-slow.json" <<J
+{"speech":{"ttsPath":"$TMP/tts-slow.py","timeoutSec":180}}
+J
+
+# 10) explicit --timeout wins over config: 1s cap KILLS a 2s synth (config says 180).
+#     If the flag were dropped, config 180 would let it finish → this would fail.
+: > "$RECS"
+env DREAMTEAM_CONFIG="$TMP/cfg-slow.json" bash "$SPEAK" "slow one" --voice davis --timeout 1
+sleep 2.5
+[ ! -s "$RECS" ] \
+  && pass "--timeout 1 overrides config 180 → 2s synth killed before completion (flag wins, value applied)" \
+  || fail "--timeout 1 not honored — synth completed under config (rec: $(cat "$RECS"))"
+
+# 11) invalid --timeout is coerced (falls through to config 180) → 2s synth completes.
+#     If the guard passed 'notanumber' to `timeout`, it would error out → no DONE.
+: > "$RECS"
+env DREAMTEAM_CONFIG="$TMP/cfg-slow.json" bash "$SPEAK" "slow two" --voice davis --timeout notanumber
+if wait_file "$RECS" 1; then
+  pass "--timeout notanumber → positive-int guard falls through to config 180, synth completes"
+else
+  fail "invalid --timeout not coerced — synth was killed/errored (no DONE recorded)"
+fi
+
 echo "── team-events.sh RED / scope attention → voice (shared throttle) ─"
 
 # tier-path stubs (mirror test-lifecycle): free=controllable avail, scope
