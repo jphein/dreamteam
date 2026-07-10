@@ -54,8 +54,14 @@ done
 # team-events: TeammateIdle → valid systemMessage naming the agent + roster
 OUT=$(echo '{"hook_event_name":"TeammateIdle","teammate_name":"luna"}' | run_ev)
 printf '%s' "$OUT" | jq -e '.systemMessage' >/dev/null 2>&1 && ok "TeammateIdle emits valid systemMessage JSON" || bad "TeammateIdle JSON ($OUT)"
-case "$OUT" in *luna*IDLE*) ok "TeammateIdle names the idle agent";; *) bad "TeammateIdle names agent ($OUT)";; esac
+case "$OUT" in *luna*) ok "TeammateIdle names the teammate";; *) bad "TeammateIdle names teammate ($OUT)";; esac
 case "$OUT" in *"team-lead(lead)"*) ok "TeammateIdle carries live roster";; *) bad "TeammateIdle roster ($OUT)";; esac
+# #21 regression — a turn-boundary message must NOT claim idle/reusable (doing so
+# misled the orchestrator into retasking a live, working agent); it must frame the
+# event honestly and route reuse through the authoritative live check.
+case "$OUT" in *"is IDLE"*|*"reusable via SendMessage"*) bad "#21: TeammateIdle still claims idle/reusable ($OUT)";; *) ok "#21: TeammateIdle no longer claims idle/reusable";; esac
+case "$OUT" in *"turn boundary"*) ok "#21: TeammateIdle framed as a turn boundary";; *) bad "#21: turn-boundary framing missing ($OUT)";; esac
+case "$OUT" in *"dreamteam-roster"*) ok "#21: TeammateIdle routes reuse to the live check";; *) bad "#21: verify-first directive missing ($OUT)";; esac
 
 # team-events: SubagentStop → systemMessage; SubagentStart → log-only (silent)
 OUT=$(echo '{"hook_event_name":"SubagentStop","agent_id":"lucid@s1"}' | run_ev)
@@ -67,12 +73,28 @@ OUT=$(echo '{"hook_event_name":"SubagentStart","agent_name":"wisp"}' | run_ev)
 # The three events above already fired; assert their stamps landed with the
 # right states, project-prefixed keys, and @team stripped from agent ids.
 read -r ST _EP < "$TMP/fleet/projx__luna" 2>/dev/null || ST=missing
-[ "$ST" = "idle" ] && ok "TeammateIdle stamps idle (projx__luna)" || bad "idle stamp: $ST"
+[ "$ST" = "working" ] && ok "TeammateIdle stamps working, not idle (#21: turn boundary ≠ idle)" || bad "#21 TeammateIdle stamp should be working, got: $ST"
 read -r ST _EP < "$TMP/fleet/projx__wisp" 2>/dev/null || ST=missing
 [ "$ST" = "working" ] && ok "SubagentStart stamps working" || bad "working stamp: $ST"
 read -r ST EPOCH < "$TMP/fleet/projx__lucid" 2>/dev/null || ST=missing
 [ "$ST" = "stopped" ] && ok "SubagentStop stamps stopped, @team stripped (lucid@s1 → lucid)" || bad "stopped stamp: $ST"
 case "${EPOCH:-x}" in ''|*[!0-9]*) bad "stamp epoch not numeric (${EPOCH:-empty})";; *) ok "stamp carries numeric epoch";; esac
+
+# #21 regression — the liveness stamp must not LATCH a working teammate to "idle".
+# TeammateIdle is a turn boundary; the name-keyed stamp had no "working" writer
+# after the one-shot spawn, so the first idle stuck forever (a live agent read as
+# idle for its whole life). Assert the honest state machine on ONE key:
+#   TaskCreated → working ; a following TeammateIdle STAYS working (no latch) ;
+#   TaskCompleted → idle (the single true "task done, now reusable" signal).
+echo '{"hook_event_name":"TaskCreated","teammate_name":"seq"}'   | run_ev >/dev/null
+read -r ST _EP < "$TMP/fleet/projx__seq" 2>/dev/null || ST=missing
+[ "$ST" = "working" ] && ok "TaskCreated stamps working (#21 name-keyed work signal)" || bad "TaskCreated stamp: $ST"
+echo '{"hook_event_name":"TeammateIdle","teammate_name":"seq"}'  | run_ev >/dev/null
+read -r ST _EP < "$TMP/fleet/projx__seq" 2>/dev/null || ST=missing
+[ "$ST" = "working" ] && ok "TeammateIdle after work STAYS working — no false-idle latch (#21)" || bad "#21 latch regression: TeammateIdle flipped a working teammate to '$ST'"
+echo '{"hook_event_name":"TaskCompleted","teammate_name":"seq"}' | run_ev >/dev/null
+read -r ST _EP < "$TMP/fleet/projx__seq" 2>/dev/null || ST=missing
+[ "$ST" = "idle" ] && ok "TaskCompleted stamps idle — the honest 'task done' signal (#21)" || bad "TaskCompleted stamp: $ST"
 
 # team-events: worktree audit — off-pattern flagged, canonical path not
 echo '{"hook_event_name":"WorktreeCreate","path":"/tmp/rogue"}' | run_ev >/dev/null
