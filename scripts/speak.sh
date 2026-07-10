@@ -104,12 +104,21 @@ for eng in "${CHAIN[@]}"; do
   ARGS+=("$eng" "$(voice_env_name "$eng")" "$(resolve_voice "$eng")")
 done
 
+# Per-engine hard cap (seconds): bounds a hung TTS WITHOUT truncating legitimate
+# speech. Configurable via config.json .speech.timeoutSec (default 180). Was a fixed
+# 10s — safe for RED-tier attention blips, but it chopped longer manual utterances
+# mid-sentence (folded from nebula's fix, issue-adjacent). Coerce non-numeric→default;
+# TIMEOUT is then a validated integer, so interpolating it into CHILD below is safe.
+TIMEOUT="$(jq -r '.speech.timeoutSec // empty' "$CFG" 2>/dev/null || true)"
+case "$TIMEOUT" in ''|*[!0-9]*) TIMEOUT=180 ;; esac
+
 # The child walks the chain, stopping at the first engine that exits 0. Data is
 # passed POSITIONALLY (never interpolated into code) so arbitrary TEXT is injection-safe.
+# ($TIMEOUT is the sole exception — a validated integer, baked in at construction.)
 CHILD='text=$1; py=$2; tts=$3; n=$4; shift 4; i=0
 while [ "$i" -lt "$n" ]; do
   eng=$1; ven=$2; vid=$3; shift 3; i=$((i+1))
-  if env SPEECH_ENGINE="$eng" "$ven=$vid" timeout -k 2 10 "$py" "$tts" "$text" </dev/null >/dev/null 2>&1; then
+  if env SPEECH_ENGINE="$eng" "$ven=$vid" timeout -k 2 '"$TIMEOUT"' "$py" "$tts" "$text" </dev/null >/dev/null 2>&1; then
     exit 0
   fi
 done
