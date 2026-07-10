@@ -5,15 +5,21 @@
 # (JP, 2026-07-01: "coordinators are not always using the right type of agent
 # [and] not naming things how i want"):
 #
-#   1. NAMING — teammates are named `<dreamname>-<task-slug>` (skill § Naming
-#      rules): a dream-roster name + short kebab slug, e.g. lucid-262-cache,
-#      luna-wear-polish. Named spawns that don't match are blocked; unnamed
-#      spawns are blocked only when they're teammates (team_name present) —
-#      anonymous utility spawns (Explore-style) pass through.
+#   1. NAMING — teammates are named `<dreamname>-<role>` (skill § Naming
+#      rules): a dream-roster name + short kebab ROLE suffix, e.g.
+#      morpheus-architect, lucid-debugger, hypnos-agent-manager. The suffix
+#      says what the agent IS (its acting role), not which ticket it holds, so
+#      names stay accurate across reuse/reassignment; roles are an OPEN
+#      vocabulary (the mechanical check is dream-name + non-empty kebab suffix).
+#      Named spawns that don't match are blocked; unnamed spawns are blocked
+#      only when they're teammates (team_name present) — anonymous utility
+#      spawns (Explore-style) pass through.
 #   2. TYPED PERSONAS — when the dreamname has an agent-type definition
-#      (luna/morpheus/lucid/nebula/oracle), the spawn must use it
-#      (subagent_type: dreamteam:<name>) so the persona system prompt — and
-#      for oracle, the enforced read-only toolset — actually applies.
+#      (luna/morpheus/lucid/nebula/oracle + the hypnos/nyx manager roles), the
+#      spawn must use it (subagent_type: dreamteam:<name>) so the persona system
+#      prompt — and for oracle, the enforced read-only toolset — actually
+#      applies. Without the type, a manager like hypnos-agent-manager would
+#      spawn with NO persona yet still pass the name check (Revision 2 R1's hole).
 #
 # Escape hatch: include `STANDARDS-EXEMPT: <reason>` in the prompt.
 # Disable: config spawn.enforceStandards=false (explicit ==false check — jq's
@@ -37,18 +43,22 @@ PROMPT="$(printf '%s' "$INPUT" | jq -r '.tool_input.prompt // ""' 2>/dev/null ||
 
 case "$PROMPT" in *STANDARDS-EXEMPT:*) exit 0 ;; esac
 
-# The dream roster (skill § The Dream Name Roster + overflow names + overnight roles).
-ROSTER='luna|vesper|reverie|morpheus|somnia|nebula|aurora|selene|lucid|drift|wisp|echo|cirrus|haze|twilight|solace|onyx|zephyr|muse|starling|slumber|dusk|mirage|phantasm|phoenix|cassia|solara|yara|lyra|nyx|ember|sage|fern|reeve|hermes|argus|iona|oracle'
+# The dream roster (skill § The Dream Name Roster + overflow names + overnight
+# roles + the hypnos/nyx per-team manager roles).
+ROSTER='luna|vesper|reverie|morpheus|somnia|nebula|aurora|selene|lucid|drift|wisp|echo|cirrus|haze|twilight|solace|onyx|zephyr|muse|starling|slumber|dusk|mirage|phantasm|phoenix|cassia|solara|yara|lyra|nyx|hypnos|ember|sage|fern|reeve|hermes|argus|iona|oracle'
 # Dreamnames that have agent-type definitions in agents/ (typed personas).
-TYPED='luna|morpheus|lucid|nebula|oracle'
+# hypnos/nyx are the manager roles: without their type the spawn loads NO persona
+# system prompt yet still clears the name check — the R1 hole this list closes.
+TYPED='luna|morpheus|lucid|nebula|oracle|hypnos|nyx'
 
 teach() {
   {
     echo "🎭 DREAMTEAM SPAWN STANDARDS — spawn blocked: $1"
-    echo "   Naming: <dreamname>-<task-slug> (kebab), e.g. lucid-262-cache, luna-wear-polish."
+    echo "   Naming: <dreamname>-<role> (kebab), e.g. morpheus-architect, lucid-debugger, hypnos-agent-manager."
     echo "   Typed personas (use subagent_type: dreamteam:<name>):"
     echo "     luna=UI/design · morpheus=architecture/refactors · lucid=debugging/forensics"
     echo "     nebula=research/docs/audits · oracle=READ-ONLY verification (enforced)"
+    echo "     hypnos=agent/comms manager · nyx=resource/memory manager (per-team ops roles)"
     echo "   Other dream names (vesper/aurora/wisp/…) spawn as general-purpose with the"
     echo "   persona in the prompt — see the dreamteam skill roster."
     echo "   Deliberate exception? Add a line 'STANDARDS-EXEMPT: <reason>' to the prompt."
