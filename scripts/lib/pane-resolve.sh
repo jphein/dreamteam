@@ -91,8 +91,13 @@ pr_pane_of() {
 #   have other text so neither anchor holds) AND a bare "@name" (no dash), and it
 #   word-boundaries the name (@name2 ≠ @name). Keep byte-for-byte in sync with
 #   agent-activity.sh's _footer_re.
+#   WHITESPACE CLASS: [:blank:] == space + tab ONLY — IDENTICAL to Python's [ \t].
+#   NOT [:space:] (which also spans \n\r\f\v): those would diverge from the Python
+#   mirror on CR/FF/VT (Oracle #70 review — a blind spot in the anti-drift lock itself),
+#   and a real footer never contains them. The CR fixture in test-pane-resolve.sh guards
+#   this class so the two sides can't drift on it again.
 PR_FOOTER_ERE() {
-  printf '^[─[:space:]]*─[─[:space:]]*@%s[─[:space:]]*$|^[─[:space:]]*@%s[─[:space:]]*─[─[:space:]]*$' "$1" "$1"
+  printf '^[─[:blank:]]*─[─[:blank:]]*@%s[─[:blank:]]*$|^[─[:blank:]]*@%s[─[:blank:]]*─[─[:blank:]]*$' "$1" "$1"
 }
 
 # pr_footer_matches <sock> <addr> <agent> — 0 iff the pane's footer structurally names @agent.
