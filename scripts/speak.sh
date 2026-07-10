@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # dreamteam — speak.sh: fire-and-forget VOICE seam for attention events.
-# Contract:  speak.sh "<text>" [--voice <voice-or-alias>]
+# Contract:  speak.sh "<text>" [--voice <voice-or-alias>] [--timeout <sec>]
 #
 # Audio channel for RED-tier / scope-pressure attention (team-events.sh). DETACHED
 # + hard-timeout so a HOOK NEVER BLOCKS; SILENT NO-OP (exit 0) when python3/tts.py/
@@ -38,12 +38,14 @@ CFG="${DREAMTEAM_CONFIG:-$ROOT/config.json}"
 
 TEXT="${1:-}"; [ -z "$TEXT" ] && exit 0        # nothing to say → no-op
 shift 2>/dev/null || true
-VOICE=""
+VOICE=""; TIMEOUT_FLAG=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --voice)   VOICE="${2:-}"; shift 2 2>/dev/null || shift ;;
-    --voice=*) VOICE="${1#--voice=}"; shift ;;
-    *)         shift ;;
+    --voice)     VOICE="${2:-}"; shift 2 2>/dev/null || shift ;;
+    --voice=*)   VOICE="${1#--voice=}"; shift ;;
+    --timeout)   TIMEOUT_FLAG="${2:-}"; shift 2 2>/dev/null || shift ;;
+    --timeout=*) TIMEOUT_FLAG="${1#--timeout=}"; shift ;;
+    *)           shift ;;
   esac
 done
 
@@ -105,12 +107,18 @@ for eng in "${CHAIN[@]}"; do
 done
 
 # Per-engine hard cap (seconds): bounds a hung TTS WITHOUT truncating legitimate
-# speech. Configurable via config.json .speech.timeoutSec (default 180). Was a fixed
-# 10s — safe for RED-tier attention blips, but it chopped longer manual utterances
-# mid-sentence (folded from nebula's fix, issue-adjacent). Coerce non-numeric→default;
-# TIMEOUT is then a validated integer, so interpolating it into CHILD below is safe.
-TIMEOUT="$(jq -r '.speech.timeoutSec // empty' "$CFG" 2>/dev/null || true)"
-case "$TIMEOUT" in ''|*[!0-9]*) TIMEOUT=180 ;; esac
+# speech. PRECEDENCE (#52): explicit --timeout flag > config .speech.timeoutSec >
+# default 180. The attention path (team-events.sh) passes a SHORT --timeout so a
+# hung synth can't pin a proc for 180s during a memory-pressure event; manual /
+# briefing callers omit it and inherit the long config cap so long utterances are
+# not chopped (nebula's 10s→180s fold). Each tier is guarded: empty / non-digit /
+# non-positive falls through to the next, so TIMEOUT ends a validated POSITIVE
+# integer — safe to interpolate into the CHILD string below.
+TIMEOUT="$TIMEOUT_FLAG"                                  # 1) explicit flag wins
+case "$TIMEOUT" in ''|*[!0-9]*) TIMEOUT="" ;; esac       #    invalid flag → fall through
+[ -z "$TIMEOUT" ] && TIMEOUT="$(jq -r '.speech.timeoutSec // empty' "$CFG" 2>/dev/null || true)"  # 2) config
+case "$TIMEOUT" in ''|*[!0-9]*) TIMEOUT=180 ;; esac      # 3) default
+[ "$TIMEOUT" -gt 0 ] 2>/dev/null || TIMEOUT=180          #    positive-int guard (reject 0)
 
 # The child walks the chain, stopping at the first engine that exits 0. Data is
 # passed POSITIONALLY (never interpolated into code) so arbitrary TEXT is injection-safe.
