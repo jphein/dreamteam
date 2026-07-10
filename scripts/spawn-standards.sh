@@ -44,8 +44,9 @@ PROMPT="$(printf '%s' "$INPUT" | jq -r '.tool_input.prompt // ""' 2>/dev/null ||
 case "$PROMPT" in *STANDARDS-EXEMPT:*) exit 0 ;; esac
 
 # The dream roster (skill § The Dream Name Roster + overflow names + overnight
-# roles + the hypnos/nyx per-team manager roles).
-ROSTER='luna|vesper|reverie|morpheus|somnia|nebula|aurora|selene|lucid|drift|wisp|echo|cirrus|haze|twilight|solace|onyx|zephyr|muse|starling|slumber|dusk|mirage|phantasm|phoenix|cassia|solara|yara|lyra|nyx|hypnos|ember|sage|fern|reeve|hermes|argus|iona|oracle'
+# roles + the hypnos/nyx per-team manager roles). argus/iona were retired per
+# spec S6 (#45 dropped their SKILL/crash-audit refs; #46 drops them here too).
+ROSTER='luna|vesper|reverie|morpheus|somnia|nebula|aurora|selene|lucid|drift|wisp|echo|cirrus|haze|twilight|solace|onyx|zephyr|muse|starling|slumber|dusk|mirage|phantasm|phoenix|cassia|solara|yara|lyra|nyx|hypnos|ember|sage|fern|reeve|hermes|oracle'
 # Dreamnames that have agent-type definitions in agents/ (typed personas).
 # hypnos/nyx are the manager roles: without their type the spawn loads NO persona
 # system prompt yet still clears the name check — the R1 hole this list closes.
