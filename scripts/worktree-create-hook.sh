@@ -11,9 +11,17 @@
 # contract (docs code.claude.com/docs/en/hooks: "Command hook prints path on
 # stdout"; HTTP hooks use hookSpecificOutput.worktreePath — not our case).
 #
-# team-events.sh stays wired as an ADDITIONAL async logger: for WorktreeCreate it
-# takes the log-only branch and writes NOTHING to stdout, so the two never compete
-# for the path the runtime reads (Hypnos Plan B — no touch to team-events.sh).
+# #66 — THIS IS NOW THE SOLE WorktreeCreate HOOK. #26 also wired team-events.sh into
+# the SAME WorktreeCreate matcher as an async logger, on the assumption that "it writes
+# nothing to stdout so the two never compete for the path." That assumption was wrong:
+# the runtime consumes exactly ONE WorktreeCreate hook, and with two present it ran/read
+# the async logger (which returns no path) instead of this path-producer — so every
+# Agent-tool `isolation:worktree` spawn (fork AND normal) failed "hook succeeded but
+# returned no worktree path", and no worktree was ever created (verified: zero dream/*
+# branches; the sync hook standalone always worked). Fix: team-events.sh is removed from
+# the WorktreeCreate matcher in hooks.json — this hook is the only one. To keep the
+# WorktreeCreate signal in state/events.log (fleet/crash forensics rely on it), this hook
+# now appends that event line itself, best-effort, below.
 #
 # Contract:
 #   stdin  : WorktreeCreate payload JSON. Uses .name (the requested worktree name;
@@ -51,6 +59,16 @@ REPODIR="$(jf '.cwd')"
 [ -n "$REPODIR" ] || REPODIR="$PWD"
 
 BRANCH="dream/$SAFE"
+
+# Preserve the WorktreeCreate signal in the event log (team-events.sh no longer shares
+# this matcher — see the #66 note above). Best-effort: must never fail the hook or touch
+# stdout (stdout is reserved for the path). Matches team-events' JSONL shape closely
+# enough for the fleet/crash forensics that read it.
+EVLOG="${DREAMTEAM_EVENTS_LOG:-$ROOT/state/events.log}"
+{ mkdir -p "$(dirname "$EVLOG")" 2>/dev/null \
+  && printf '{"ts":"%s","event":"WorktreeCreate","who":"%s","path":"%s","via":"worktree-create-hook"}\n' \
+       "$(date +%Y-%m-%dT%H:%M:%S 2>/dev/null || echo '?')" "$SAFE" "$REPODIR" >> "$EVLOG"
+} 2>/dev/null || true
 
 # Provision off HEAD, naming the dir exactly <SAFE> via the WORKTREE_NAME seam.
 # worktree-provision prints the absolute path on stdout (git chatter → stderr) and
