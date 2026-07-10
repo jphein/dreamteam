@@ -169,6 +169,29 @@ else
   fail "idle no-team emits valid JSON (got: ${IE:0:200})"
 fi
 
+# ══ team selection — default resolves newest; explicit --team is exact, no fallback ══
+echo "== team selection: default = most-recent team; explicit --team is exact (no silent fallback) =="
+# Lead-only fixtures (lead is classified by type — no liveness stub needed).
+SEL="$TMP/teams-sel"; mkdir -p "$SEL/alpha" "$SEL/beta"
+LEADCFG='{ "members": [ { "name": "sel-lead", "agentType": "team-lead", "agentId": "SELLEAD", "isActive": true, "cwd": "/tmp/sel" } ] }'
+printf '%s' "$LEADCFG" > "$SEL/alpha/config.json"
+printf '%s' "$LEADCFG" > "$SEL/beta/config.json"
+touch -t 202601010000 "$SEL/alpha/config.json"   # older
+touch -t 202601020000 "$SEL/beta/config.json"    # newer
+# bare call (no --team) → most-recently-modified team; roster's `team` field echoes it
+RBARE="$(DREAMTEAM_TEAMS_DIR="$SEL" bash "$ROSTER" --json 2>/dev/null)"
+assert_eq "roster bare-call resolves newest team (beta)"        "beta"  "$(jqr "$RBARE" '.team')"
+# explicit --team overrides the default resolution
+RALPHA="$(DREAMTEAM_TEAMS_DIR="$SEL" bash "$ROSTER" --team alpha --json 2>/dev/null)"
+assert_eq "roster --team alpha overrides default (team==alpha)" "alpha" "$(jqr "$RALPHA" '.team')"
+# explicit --team with NO matching config → empty payload, NOT a silent fallback to newest
+RGHOST="$(DREAMTEAM_TEAMS_DIR="$SEL" bash "$ROSTER" --team ghostteam --json 2>/dev/null)"
+assert_eq "roster --team <missing> → team==null (no fallback)"  "true"  "$(jqr "$RGHOST" '.team==null')"
+assert_eq "roster --team <missing> → agents==[]"                "0"     "$(jqr "$RGHOST" '.agents|length')"
+# idle-agents honours the same no-fallback rule for an unknown --team
+IGHOST="$(DREAMTEAM_TEAMS_DIR="$SEL" bash "$IDLE" --team ghostteam --json 2>/dev/null)"
+assert_eq "idle --team <missing> → [] (no fallback)"            "0"     "$(jqr "$IGHOST" '.|length')"
+
 # ══ docs/json-contract.md — versioned + names every frozen key ═══════════════
 echo "== docs/json-contract.md: exists, semver-versioned, names every frozen key =="
 if [ -f "$DOC" ]; then

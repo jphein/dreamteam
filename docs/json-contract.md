@@ -55,6 +55,35 @@ Both scripts **always exit `0`** — including when there is no team at all:
 
 ---
 
+## Team selection & wrong-team detection
+
+Both scripts accept `--team <name>` and read team configs from
+`$DREAMTEAM_TEAMS_DIR` (default `~/.claude/teams`):
+
+| Invocation      | Resolves to                                                                                                          |
+|-----------------|----------------------------------------------------------------------------------------------------------------------|
+| `--team <name>` | **Exactly** that team. No such config → **empty payload, never a fallback** (roster `{ "team": null, …, "agents": [] }`; idle `[]`). |
+| *(no `--team`)* | The **most-recently-modified** team config under `$DREAMTEAM_TEAMS_DIR`. Convenience for interactive use only.        |
+
+> **⚠️ Programmatic consumers must pass `--team <name>`.** The bare call resolves
+> to whichever team's config was touched last — which may **silently be a
+> different team** than you meant (e.g. another project spun up a team after
+> yours). Explicit `--team` is safe: a wrong or missing name returns an *empty*
+> payload, never another team's data.
+
+**Detecting a wrong-team answer**
+
+- **`roster.sh`** echoes the resolved team in its top-level **`team`** field. A
+  consumer that requested `--team X` should assert `payload.team == "X"`, and
+  treat `payload.team == null` as "no such team". This is the intended guard.
+- **`idle-agents.sh`** is a **bare array with no team identifier** — it cannot
+  self-report which team answered. Pass `--team`, and if you need positive
+  confirmation of the current team, cross-check `roster.sh`'s `team` field. An
+  empty `[]` is ambiguous: either "no such team" **or** "team present, no
+  reusable idle agent".
+
+---
+
 ## `roster.sh --json`
 
 The complete, authoritative roster of a harness team with live status.
@@ -67,7 +96,7 @@ roster.sh [--team NAME] [--json]     # default: newest team, human text
 
 | Field    | Type              | Notes                                                                                 |
 |----------|-------------------|---------------------------------------------------------------------------------------|
-| `team`   | `string \| null`  | Team name (basename of the config dir). `null` when no team config was found.         |
+| `team`   | `string \| null`  | Team name (basename of the resolved config dir); **echoes which team answered** — see *Team selection & wrong-team detection*. `null` when no team resolved. |
 | `counts` | `object`          | Always present; always carries **all four** integer keys below. `Σ == agents.length`. |
 | `agents` | `array`           | Possibly empty. One object per team member (see below).                               |
 
@@ -133,7 +162,9 @@ idle-agents.sh [--team NAME] [--task "text"] [--json]
 
 **Top-level: a JSON `array`** (not an object), possibly empty `[]`. It contains
 **only idle + alive** members — team-lead, `active`, and `dead` members are
-excluded — **sorted by descending `score`**.
+excluded — **sorted by descending `score`**. The array carries **no team
+identifier** — see *Team selection & wrong-team detection* before consuming it
+programmatically.
 
 **Element**
 
