@@ -19,7 +19,10 @@
 #   • issue #NNN scan of Notes when there is no Issue/PR column
 #   • overlay auto-discovery via <projects>/*/scratch/<team>/roster.md
 #   • --no-overlay (pane-truth only) · missing overlay (graceful)
-#   • bare (no --team): warns on stderr + resolves team from the engine rows
+#   • bare (no --team): resolves THIS session's own team first (the smol-team FIX,
+#     DREAMTEAM_SESSION_ID seam) — both the session-<first8> convention path and the
+#     content-grep fallback; only when unresolvable does the mode-split fire (--json
+#     fail-closed exit 22 / human warn+proceed against the newest team)
 #   • --json contract (team, overlay, counts, agents[*] keys)
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -143,25 +146,57 @@ J="$(run --team faketeam --roster-md "$TMP/does-not-exist.md" --json)"
 [ "$(top '.overlay')" = "null" ] && ok "missing overlay ⇒ overlay null (graceful)" || bad "missing overlay=$(top '.overlay')"
 [ "$(top '.agents | length')" = "6" ] && ok "missing overlay ⇒ agents still listed" || bad "missing overlay agents=$(top '.agents|length')"
 
-# ── bare (no --team): MODE-DEPENDENT — --json fails closed, human warns+proceeds ──
-# --json + no --team → ERROR + non-zero exit (22): a machine consumer never sees a
-# stderr warning, so fail-closed rather than feed it wrong-team data (the R4 footgun).
-run --json >/dev/null 2>&1; rc=$?
-[ "$rc" -ne 0 ]  && ok "bare --json: non-zero exit (fail-closed, R4)" || bad "bare --json: expected non-zero exit, got $rc"
-[ "$rc" = "22" ] && ok "bare --json: exit code 22 (client error)"     || bad "bare --json: expected exit 22, got $rc"
-ERR="$(run --json 2>&1 >/dev/null)"
-echo "$ERR" | grep -qi "REQUIRED" && ok "bare --json: stderr states --team is REQUIRED" || bad "bare --json: no REQUIRED error ($ERR)"
-OUT="$(run --json 2>/dev/null)"
-[ -z "$OUT" ] && ok "bare --json: stdout empty (no wrong-team data reaches a JSON consumer)" || bad "bare --json: stdout not empty ($OUT)"
+# ── bare (no --team): SESSION-TEAM FIRST, then MODE-DEPENDENT fallback ─────────────
+# The smol-team FIX: a bare call first tries to resolve THIS session's OWN team from
+# CLAUDE_CODE_SESSION_ID (deterministic — not the newest-mtime guess). Only when that is
+# unresolvable does the mode-split fire: --json fails closed, human warns+proceeds.
+#
+# runU = the genuinely-unresolvable case: session id forced EMPTY (so dreamteam_current_team
+# returns nothing), reproducing the old fail-closed / warn behavior hermetically — without
+# it, the ambient CLAUDE_CODE_SESSION_ID of the test-running session leaks in and resolves.
+runU() { DREAMTEAM_SESSION_ID="" CLAUDE_CODE_SESSION_ID="" \
+         DREAMTEAM_AGENT_ACTIVITY="$TMP/engine.sh" DREAMTEAM_PROJECTS_DIR="$TMP/projects" \
+         CLAUDE_PLUGIN_ROOT="$ROOT" bash "$SUT" "$@"; }
 
-# human mode + no --team → WARN then PROCEED (exit 0): the operator sees the warning, so
-# the interactive convenience is kept. It resolves the newest team from the engine rows.
-run >/dev/null 2>&1; rc=$?
-[ "$rc" = "0" ] && ok "bare human: warns then PROCEEDS (exit 0, not fail-closed)" || bad "bare human: expected exit 0, got $rc"
-ERR="$(run 2>&1 >/dev/null)"
-echo "$ERR" | grep -qi "smol-team" && ok "bare human: stderr warns about the smol-team bug" || bad "bare human: no warning ($ERR)"
-H="$(run 2>/dev/null)"
-echo "$H" | grep -q "realtime roster — team 'faketeam'" && ok "bare human: proceeds against newest team (resolved faketeam)" || bad "bare human: no output ($H)"
+# --json + unresolvable → ERROR + exit 22: a machine consumer never sees a stderr warning,
+# so fail-closed rather than feed it wrong-team data (the R4 footgun).
+runU --json >/dev/null 2>&1; rc=$?
+[ "$rc" -ne 0 ]  && ok "unresolvable --json: non-zero exit (fail-closed, R4)" || bad "unresolvable --json: expected non-zero exit, got $rc"
+[ "$rc" = "22" ] && ok "unresolvable --json: exit code 22 (client error)"     || bad "unresolvable --json: expected exit 22, got $rc"
+ERR="$(runU --json 2>&1 >/dev/null)"
+echo "$ERR" | grep -qi "REQUIRED" && ok "unresolvable --json: stderr states --team is REQUIRED" || bad "unresolvable --json: no REQUIRED error ($ERR)"
+OUT="$(runU --json 2>/dev/null)"
+[ -z "$OUT" ] && ok "unresolvable --json: stdout empty (no wrong-team data reaches a JSON consumer)" || bad "unresolvable --json: stdout not empty ($OUT)"
+
+# human + unresolvable → WARN then PROCEED (exit 0): operator sees the warning, so the
+# interactive convenience is kept. It resolves the newest team from the engine rows.
+runU >/dev/null 2>&1; rc=$?
+[ "$rc" = "0" ] && ok "unresolvable human: warns then PROCEEDS (exit 0, not fail-closed)" || bad "unresolvable human: expected exit 0, got $rc"
+ERR="$(runU 2>&1 >/dev/null)"
+echo "$ERR" | grep -qi "smol-team" && ok "unresolvable human: stderr warns about the smol-team bug" || bad "unresolvable human: no warning ($ERR)"
+H="$(runU 2>/dev/null)"
+echo "$H" | grep -q "realtime roster — team 'faketeam'" && ok "unresolvable human: proceeds against newest team (resolved faketeam)" || bad "unresolvable human: no output ($H)"
+
+# ── session-team resolution (the smol-team FIX itself) ─────────────────────────────
+# A bare call with a resolvable session id prefers THIS session's own team over the
+# newest-mtime guess: --json now SUCCEEDS (not exit 22) and human resolves SILENTLY.
+mkdir -p "$TMP/teams/session-deadbeef" "$TMP/teams/session-oddname"
+echo '{"session_id":"deadbeef-1111-2222-3333-444455556666"}' > "$TMP/teams/session-deadbeef/config.json"
+echo '{"session_id":"ffff9999-aaaa-bbbb-cccc-dddddddddddd"}' > "$TMP/teams/session-oddname/config.json"
+# convention path: team dir is session-<first 8 of id>
+runS() { DREAMTEAM_SESSION_ID="deadbeef-1111-2222-3333-444455556666" DREAMTEAM_TEAMS_DIR="$TMP/teams" \
+         DREAMTEAM_AGENT_ACTIVITY="$TMP/engine.sh" DREAMTEAM_PROJECTS_DIR="$TMP/projects" \
+         CLAUDE_PLUGIN_ROOT="$ROOT" bash "$SUT" "$@"; }
+runS --json >/dev/null 2>&1; rc=$?
+[ "$rc" = "0" ] && ok "session-team --json: SUCCEEDS (resolved own team, NOT fail-closed)" || bad "session-team --json: expected exit 0, got $rc"
+[ "$(runS --json 2>/dev/null | jq -r .team)" = "session-deadbeef" ] && ok "session-team --json: .team = this session's own team" || bad "session-team --json team=$(runS --json 2>/dev/null | jq -r .team)"
+ERR="$(runS 2>&1 >/dev/null)"
+echo "$ERR" | grep -qi "smol-team" && bad "session-team human: should NOT warn (team resolved cleanly)" || ok "session-team human: resolves SILENTLY (no smol-team warning)"
+runS 2>/dev/null | grep -q "team 'session-deadbeef'" && ok "session-team human: header names THIS session's team" || bad "session-team human: header wrong"
+# content-grep fallback: id whose first-8 does NOT match a dir name, but a config carries it
+runO() { DREAMTEAM_SESSION_ID="ffff9999-aaaa-bbbb-cccc-dddddddddddd" DREAMTEAM_TEAMS_DIR="$TMP/teams" \
+         DREAMTEAM_AGENT_ACTIVITY="$TMP/engine.sh" CLAUDE_PLUGIN_ROOT="$ROOT" bash "$SUT" "$@"; }
+[ "$(runO --json 2>/dev/null | jq -r .team)" = "session-oddname" ] && ok "session-team: content-grep fallback (dir name != session-<first8>)" || bad "content-grep fallback team=$(runO --json 2>/dev/null | jq -r .team)"
 
 # a real --team still works (control: neither guard is vacuously blocking everything)
 J="$(run --team faketeam --roster-md "$TMP/roster-fmt2.md" --json 2>/dev/null)"

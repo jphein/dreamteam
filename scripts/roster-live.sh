@@ -22,18 +22,23 @@
 #   assignment overlay and the presentation. No pane-resolution logic is duplicated
 #   here — it reads the engine's JSON.
 #
-# --team requirement is MODE-DEPENDENT. Bare selection falls back to the most-recently-
-#   modified team config — the "smol-team bug": in a multi-team session the newest config
-#   is usually the WRONG team. The split:
-#     • --json + no --team → ERROR on stderr + EXIT 22. A machine consumer (Nyx kills,
+# --team requirement is MODE-DEPENDENT. A bare call FIRST resolves THIS session's own
+#   team from CLAUDE_CODE_SESSION_ID (dreamteam_current_team, lib.sh) — deterministic, so
+#   it's the correct answer, not a guess. Only when that is unresolvable (no session env /
+#   no matching config) does the fallback fire — and the fallback is the "smol-team bug":
+#   the most-recently-modified team config, usually the WRONG team on a multi-team host.
+#   The split at that point:
+#     • --json + unresolvable → ERROR on stderr + EXIT 22. A machine consumer (Nyx kills,
 #       dashboards, gm peek) never sees a stderr warning, so fail-closed rather than
-#       silently feed wrong-team data (the R4 footgun; personas #43 mandate --team).
-#     • human mode + no --team → warn loudly on stderr, then PROCEED against the newest
+#       silently feed wrong-team data (the R4 footgun; personas #43 mandate --team). NOTE:
+#       an in-session --json call now SUCCEEDS via the session-team resolve — the 22 is
+#       reserved for the genuinely-unidentifiable case.
+#     • human + unresolvable → warn loudly on stderr, then PROCEED against the newest
 #       team. The operator SEES the warning, so keep the interactive convenience.
 #
 # Usage: roster-live.sh [--team NAME] [--json] [--roster-md PATH] [--no-overlay]
-#   --team NAME      team config to resolve against (REQUIRED with --json; human mode
-#                    warns then proceeds against the newest team).
+#   --team NAME      team config to resolve against (defaults to THIS session's own team;
+#                    REQUIRED with --json only when the session team can't be resolved).
 #   --json           machine output (contract for manager roles / dashboards).
 #   --roster-md PATH explicit assignment-overlay file (else auto-discovered by team).
 #   --no-overlay     skip the roster.md overlay entirely (pane-truth only).
@@ -58,15 +63,26 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -z "$TEAM" ]; then
+  # First, prefer THIS session's OWN team — deterministic via CLAUDE_CODE_SESSION_ID, so
+  # it's the correct answer, not the newest-mtime guess. Resolved ⇒ use it SILENTLY (no
+  # warning: there's nothing wrong to warn about). The mode-split below only fires when
+  # the session team is genuinely unidentifiable (no session env / no matching config).
+  # shellcheck source=/dev/null
+  . "$ROOT/scripts/lib.sh" 2>/dev/null || true
+  if declare -F dreamteam_current_team >/dev/null 2>&1; then
+    TEAM="$(dreamteam_current_team 2>/dev/null || true)"
+  fi
+fi
+if [ -z "$TEAM" ]; then
   if [ "$FMT" = "json" ]; then
     # machine consumers never see a stderr warning → fail-closed (the R4 footgun)
-    echo "roster-live: --team <session> is REQUIRED with --json — bare selection resolves the" >&2
-    echo "             newest-mtime team = the smol-team bug. Refusing to feed a consumer wrong-team data." >&2
+    echo "roster-live: --team <session> is REQUIRED with --json — this session's team could not be" >&2
+    echo "             resolved and bare selection = newest-mtime = the smol-team bug. Refusing to feed wrong-team data." >&2
     exit 22                                        # client error: do NOT proceed
   fi
   # human/interactive: the operator SEES this, so warn loudly but proceed for convenience
-  echo "roster-live: ⚠ no --team given — using the newest team config, which is often the" >&2
-  echo "             WRONG team in a multi-team session (the smol-team bug). Pass --team NAME." >&2
+  echo "roster-live: ⚠ no --team and this session's team is unresolvable — using the newest team" >&2
+  echo "             config, often the WRONG team in a multi-team session (the smol-team bug). Pass --team NAME." >&2
 fi
 
 ACT_JSON="$(bash "$ENGINE" ${TEAM:+--team "$TEAM"} --json 2>/dev/null || true)"

@@ -44,6 +44,30 @@ dreamteam_tier_status_file() {
   printf '%s/tier-status-%s' "${1:-.}" "${proj:-unknown}"
 }
 
+# dreamteam_current_team — THIS session's own team name (the "smol-team" fix).
+# Bare roster/status calls used to default to the newest-mtime team config across the
+# WHOLE host — in a multi-session host that is usually a NEIGHBOR's fleet (observed
+# 2026-07-10: a battery-project team 'session-aa3e82fc' outranked this session's own
+# team by mtime, so a bare roster showed the wrong fleet). The current session id IS in
+# the environment (CLAUDE_CODE_SESSION_ID), so the OWNING team is discoverable
+# deterministically — no guessing required. Resolution, most-authoritative first:
+#   1) session-<first8 of id>  — the harness's own team-dir naming (cheap dir probe)
+#   2) grep team configs for the FULL id — robust if the naming convention ever changes
+# Echoes the team name, or NOTHING if the id is absent / no team matches — the caller
+# then keeps its own last-resort fallback (fail-closed for --json, warn+newest for
+# human). Seams: DREAMTEAM_SESSION_ID (id), DREAMTEAM_TEAMS_DIR (teams root).
+dreamteam_current_team() {
+  local id teams_dir short hit
+  id="${DREAMTEAM_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}"
+  [ -n "$id" ] || return 0
+  teams_dir="${DREAMTEAM_TEAMS_DIR:-$HOME/.claude/teams}"
+  short="session-${id:0:8}"                         # convention: session-<first 8 chars>
+  if [ -f "$teams_dir/$short/config.json" ]; then printf '%s' "$short"; return 0; fi
+  hit="$(grep -rl -- "$id" "$teams_dir"/*/config.json 2>/dev/null | head -1)" || hit=""
+  [ -n "$hit" ] && printf '%s' "$(basename "$(dirname "$hit")")"
+  return 0
+}
+
 # count_agents — number of live Claude agents/sessions, system-wide.
 # Combines two signals and takes the MAX, each cleaned of a distinct false-count:
 #   • pgrep  — live `claude/versions` processes, EXCLUDING `claude agents` helper

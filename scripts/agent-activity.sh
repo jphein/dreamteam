@@ -37,9 +37,11 @@
 #   can't drive the verdict.
 #
 # Usage: agent-activity.sh [--team NAME] [--json]
-#   (no args = most-recently-updated team, human-readable)
-# Seams (tests): DREAMTEAM_TEAMS_DIR, DREAMTEAM_TMUX_DIR, DREAMTEAM_PROC; ps/tmux
-#   resolve via PATH (stubbable). No production state is read or written.
+#   (no args = THIS session's own team via CLAUDE_CODE_SESSION_ID (dreamteam_current_team,
+#    lib.sh); only if that's unresolvable does it fall back to the most-recently-updated
+#    team config on the host — the smol-team bug, usually a neighbor's fleet)
+# Seams (tests): DREAMTEAM_TEAMS_DIR, DREAMTEAM_TMUX_DIR, DREAMTEAM_PROC, DREAMTEAM_SESSION_ID;
+#   ps/tmux resolve via PATH (stubbable). No production state is read or written.
 set -uo pipefail
 TEAMS_DIR="${DREAMTEAM_TEAMS_DIR:-$HOME/.claude/teams}"
 TMUXDIR="${DREAMTEAM_TMUX_DIR:-/tmp/tmux-$(id -u)}"
@@ -53,6 +55,17 @@ while [ $# -gt 0 ]; do
     *) shift;;
   esac
 done
+
+# Bare call → default to THIS session's OWN team, not the newest-mtime team on the host
+# (the smol-team bug: newest is usually a neighbor's fleet). Only if the session team is
+# unresolvable does the python below fall back to the newest-mtime pick.
+if [ -z "$TEAM" ]; then
+  # shellcheck source=/dev/null
+  . "$(dirname "${BASH_SOURCE[0]}")/lib.sh" 2>/dev/null || true
+  if declare -F dreamteam_current_team >/dev/null 2>&1; then
+    TEAM="$(dreamteam_current_team 2>/dev/null || true)"
+  fi
+fi
 
 python3 - "$TEAMS_DIR" "$TEAM" "$FMT" "$TMUXDIR" "$PROC" <<'PY'
 import json, os, sys, glob, re, subprocess
