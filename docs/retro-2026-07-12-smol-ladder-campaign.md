@@ -118,6 +118,51 @@ is a clean way to implement missing-ACK escalation without busy-polling.
   empty diff — empty = "scanned nothing," not "clean."
 - **SendMessage `summary` hard-caps at 200 chars** — keep it ≤~150, put detail in the body.
 
+### 13. Morning canary — verification-phase patterns
+
+The overnight campaign *merged* features; the morning consolidated canary *validated* them
+on hardware (JP re-plugged boards, the orchestrator drove all flashing/OTA/MQTT, the manager
+kept watchers engaged and routed each observation → verifier → orchestrator). The validation
+phase has its own reusable patterns, distinct from the merge patterns above:
+
+- **Pre-register a falsification rubric per claim, before observations arrive.** A verifier
+  structurally blind to the hardware (read-only, no MQTT/flash) turned the canary from
+  "watch and hope" into "match against these" by writing a per-PR *contradiction-signature*
+  (the exact RED conditions) up front. When it later ruled a degraded observation GREEN, it
+  *named the falsifier* (an all-boards-current re-check) rather than hand-waving — so
+  "expected-degraded" couldn't decay into a lazy dismissal of a real bug.
+- **Score a falsifier by the DIRECT quantity, not a derived summary.** An online-flap alarm:
+  a flap-*count* script read "persists → widen the timeout," but the real test was
+  publish-cadence-vs-timeout. The direct cadence (max 35 s « the 90 s threshold = 2.6×
+  margin, confirmed across two independent windows) was dispositive *and*
+  threshold-independent; the "flaps" were one correlated gateway-restart blip miscounted as
+  many. Derived metrics over-count correlated events and false-RED on legit transients —
+  trust the ground-truth measurement, distrust the lossy rollup.
+- **Build the observability surface early; it becomes the canary's own instrument.** Reboot
+  counters, OTA slot/confirmed flags, and on-wire channel fields (shipped as a diagnostics
+  record earlier in the campaign) let each feature *prove itself*: "boot 2→3 = exactly one
+  reset," "slot=1 / ota=confirmed = a real OTA," "channel field=1 = the mesh config on the
+  wire." The instrument you ship is the instrument you verify with.
+- **Ground-truth beats retained MQTT, live.** Boards read a stale build number on the broker
+  (a retained ghost from a prior gateway's ungated cache) while actually running the new
+  image (confirmed at the serial slot). A flip to a *new* value is trustworthy; persistence
+  proves nothing — read the board/serial, not the retained topic.
+- **Hardware surfaces operational truths code review can't.** Transient command topics
+  (reset/scan) needed MQTT **QoS 1** — the gateway's burst-only session silently drops
+  unqueued QoS 0 (~5% reliable). Invisible in review; only ~15 QoS-0 attempts all missing on
+  real hardware exposed it.
+- **Manager guardrail during a canary: watchers are strictly READ-ONLY.** The orchestrator
+  owns all flashing + MQTT; watchers only observe and route. When a watcher deployed a fix
+  (reversible, config-side, post-settle), the right move was to surface its *provenance* to
+  the canary-owner for a keep-vs-rollback call — neither let it ride silently nor kill it
+  reflexively.
+- **Human eyes are a legitimate gate for what no probe can prove.** The flagship
+  showpiece — a stateful entity migrating from an unplugged board to its neighbor — was
+  validated by JP watching the screen ("same creature, surviving board"), against a
+  pre-agreed discriminator (survivor claims the *same* identity within N seconds; the
+  re-joining board adopts rather than spawning a duplicate). Not everything reduces to a
+  metric; pre-register what the human should see.
+
 ## Guildmaster notes for JP (skill-fold candidates)
 
 These are worth promoting from this retro into the dreamteam skill itself:
@@ -128,5 +173,9 @@ These are worth promoting from this retro into the dreamteam skill itself:
 - **Gate-depth-matches-failure-mode** (§5) is the single most reusable review principle —
   a checklist keyed by change class (logic / link / consensus / contract) would help any
   verifier.
+- The **canary verification patterns** (§13) — pre-registered falsifier rubrics,
+  score-by-direct-quantity, and observability-as-its-own-instrument — deserve a
+  "validation" companion to the build-gate/merge-ladder sections: the manager's playbook
+  should cover proving the merges as first-class alongside making them.
 
 *No code or process was changed by this doc — it's a synthesis for review.*
