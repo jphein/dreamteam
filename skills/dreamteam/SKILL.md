@@ -1248,3 +1248,10 @@ The orchestrator's context is the team's scarcest resource — a compaction can 
 - **Delegate broad file exploration to subagents** — they compact independently and return a summary; a 4,000-line read in the orchestrator burns the shared window for good.
 - **CI waits use ONE `run_in_background` call** (`until gh run view $ID --json status --jq .status | grep -q completed; do sleep 30; done`) — never inline-repeat `gh run view`/`gh run list`; each poll leaves JSON in context permanently.
 - **Orchestrator keeps summaries; agents write detail to `scratch/<team>/<agent>.md`** and SendMessage summary + path, never the full findings inline.
+
+## SendMessage field limits (READ THIS — the #1 wasted-turn bug)
+
+- **`summary` is HARD-CAPPED at 200 characters.** Exceed it and the *entire tool call ERRORS* (`InputValidationError: too_big, maximum 200`) and must be re-sent — a wasted turn. Sessions have blown this 15+ times in one run. **Keep `summary` ≤ ~150 chars: one line, lead with the action/verdict, no markdown.** It's a scannable subject line, not a recap.
+- **Put ALL detail in `message`** (the body) — it has no tight cap. Boot logs, code blocks, multi-point reasoning, file paths → body. If you catch yourself writing a long `summary`, stop and move everything past the first clause into `message`.
+- **Draft the body first, then write the `summary` last** as a ≤150-char headline of it. Never copy the body's first paragraph into `summary`.
+- Same discipline for **PushNotification** (also ~200 chars — see § Alerting JP) and any other field the harness validates: subject-line length, detail in the body.
