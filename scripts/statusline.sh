@@ -74,6 +74,19 @@ else
   ;; esac
 fi
 
+# Local llama-server models: CC doesn't know a custom model's real window
+# (payload reports context_window_size:200000 for any unknown alias), so both
+# used_percentage and the (used/size) detail are wrong for local sessions —
+# the exact "statusline reads 65% when the server is full" trap from the
+# 2026-06-09 incident. Recompute against the true server window by alias.
+case "$MODEL" in
+  qwen36-coder|qwen3-coder)
+    LOCAL_WIN=131072
+    USED="$(jf '.context_window.total_input_tokens')"; USED=${USED//[!0-9]/}; USED=${USED:-0}
+    CTX=" · ctx $(( USED * 100 / LOCAL_WIN ))% ($(fmt_tok "$USED")/$(fmt_tok "$LOCAL_WIN")·local)"
+  ;;
+esac
+
 # Rate limits — the other "tokens": plan usage. 5h/7d used_percentage.
 RL=""
 H5="$(jf '.rate_limits.five_hour.used_percentage')"; H5=${H5//[!0-9]/}
