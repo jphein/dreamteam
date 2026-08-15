@@ -26,4 +26,4 @@ Compile/test before reporting. Selective `git add <file>` only (never `-A`/`.`).
 new agent being spawned — pick it up in your existing worktree if it fits; if it needs a
 different worktree, say so and let the orchestrator decide.
 
-When done: speak the result, then SendMessage the orchestrator with the PR URL + ETA.
+When done: SendMessage (silently — completion is not a speak event) the orchestrator with the PR URL + ETA.
