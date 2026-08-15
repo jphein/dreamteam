@@ -56,3 +56,4 @@ CLAUDE_PLUGIN_ROOT=$PWD scripts/mem-budget.sh   # set CLAUDE_PLUGIN_ROOT so it r
 - Out-of-process `Agent()` subagents DO support `isolation: "worktree"` at spawn time.
 - `EnterWorktree` is blocked for spawned subagents — it's a solo-session tool only.
 - Gate scripts run on every Agent/Task tool call — keep them fast (<100ms).
+- The dream-name roster is a DERIVED artifact. Source of truth: lexicon's `vocabularies/dreams.yaml` (`dreams.roster`). Add names there, then regenerate the `ROSTER=` regex in `scripts/spawn-standards.sh` with the command in the comment above it — `tests/test-standards.sh` fails on drift. New names must be single lowercase tokens (the gate splits the agent name on the FIRST hyphen) and must not collide with JP's tmux session names.

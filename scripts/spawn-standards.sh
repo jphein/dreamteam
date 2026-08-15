@@ -46,7 +46,20 @@ case "$PROMPT" in *STANDARDS-EXEMPT:*) exit 0 ;; esac
 # The dream roster (skill § The Dream Name Roster + overflow names + overnight
 # roles + the hypnos/nyx per-team manager roles). argus/iona were retired per
 # spec S6 (#45 dropped their SKILL/crash-audit refs; #46 drops them here too).
-ROSTER='luna|vesper|reverie|morpheus|somnia|nebula|aurora|selene|lucid|drift|wisp|echo|cirrus|haze|twilight|solace|onyx|zephyr|muse|starling|slumber|dusk|mirage|phantasm|phoenix|cassia|solara|yara|lyra|nyx|hypnos|ember|sage|fern|reeve|hermes|oracle'
+#
+# DERIVED ARTIFACT — source of truth is lexicon's vocabularies/dreams.yaml
+# (`dreams.roster`). Deepened to 61 names on 2026-08-14 after a 7-agent research
+# wave exhausted the distinct picks and had to spawn everyone as nebula-*.
+# Regenerate (do NOT hand-edit — order must match, so a re-run is a no-op diff):
+#
+#   cd ~/Projects/lexicon.realm.watch && python3 -c \
+#     "import yaml;print('|'.join(yaml.safe_load(open('vocabularies/dreams.yaml'))['dreams']['roster']['words']))"
+#
+# The list is INLINE, not read from lexicon at runtime, deliberately: this hook
+# runs on EVERY spawn under a 3s timeout, and a cross-repo file read would put
+# lexicon's checkout on the critical path of every agent launch — and fail
+# closed (blocking all spawns) if that path ever moved.
+ROSTER='luna|morpheus|lucid|nebula|oracle|hypnos|nyx|vesper|reverie|somnia|aurora|selene|drift|wisp|echo|cirrus|haze|twilight|solace|onyx|zephyr|muse|starling|slumber|dusk|mirage|phantasm|phoenix|cassia|solara|yara|lyra|ember|sage|fern|reeve|hermes|oneiros|erebus|aether|halcyon|calypso|elysium|avalon|sylph|iris|maia|nocturne|gloam|umbra|hush|lull|eclipse|nimbus|stratus|solstice|meridian|zenith|nova|quasar|orion'
 # Dreamnames that have agent-type definitions in agents/ (typed personas).
 # hypnos/nyx are the manager roles: without their type the spawn loads NO persona
 # system prompt yet still clears the name check — the R1 hole this list closes.

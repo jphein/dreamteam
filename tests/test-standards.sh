@@ -69,6 +69,56 @@ run '{"tool_name":"Bash","tool_input":{"command":"ls"}}' \
 run '{"tool_name":"Agent","tool_input":{"name":"nope","prompt":"x"}}' || true
 grep -q "morpheus=architecture" "$TMP/err" && ok "block message teaches the persona map" || bad "teaching message missing"
 
+# ── The roster itself (2026-08-14) ─────────────────────────────────────────
+# A 7-agent research wave ran out of distinct names and spawned everyone as
+# nebula-*, which defeats the whole point of naming (panes, logs and
+# SendMessage addressing all collapse). These pin the pool's shape.
+eval "$(grep -m1 '^ROSTER=' "$SS")"   # controlled repo file; gives us $ROSTER
+IFS='|' read -r -a ROSTER_WORDS <<< "$ROSTER"
+
+# Depth — the floor that keeps a 2-wave (~20 agent) session in distinct names.
+[ "${#ROSTER_WORDS[@]}" -ge 50 ] \
+  && ok "roster depth ${#ROSTER_WORDS[@]} >= 50 (wave-exhaustion floor)" \
+  || bad "roster only ${#ROSTER_WORDS[@]} names — a big wave will run out"
+
+# No duplicates: a repeated alternative silently shrinks the usable pool.
+dupes="$(printf '%s\n' "${ROSTER_WORDS[@]}" | sort | uniq -d | tr '\n' ' ')"
+[ -z "$dupes" ] && ok "roster has no duplicate names" || bad "duplicate roster names: $dupes"
+
+# Every roster word must actually clear the gate with a role suffix. Catches a
+# stray character in the regex (e.g. a space or an empty alternative) that would
+# otherwise only surface as a mystery block mid-wave.
+badwords=""
+for w in "${ROSTER_WORDS[@]}"; do
+  case "$w" in *[!a-z]*|"") badwords="$badwords $w(shape)"; continue ;; esac
+  run "{\"tool_name\":\"Agent\",\"tool_input\":{\"name\":\"$w-worker\",\"subagent_type\":\"dreamteam:$w\",\"prompt\":\"x\"}}" \
+    || run "{\"tool_name\":\"Agent\",\"tool_input\":{\"name\":\"$w-worker\",\"subagent_type\":\"general-purpose\",\"prompt\":\"x\"}}" \
+    || badwords="$badwords $w"
+done
+[ -z "$badwords" ] && ok "all ${#ROSTER_WORDS[@]} roster names spawn as <name>-worker" \
+                   || bad "roster names rejected by the gate:$badwords"
+
+# Disjoint from JP's tmux session names — a pane named for a session is a
+# permanent ambiguity. `ember` predates the rule and is grandfathered.
+collides=""
+for s in hearth crag forge glade grove hollow rune spire vale; do
+  printf '%s' "$s" | grep -qxE "$ROSTER" && collides="$collides $s"
+done
+[ -z "$collides" ] && ok "roster disjoint from tmux session names" \
+                   || bad "roster collides with tmux session names:$collides"
+
+# Drift — the regex is a derived copy of lexicon's vocabularies/dreams.yaml.
+# Skipped (not failed) when lexicon isn't checked out: the plugin must stay
+# usable on a host that has no lexicon clone.
+LEXDREAMS="${DREAMTEAM_LEXICON_DIR:-$HOME/Projects/lexicon.realm.watch}/vocabularies/dreams.yaml"
+if [ -f "$LEXDREAMS" ] && python3 -c 'import yaml' 2>/dev/null; then
+  gen="$(python3 -c "import yaml,sys;print('|'.join(yaml.safe_load(open(sys.argv[1]))['dreams']['roster']['words']))" "$LEXDREAMS")"
+  [ "$gen" = "$ROSTER" ] && ok "ROSTER matches lexicon dreams.roster (no drift)" \
+    || bad "ROSTER drifted from $LEXDREAMS — regenerate it (see the comment above ROSTER=)"
+else
+  echo "SKIP: lexicon dreams.yaml not available — drift check skipped"
+fi
+
 echo "────────────────────────────────────────"
 echo "SUMMARY: $PASS passed, $FAIL failed, $((PASS+FAIL)) total"
 [ "$FAIL" -eq 0 ]

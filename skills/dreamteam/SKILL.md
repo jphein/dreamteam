@@ -39,7 +39,18 @@ The orchestrator is **Sandman** — the one who brings the dreams. Uses Davis vo
 - Never reuse names within a session — two agents in the **same role** take two dream names (`lucid-debugger`, `wisp-debugger`), never one name twice.
 - Davis voice is **Sandman-only** — never assign to dream agents
 - Voice quality always `hd`; subtitle_color matches the roster color
-- Names evoke dreams — if you need more, draw from: Twilight, Solace, Onyx, Zephyr, Muse, Starling, Slumber, Dusk, Mirage, Phantasm, Phoenix, Cassia, Solara, Yara, Lyra, Ember, Sage, Fern
+- Names evoke dreams — if you need more, draw from the **overflow pool**: Twilight, Solace, Onyx, Zephyr, Muse, Starling, Slumber, Dusk, Mirage, Phantasm, Phoenix, Cassia, Solara, Yara, Lyra, Ember, Sage, Fern
+- Still short? The **deep bench** (added 2026-08-14 after a 7-agent wave ran out and spawned everyone as `nebula-*`) — 61 names total, enough for two full waves without a repeat:
+  - *Myth of sleep and night*: Oneiros, Erebus, Aether, Halcyon, Calypso, Elysium, Avalon, Sylph, Iris, Maia
+  - *Dusk, shadow and quiet*: Nocturne, Gloam, Umbra, Hush, Lull, Eclipse
+  - *Cloud and sky* (pairs with Cirrus/Haze): Nimbus, Stratus
+  - *Stars and the high sky*: Solstice, Meridian, Zenith, Nova, Quasar, Orion
+- **Don't invent names.** The roster is a closed set — the spawn gate blocks anything off it. Roll distinct picks for a wave instead of guessing:
+  ```
+  cd ~/Projects/lexicon.realm.watch/go && go run ./cmd/lexicon roll dreamer --n 7 \
+    --vocabularies ../vocabularies --recipes ../vocabularies/recipes.yaml
+  ```
+  Source of truth is lexicon's `vocabularies/dreams.yaml` (`dreams.roster`); the gate's regex in `scripts/spawn-standards.sh` is a derived copy, and `tests/test-standards.sh` fails on drift. Add new names **there**, then regenerate.
 - **Hypnos** and **Nyx** are reserved fixed-role names — the two standing managers (see § Manager roles). Never hand them to a worker agent; Nyx is deliberately kept out of the worker pool above so she can't be assigned as a fixer.
 
 ## Startup Sequence
