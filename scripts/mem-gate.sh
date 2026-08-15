@@ -43,6 +43,16 @@ LOCAL_ARMED=$(jq -r 'if .local.enabled == true then 1 else 0 end' "$CFG" 2>/dev/
 LOCAL_RESERVE=$(getlocal reserveMB 9000); LOCAL_RESERVE=${LOCAL_RESERVE//[!0-9]/}; [ -n "$LOCAL_RESERVE" ] || LOCAL_RESERVE=9000
 if [ "$LOCAL_ARMED" = 1 ]; then LOCAL_EFF=$LOCAL_RESERVE; LOCAL_NOTE="  local_reserve=${LOCAL_RESERVE} (ollama lane armed)"; else LOCAL_EFF=0; LOCAL_NOTE=""; fi
 
+# Balloon reserve is sized for ONE team's build spikes; scale by scopes actually
+# carrying weight (>=2GiB) — 2026-08-15 OOM: two teams' rustc storms ballooned
+# concurrently, filled swap, and oomd killed tmux.service. Mirrors mem-budget.sh.
+NLANES=0
+for sc in $(systemctl --user list-units 'dreamteam-*.scope' --state=active --no-legend 2>/dev/null | awk '{print $1}'); do
+  mc=$(systemctl --user show "$sc" -p MemoryCurrent --value 2>/dev/null); mc=${mc//[!0-9]/}
+  [ -n "$mc" ] && [ "$mc" -ge 2147483648 ] && NLANES=$((NLANES+1))
+done
+[ "$NLANES" -gt 1 ] && BALLOON=$(( BALLOON * NLANES ))
+
 # --- measure RAM (instant — this is the real OOM guard, runs BEFORE the count) ---
 AVAIL=$(free -m | awk '/^Mem:/{print $7}')
 SWAP_USED=$(free -m | awk '/^Swap:/{print $3}')

@@ -23,6 +23,17 @@ LOCAL_ARMED=$(jq -r 'if .local.enabled == true then 1 else 0 end' "$CFG" 2>/dev/
 LOCAL_RESERVE=$(getlocal reserveMB 9000); LOCAL_RESERVE=${LOCAL_RESERVE//[!0-9]/}; [ -n "$LOCAL_RESERVE" ] || LOCAL_RESERVE=9000
 [ "$LOCAL_ARMED" = 1 ] && LOCAL_EFF=$LOCAL_RESERVE || LOCAL_EFF=0
 
+# Balloon reserve is sized for ONE team's build spikes. N teams can balloon
+# CONCURRENTLY — 2026-08-15 10:16 OOM: emberburrito + burrito-fw rustc storms
+# filled swap and oomd killed tmux.service (every session at once). Count
+# scopes actually carrying weight (>=2GiB) and scale the reserve.
+NLANES=0
+for sc in $(systemctl --user list-units 'dreamteam-*.scope' --state=active --no-legend 2>/dev/null | awk '{print $1}'); do
+  mc=$(systemctl --user show "$sc" -p MemoryCurrent --value 2>/dev/null); mc=${mc//[!0-9]/}
+  [ -n "$mc" ] && [ "$mc" -ge 2147483648 ] && NLANES=$((NLANES+1))
+done
+[ "$NLANES" -gt 1 ] && BALLOON=$(( BALLOON * NLANES ))
+
 AVAIL=$(free -m | awk '/^Mem:/{print $7}')
 SWAP_USED=$(free -m | awk '/^Swap:/{print $3}')
 # agent count via `claude agents --json` (real status), pgrep fallback — see lib.sh
@@ -66,7 +77,7 @@ cat <<EOF
 dreamteam memory budget
   available RAM : ${AVAIL} MiB        swap used: ${SWAP_USED} MiB
   live agents   : ${NAGENTS}
-  per-agent plan: ${PER_AGENT} MiB    host reserve: ${HOST_RESERVE} MiB    balloon reserve: ${BALLOON} MiB${LOCAL_LINE}
+  per-agent plan: ${PER_AGENT} MiB    host reserve: ${HOST_RESERVE} MiB    balloon reserve: ${BALLOON} MiB$([ "$NLANES" -gt 1 ] && printf ' (× %s active build lanes)' "$NLANES")${LOCAL_LINE}
   ─────────────────────────────────────────────
   room this wave: ${ROOM} more   (= min(memory budget ${BUDGET} more, count-cap remainder ${ROOM_COUNT} of ${MAX_AGENTS}))${SCOPE_SUFFIX}
 ${waydroid_note:+$waydroid_note}
