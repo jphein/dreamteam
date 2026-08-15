@@ -621,6 +621,33 @@ spawn whenever the target team has a reusable idle agent, and names the best-fit
 > Reinforces `feedback_reuse_idle_agents.md` and `feedback_never_shutdown_active_agents.md`:
 > keep agents alive AND recycle them. Idle agents are a resource, not waste.
 
+## Remote Build Lane (familiar) — heavy compiles leave the orchestrator's box
+
+**JP directive 2026-08-15, the day two 24G build scopes plus the desktop OOM-killed the
+whole fleet on katana** (systemd-oomd took `tmux.service` — every agent and the
+orchestrator in one stroke; swap was 100% full and per-scope caps summed past physical
+RAM). Compiles are the ballooning workload; they now run on **familiar**
+(10.0.6.107 — 24 cores, NVMe, rustup stable installed 2026-08-15).
+
+- **Pattern**: rsync the working tree to a **per-lane** remote dir, run the build there
+  over ssh, propagate the remote tool's own exit code (`exec ssh`). Reference
+  implementation: `emberburrito/tools/remote-cargo.sh` (proven: 724-test workspace,
+  96 crates cold, ~15s wall). Copy that shape into other projects rather than
+  reinventing — its details are load-bearing: `EB_LANE`-keyed dirs so concurrent
+  agents cannot share a remote tree (the shared-index lesson), `--delete` so removals
+  travel, `target/`+`.git/` excluded, rsync failure = UNKNOWN exit 2 distinct from
+  build failure.
+- **What stays local**: cross-compiles whose toolchain lives only on katana (espup/
+  xtensa firmware — those builds are seconds anyway), anything touching the live
+  daemon (e2e, deploys), and quick single-crate checks where sync overhead dominates.
+- **Agent rule**: heavy gates (`cargo test --workspace`, clippy sweeps, mutation
+  sweeps' inner loops) default to the remote lane with `EB_LANE=<agent-name>`. Local
+  heavy builds need a stated reason. `CARGO_BUILD_JOBS=3` + `nice -n10` (env vars
+  BEFORE `nice`) still govern whatever must run locally.
+- **Capacity honesty**: familiar is also the palace-daemon/TTS host (32G RAM, ~20G
+  free) — it takes build bursts, not resident fleets. Check `ssh familiar free -m`
+  before pointing a mutation sweep's whole loop at it.
+
 ## Local-Model Lane (ollama) — mechanical bulk, summaries, embeddings
 
 An **optional** local lane offloads work that does **not** need frontier reasoning onto
