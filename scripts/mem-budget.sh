@@ -28,10 +28,15 @@ SWAP_USED=$(free -m | awk '/^Swap:/{print $3}')
 # agent count via `claude agents --json` (real status), pgrep fallback — see lib.sh
 if command -v count_agents >/dev/null 2>&1; then NAGENTS=$(count_agents); else
   NAGENTS=$(pgrep -fc 'claude/versions' 2>/dev/null || true); NAGENTS=${NAGENTS:-0}; fi
+# BUDGET = how many MORE agents fit in free RAM (AVAIL already excludes what
+# live agents consume — same semantics as mem-gate.sh). The old formula
+# subtracted NAGENTS from this a second time, reporting "room: 0" on a box
+# with 19 GiB free (2026-08-15). Count cap is enforced separately.
 BUDGET=$(( (AVAIL - HOST_RESERVE - BALLOON - LOCAL_EFF) / PER_AGENT )); [ "$BUDGET" -lt 0 ] && BUDGET=0
-CAP=$(( BUDGET < MAX_AGENTS ? BUDGET : MAX_AGENTS ))
-ROOM=$(( CAP - NAGENTS )); [ "$ROOM" -lt 0 ] && ROOM=0
-[ "$AVAIL" -lt "$MIN_AVAIL" ] && { CAP=0; ROOM=0; }
+ROOM_COUNT=$(( MAX_AGENTS - NAGENTS )); [ "$ROOM_COUNT" -lt 0 ] && ROOM_COUNT=0
+ROOM=$(( BUDGET < ROOM_COUNT ? BUDGET : ROOM_COUNT ))
+[ "$AVAIL" -lt "$MIN_AVAIL" ] && ROOM=0
+CAP=$ROOM  # kept for consumers: --max = spawnable THIS WAVE (matches the gate)
 
 if [ "${1:-}" = "--max" ]; then echo "$CAP"; exit 0; fi
 
@@ -63,8 +68,7 @@ dreamteam memory budget
   live agents   : ${NAGENTS}
   per-agent plan: ${PER_AGENT} MiB    host reserve: ${HOST_RESERVE} MiB    balloon reserve: ${BALLOON} MiB${LOCAL_LINE}
   ─────────────────────────────────────────────
-  MAX agents    : ${CAP}   (= min(count cap ${MAX_AGENTS}, memory budget ${BUDGET}))
-  room for      : ${ROOM} more this wave${SCOPE_SUFFIX}
+  room this wave: ${ROOM} more   (= min(memory budget ${BUDGET} more, count-cap remainder ${ROOM_COUNT} of ${MAX_AGENTS}))${SCOPE_SUFFIX}
 ${waydroid_note:+$waydroid_note}
 EOF
 [ "$AVAIL" -lt "$MIN_AVAIL" ] && echo "  🚫 below ${MIN_AVAIL} MiB floor — do NOT spawn; recover headroom first."
