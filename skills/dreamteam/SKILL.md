@@ -172,6 +172,48 @@ EMPTY=$(tmux list-panes -t :2 -F '#{pane_index} #{pane_current_command}' | grep 
 
 JP can then flip between tabs with `Ctrl-b n`/`Ctrl-b p`, or open the agents window in a separate Ghostty terminal.
 
+### Slate wall — LE1600 sessions as agent displays
+
+**JP's directive (2026-08-19): katana tmux sessions `slate-low` and `slate-mid` are
+reserved for Claude's agents and subagents. `slate-high` is JP's screen — never claim it.**
+(Renamed 2026-08-20 from `le1600-1/-2/-3`; low/mid/high = physical wall position,
+JP's screen is the top slate.)
+
+The diskless Motion LE1600 slates (see `le1600-pxe-farm` memory) auto-attach these
+sessions on katana's **default tmux server** — whatever katana puts in them renders on
+the slate's fbterm glass. They are display-only (no keyboard/mouse/stylus on the
+slates), so nothing there can type into your session, and putting output there can't
+be hijacked. Each panel is **~93×36 cells** — one agent per slate, don't tile panes.
+
+Two usage patterns:
+
+```bash
+# A) Dedicated worker ON the slate — run an interactive agent directly in the session.
+#    Works for standalone agents; the slate becomes that agent's live face.
+tmux send-keys -t slate-low 'cd ~/Projects/<proj> && claude --model fable' Enter
+
+# B) Mirror the dream wall — dream teams live on the SEPARATE `-L dreamteam` socket,
+#    and panes can't be joined across servers. Instead, open a grouped client from
+#    inside the slate session (TMUX= to allow nesting), then aim it at the agents
+#    window from katana:
+tmux -L dreamteam set -g aggressive-resize on   # FIRST — else the 93x36 slate client
+                                                # shrinks the dream session for everyone
+tmux send-keys -t slate-mid 'TMUX= tmux -L dreamteam new-session -t dream -s slatemid' Enter
+tmux -L dreamteam select-window -t slatemid:agents   # grouped session = independent focus
+```
+
+Rules of the wall:
+- **Check someone's watching before narrating to it:** `tmux list-clients -t slate-<pos>`
+  — empty means the slate is off/rebooting; keys still land, nobody sees them. Never
+  *block* on a slate being attached; it's a display, not a dependency.
+- **Cleanup:** pattern A — end the agent (`/exit` or `C-c`) so the slate falls back to
+  its shell; pattern B — `tmux -L dreamteam kill-session -t slatemid` kills only the
+  grouped mirror, never the `dream` session itself.
+- **Never `kill-session -t slate-<pos>`** — the slate's forced-command key recreates it on
+  reconnect, but you'll flash-restart its screen for nothing. Send keys; don't demolish.
+- These sessions are created by tmux-locked ssh keys from stateless slates; they are
+  JP-visible surfaces, not scratch space — treat anything typed there as on-camera.
+
 ### ⛔ Pre-flight: memory budget (admission control)
 
 > Learned 2026-06-30 (VERIFIED from the kernel OOM dump): **59** Claude procs ran across
@@ -483,6 +525,51 @@ These belong in every agent prompt and have prevented the failure mode when foll
 > writes outside the worktree (`/tmp` + `*/scratch/*` allowed). It fails **open** on any ambiguity
 > so a bug can't brick an agent; shared-checkout spawns are exempt; kill-switch `worktree.enforce=false`.
 > Prompt discipline 1–4 stays the front line; this is the backstop.
+
+## 🔴 REACHING JP: ALL THREE CHANNELS, EVERY AGENT (JP, 2026-09-06)
+
+> ### **SPEECH + SLACK + AN UNMISSABLE TEXT BLOCK. Not one of them. All three.**
+> ### **EVERY AGENT — LANES AND SUBAGENTS INCLUDED, NOT JUST THE ORCHESTRATOR.**
+
+**JP, verbatim:** *"i want all agents to utilize those three if they really need my intervention,
+or need to give me info that i really need, or thery really need info that i truly only have"*
+
+### THE THREE TRIGGERS — any one fires the rule
+```
+1. YOU NEED HIS INTERVENTION     a power cycle · a cable · approval for a one-way step ·
+                                 anything your hands cannot do
+2. HE NEEDS THE INFORMATION      his cell is down · a key is exposed · you are about to do
+                                 something with a blast radius he has not agreed to
+3. ONLY HE HAS THE INFORMATION   "did you pull the power?" · "is that Verizon SIM yours?" ·
+                                 "did you speak continuously during that call?"
+                                 ⭐ MOST OFTEN MISSED. A question only JP can answer is not a
+                                 note to yourself -- it is a BLOCKED LANE.
+```
+
+### THE THREE CHANNELS — each covers a failure the others do not
+```
+1. gnome-speaks   REACHES HIM NOW, if he is at the desk.
+                  POST http://127.0.0.1:7710/speak  {"text":"...","source":"<agent-name>"}
+                  ⛔ never "interrupt": true -- it flushes other agents' queues
+2. SLACK          DURABLE. The ONLY one that survives him being away. DM: U04GRDBE2UC
+                  ⭐ JP's reason, verbatim: "for durability in case im not around"
+3. TEXT BLOCK     bold, emoji, its own block, at the TOP of the reply -- never the bottom
+```
+
+### ⛔ LANES: DO NOT ROUTE A JP-ONLY QUESTION THROUGH YOUR LEAD AND CALL IT DELIVERED
+⚠️ **That is one more hop where it can be buried — and the lead is usually the one producing the
+wall of text it will be buried in.** ✅ **Send it yourself on all three, then tell your lead you sent it.**
+⚠️ **Use YOUR agent name as the `source` so the transcript attributes it correctly.**
+
+⚠️ **WORKED EXAMPLE, and it is why this rule exists:** 2026-09-06, a lead needed one power cycle
+to finish a test, **put the ask at the bottom of three long status reports in a row, and wondered
+why nothing happened.** ⭐ **It already held a memory note saying asks must be *"bold, emoji, own
+block"* — and still buried it for four hours without once reaching for the speech queue.**
+⇒ ⭐⭐ **A DECISION THAT NEEDS JP IS NOT DELIVERED UNTIL IT HAS ACTUALLY REACHED HIM. Writing it
+down is not sending it, and the agent is the worst judge of whether its own output was read.**
+
+⛔ **NOT for routine progress.** **Three channels for every status line is noise, and noise is how
+the real ones get ignored.** ⭐ **The test is JP's own wording: does this REALLY need him?**
 
 ## Manager roles (standing)
 
