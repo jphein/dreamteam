@@ -556,6 +556,20 @@ or need to give me info that i really need, or thery really need info that i tru
 3. TEXT BLOCK     bold, emoji, its own block, at the TOP of the reply -- never the bottom
 ```
 
+> ### ⛔ **AND THIS IS BROADER THAN ASKS — *ANY* AGENT SPEECH GOES THROUGH THE QUEUE, ALWAYS.**
+> **JP, 2026-09-06: *"if they are speaking they need to use the gnome-speaks queue"*.**
+> ```
+> ✅ ALWAYS   POST http://127.0.0.1:7710/speak   {"text":"...","source":"<agent-name>"}
+> ⛔ NEVER    speak.py directly -- a PreToolUse hook BLOCKS it
+>             (~/.claude/hooks/gnome-speaks-guard.sh)
+> ⛔ NEVER    "interrupt": true -- it flushes OTHER agents' queues
+> ```
+> **Why the queue and not the script:** it **serialises FIFO** (concurrent agents on `speak.py`
+> clobber each other), it **tags every line by `source`**, and it keeps a **readable transcript**
+> (`GET /queue`). ⭐ **Without it, JP hears overlapping fragments and has no record of who said
+> what.** `POST /skip` drops the current line; `POST /stop` drains all.
+> ⚠️ **`speak.py` is a human-only convenience seam now. Not for agents, ever.**
+
 ### ⛔ LANES: DO NOT ROUTE A JP-ONLY QUESTION THROUGH YOUR LEAD AND CALL IT DELIVERED
 ⚠️ **That is one more hop where it can be buried — and the lead is usually the one producing the
 wall of text it will be buried in.** ✅ **Send it yourself on all three, then tell your lead you sent it.**
