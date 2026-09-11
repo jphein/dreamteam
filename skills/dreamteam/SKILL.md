@@ -453,7 +453,7 @@ tmux capture-pane -t :<window>.<pane> -p -S -50   # last 50 lines of the agent's
   ⭐ The full instrument table — which liveness checks fail toward a false
   positive (`pgrep -af`, `ps | grep`: they match their own `bash -c` cmdline)
   versus a false negative (this one) — lives in
-  `~/.claude/skills/instruments-and-liveness.md`.
+  `~/.claude/skills/instruments-and-liveness/SKILL.md`.
 - **Before reasoning about "unaccounted" processes, run `/dreamteam-fleet`**
   (`scripts/fleet.sh`, issue #18): it maps EVERY agent on the host — all projects, all
   scopes, all tmux sockets — and labels foreign fleets `NOT-YOURS`. Scope membership ≠
@@ -693,6 +693,8 @@ wall of text it will be buried in.** ✅ **Send it yourself on all three, then t
 to finish a test, **put the ask at the bottom of three long status reports in a row, and wondered
 why nothing happened.** ⭐ **It already held a memory note saying asks must be *"bold, emoji, own
 block"* — and still buried it for four hours without once reaching for the speech queue.**
+⇒ **Knowing an ask must be prominent did not make it delivered. The fix is a CHANNEL
+LIST, not a formatting note.**
 ⇒ ⭐⭐ **A DECISION THAT NEEDS JP IS NOT DELIVERED UNTIL IT HAS ACTUALLY REACHED HIM. Writing it
 down is not sending it, and the agent is the worst judge of whether its own output was read.**
 
