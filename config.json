@@ -33,6 +33,10 @@
     "minTeamSize": 3,
     "_notes": "Per-team manager roles (Hypnos + Nyx) — spec docs/superpowers/specs/2026-07-09-manager-roles-design.md §4. minTeamSize = the planned working-agent count at or above which the startup sequence spawns the managers FIRST (before the working wave); below it, Sandman wears both hats (current behavior). Hypnos (agent/comms manager) spawns at >= minTeamSize; Nyx (resource/memory manager) is gated SEPARATELY on scale/memory-pressure per the spec, not on this worker count alone. Managers are typed teammates (subagent_type dreamteam:hypnos|nyx — spawn-standards.sh enforces the type so the persona system prompt loads), never forks, and count against the memory budget like any agent (a 3-worker team's true footprint is 5 agents, +~600 MB at the default perAgentMB). Readers default to minTeamSize 3 if this section is absent, per the file's baked-defaults idiom."
   },
+  "nopoll": {
+    "enforce": true,
+    "_notes": "no-poll-guard.sh (PreToolUse Bash|Monitor in TEAMMATE sessions) blocks a LOOPING GraphQL-heavy GitHub CI read (`gh pr checks`, `gh pr view --json statusCheckRollup`). Measured 2026-09-11: three lanes' 30s pollers exhausted the per-ACCOUNT quota and every gh call in the fleet failed, including the lead's merge cascade — and `gh api rate_limit` read 5000 remaining throughout, because it cannot see GraphQL SECONDARY limits. One-shot reads and the REST route (gh api .../check-runs, what pr-gate.sh uses) stay allowed; the orchestrator is never blocked. Escape: enforce=false, or push and let the lead run scripts/pr-gate.sh once."
+  },
   "worktree": {
     "enforce": true,
     "_notes": "worktree-guard.sh (PreToolUse Edit|Write in TEAMMATE sessions) blocks writes outside an agent's assigned worktree (its team-config cwd) when that cwd is under .claude/worktrees/. Shared-checkout spawns (cwd not a worktree) are unaffected. Escape: orchestrator sets enforce=false, or the agent escalates via SendMessage. Added 2026-07-01 — converts the skill's #1 failure mode (2 collision incidents) from prompt discipline to harness law."
