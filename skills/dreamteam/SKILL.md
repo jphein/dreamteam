@@ -443,6 +443,17 @@ tmux capture-pane -t :<window>.<pane> -p -S -50   # last 50 lines of the agent's
 - **Never take over an agent's task while it's actively working** — you'll create edit
   conflicts in its worktree. (Pairs with `feedback_verify_dont_assume_agents.md` and
   `feedback_never_shutdown_active_agents.md`.)
+- ⚠️ **`pane-peek.sh` fails toward a FALSE NEGATIVE, and only for PEER
+  sessions.** It resolves name→pane through the roster, so for a session that
+  is not a current teammate (`2g-ce`, `openwrt-e1`, …) it prints `no live pane
+  found for '<name>'` — **word for word what a genuinely dead agent returns.**
+  A busy peer and a corpse are indistinguishable through it. For a peer go
+  straight to tmux with the pane id `ListAgents` prints, usable verbatim:
+  `tmux capture-pane -p -t '%0'`.
+  ⭐ The full instrument table — which liveness checks fail toward a false
+  positive (`pgrep -af`, `ps | grep`: they match their own `bash -c` cmdline)
+  versus a false negative (this one) — lives in
+  `~/.claude/skills/instruments-and-liveness.md`.
 - **Before reasoning about "unaccounted" processes, run `/dreamteam-fleet`**
   (`scripts/fleet.sh`, issue #18): it maps EVERY agent on the host — all projects, all
   scopes, all tmux sockets — and labels foreign fleets `NOT-YOURS`. Scope membership ≠
@@ -585,6 +596,44 @@ non-ancestor of main, so anything citing that sha (a changelog entry, a docs
 manifest) resolves only while the branch ref survives. Deleting it is what
 finally breaks the check, long after the merge that caused it.
 
+#### Working GitHub during a wave — rules, each measured 2026-09-11
+
+- **REST only: `gh api repos/O/R/…`.** `gh pr checks`, `gh issue view` and `gh pr
+  edit` are GraphQL and are variously rate-limited or broken outright by the
+  projects-classic deprecation. Read issues with `gh api repos/O/R/issues/N`;
+  edit a body with `gh api -X PATCH repos/O/R/pulls/N -F body=@file`.
+- **`gh api rate_limit` cannot warn you.** It reports only the REST budget and
+  read 5000 remaining throughout an outage in which every `gh pr …` call failed:
+  GraphQL *secondary* limits are invisible to it.
+- **Lanes never watch CI.** Three lanes' 30 s `gh pr checks` loops exhausted the
+  per-ACCOUNT quota and took down the lead's own cascade. A watch also survives a
+  force-push and then never terminates. Push, say "pushed", stop.
+  (`scripts/no-poll-guard.sh` is the backstop, not the rule.)
+- **Rebase only on `go #<pr> <sha>`.** Main moves on every merge; a rebase whose
+  PR is not next in the queue is thrown away. Rebasing early also orphans the sha
+  a changelog entry cites.
+- **The gate reads `pulls/N` head AT GATE TIME and merges via the PR
+  endpoint** — never a sha captured earlier. Same for any diff range: take the
+  end from `pulls/N` (or `git ls-remote`), never from a message.
+- **A force-push makes every handed sha stale**, and the stale read is
+  indistinguishable from a lane that never got its go: old head, higher
+  commit count, non-zero `behind_by`. Disambiguate with
+  `compare/main...<branch>` (`behind_by=0`) or `git ls-remote` — no API call.
+  ⇒ **Lanes put the head sha in the board line:** `open: #493 @588e9808`.
+- **A gate loop keyed on a PR restarts its clock when the lane pushes again.**
+  Size it for a full CI cycle after the LAST expected push, or re-arm on "pushed".
+- **The resolution sweep is the lead's LAST step.** Entries ship `commit: HEAD` +
+  `fork_pr: N`; after the merges, one sweep resolves them to squash shas. Running
+  it mid-cascade resolves against shas that are about to move.
+- **Expect ONE red push-to-main window when a strict check first lands.** Main
+  was never gated by a check that did not exist, so the first run can fail on
+  pre-existing state (#453 merged red on `test-linux`; hotfix #464). Land the
+  check, read main's first push run, fix forward — never gate the wave on it.
+
+#### What a lane owes the board
+
+`pushed <sha>` — nothing else. The lead gates once and says if anything is red.
+
 ## 🔴 REACHING JP: ALL THREE CHANNELS, EVERY AGENT (JP, 2026-09-06)
 
 > ### **SPEECH + SLACK + AN UNMISSABLE TEXT BLOCK. Not one of them. All three.**
@@ -610,10 +659,16 @@ or need to give me info that i really need, or thery really need info that i tru
 1. gnome-speaks   REACHES HIM NOW, if he is at the desk.
                   POST http://127.0.0.1:7710/speak  {"text":"...","source":"<agent-name>"}
                   ⛔ never "interrupt": true -- it flushes other agents' queues
-2. SLACK          DURABLE. The ONLY one that survives him being away. DM: U04GRDBE2UC
+2. SLACK          DURABLE. The ONLY one that survives him being away, and the only
+                  one he can come back to hours later. DM: U04GRDBE2UC
                   ⭐ JP's reason, verbatim: "for durability in case im not around"
 3. TEXT BLOCK     bold, emoji, its own block, at the TOP of the reply -- never the bottom
 ```
+
+> ### ⇒ 🔴 TERMINAL SCROLLBACK IS CLOSE TO THE WORST CHANNEL FOR A DECISION
+>
+> **It scrolls, it is not durable, and it competes with the very output the
+> agent is producing.**
 
 > ### ⛔ **AND THIS IS BROADER THAN ASKS — *ANY* AGENT SPEECH GOES THROUGH THE QUEUE, ALWAYS.**
 > **JP, 2026-09-06: *"if they are speaking they need to use the gnome-speaks queue"*.**
@@ -634,7 +689,7 @@ or need to give me info that i really need, or thery really need info that i tru
 wall of text it will be buried in.** ✅ **Send it yourself on all three, then tell your lead you sent it.**
 ⚠️ **Use YOUR agent name as the `source` so the transcript attributes it correctly.**
 
-⚠️ **WORKED EXAMPLE, and it is why this rule exists:** 2026-09-06, a lead needed one power cycle
+⚠️ **WORKED EXAMPLE, and it is why this rule exists:** 2026-09-06, an agent needed one power cycle
 to finish a test, **put the ask at the bottom of three long status reports in a row, and wondered
 why nothing happened.** ⭐ **It already held a memory note saying asks must be *"bold, emoji, own
 block"* — and still buried it for four hours without once reaching for the speech queue.**
