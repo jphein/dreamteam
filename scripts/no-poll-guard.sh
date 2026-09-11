@@ -77,6 +77,15 @@ fi
 #        incident used (`for i in $(seq 1 40); do … sleep 30; done`).
 LOOPING=0
 [ "$TOOL" = "Monitor" ] && LOOPING=1
+# `gh pr checks --watch` is a poller with NO loop keyword — it is the built-in
+# version of the thing this guard exists to stop, and it is the form that never
+# terminates on a force-pushed head. It must be matched as a FLAG: the loop
+# patterns below are space-delimited (" watch ") and `--watch` is
+# hyphen-prefixed, so the single most dangerous invocation was the one that
+# slipped the first version of this detector.
+if [ "$LOOPING" -eq 0 ]; then
+  case "$CMD" in *"--watch"*) LOOPING=1 ;; esac
+fi
 if [ "$LOOPING" -eq 0 ]; then
   case " $CMD " in
     *" while "*|*" until "*|*" for "*|*" watch "*|*"sleep "*|*";sleep"*|*"&& sleep"*) LOOPING=1 ;;

@@ -42,7 +42,10 @@ repo="$1"; pr="$2"
 case "$repo" in */*) ;; *) usage ;; esac
 case "$pr" in ''|*[!0-9]*) usage ;; esac
 
-IGNORE="${DREAMTEAM_GATE_IGNORE:-DeepSource*|CodeRabbit*|Copilot*|*copilot*}"
+# `-` not `:-`. The EMPTY string is the strictest setting a caller can ask for
+# ("ignore nothing, count everything"), and `:-` substitutes on empty as well as
+# unset — silently turning the strictest request into the most permissive one.
+IGNORE="${DREAMTEAM_GATE_IGNORE-DeepSource*|CodeRabbit*|Copilot*|*copilot*}"
 GH="${DREAMTEAM_GH:-gh}"
 
 say() { echo "$*"; echo "$*" >&2; }   # verdict survives a pipe (see warning above)

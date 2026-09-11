@@ -45,13 +45,19 @@ bash tests/run.sh          # runs every suite, exits non-zero on any failure
   repeat) AND negative controls proving the block is not vacuous (the same loop from a
   non-teammate is allowed — the lead's cascade must never be blocked; a one-shot check; an
   unrelated loop; the sanctioned REST route; the kill switch; malformed stdin). A missing config
-  file must still ENFORCE — an absent kill switch is not a disabled guard.
+  file must still ENFORCE — an absent kill switch is not a disabled guard. `gh pr checks --watch`
+  is pinned separately: it is a poller with no loop keyword, so a space-delimited " watch " pattern
+  misses the single most dangerous form.
 - `tests/test-pr-tools.sh` — `pr-gate.sh` / `pr-merge.sh` / `cascade.sh` against a stubbed `gh`
   (fixture JSON piped through the real `jq` with the caller's real `--jq` filter, mutating calls
   logged so the tests assert what the tools DID). Pins the two traps: **a blank conclusion is a
   RUNNING check**, and **the verdict is the exit code, which a pipe throws away** (so it must also
   reach stderr). Also pins distinct exit codes for not-green / unreadable / no-CI, the default
-  keep-the-branch behaviour, and the cascade's stop-and-ping-the-lane protocol.
+  keep-the-branch behaviour, and the cascade's stop-and-ping-the-lane protocol. Also: an EMPTY
+  `DREAMTEAM_GATE_IGNORE` means "ignore nothing" (`${VAR:-default}` would silently restore the
+  defaults — the strictest request becoming the most permissive); a `null` `behind_by` must STOP
+  rather than read as "up to date"; `--allow-no-ci <note>` covers the absence of checks and never
+  a failing one; and `--gated-sha` re-gates when the head moved (the force-push race).
 - `tests/test-worktree-create.sh` — the #26 WorktreeCreate hook adapter (`worktree-create-hook.sh`): asserts **stdout is exactly the worktree path** (the command-hook contract that was missing), cwd-independence, branch-off-HEAD, opt-in git-ignored-input copy (`.claude/worktree-copy`), name sanitization, and a clean **non-zero exit on failure** (no phantom "succeeded but no path").
 
 Quick static checks:

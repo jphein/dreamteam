@@ -146,8 +146,19 @@ else fail "external-app handling wrong — exit $RC: $OUT"; fi
 RC=0
 OUT=$(env "${GHENV[@]}" DREAMTEAM_GATE_IGNORE='nothing-matches-this' bash "$GATE" o/r 4 2>"$TMP/err") || RC=$?
 if [ "$RC" -eq 1 ]; then
-  pass "with the ignore list emptied, the same queued externals correctly fail the gate"
+  pass "with the ignore list overridden, the same queued externals correctly fail the gate"
 else fail "ignore-list override had no effect — exit $RC"; fi
+
+# …and the EMPTY string must mean "ignore nothing", which is the STRICTEST
+# setting a user can ask for. `${VAR:-default}` substitutes on empty as well as
+# unset, so it silently restores the full default list — turning the strictest
+# request into the most permissive one. The sentinel test above passes either
+# way, which is exactly why it did not catch this.
+RC=0
+OUT=$(env "${GHENV[@]}" DREAMTEAM_GATE_IGNORE='' bash "$GATE" o/r 4 2>"$TMP/err") || RC=$?
+if [ "$RC" -eq 1 ]; then
+  pass "an EMPTY ignore list means ignore nothing (not 'restore the defaults')"
+else fail "empty ignore list silently reverted to the default — exit $RC"; fi
 
 pull 5 eeee5555 true open false feat/draft main
 checks eeee5555 "test-linux@success@completed"
@@ -257,6 +268,76 @@ run "$CASCADE" o/r 7:lane 1
 if [ "$RC" -eq 1 ] && ! grep -q 'pulls/1/merge' "$TMP/calls.log"; then
   pass "a stop halts the queue — later PRs are not merged out of order"
 else fail "cascade continued past a stop; calls: $(cat "$TMP/calls.log")"; fi
+
+# ── F2: a repo with NO CI (palace-daemon has no .github/) gates as 4, not 1.
+#        Treating that as "not green — re-run later" is advice that can never
+#        come true: there is nothing to wait for.
+pull 9 9999cccc false open false feat/nocichk main
+checks 9999cccc
+fixture GET_repos_o_r_compare_main...feat_nocichk <<< '{"behind_by":0}'
+fixture PUT_repos_o_r_pulls_9_merge <<< '{"merged":true,"sha":"9999abcd0000"}'
+: > "$TMP/calls.log"
+run "$CASCADE" o/r 9
+if [ "$RC" -eq 3 ] && printf '%s' "$OUT" | grep -q 'no check runs' \
+   && printf '%s' "$OUT" | grep -q -- '--allow-no-ci' && ! grep -q '^PUT' "$TMP/calls.log"; then
+  pass "STOPS on a no-CI repo with an accurate message + the opt-in, instead of 'still running, re-run later'"
+else fail "no-CI handling wrong — exit $RC: $OUT"; fi
+
+: > "$TMP/calls.log"
+run "$CASCADE" --allow-no-ci "reviewed by oracle-x: local suite green" o/r 9
+if [ "$RC" -eq 0 ] && grep -q 'PUT repos/o/r/pulls/9/merge' "$TMP/calls.log" \
+   && printf '%s' "$OUT" | grep -q 'reviewed by oracle-x'; then
+  pass "--allow-no-ci merges a no-CI PR and records the reviewer note in the output"
+else fail "--allow-no-ci did not merge / did not record the note — exit $RC: $OUT"; fi
+
+run "$CASCADE" --allow-no-ci o/r 9
+if [ "$RC" -eq 2 ]; then pass "--allow-no-ci REQUIRES a note (it cannot be waved through by habit)"
+else fail "--allow-no-ci accepted an empty note — exit $RC"; fi
+
+# --allow-no-ci must not launder a RED repo: it only excuses "no checks at all".
+: > "$TMP/calls.log"
+run "$CASCADE" --allow-no-ci "note" o/r 3
+if [ "$RC" -eq 3 ] && ! grep -q '^PUT' "$TMP/calls.log"; then
+  pass "--allow-no-ci does NOT excuse a failing check — only the absence of checks"
+else fail "--allow-no-ci laundered a red PR — exit $RC"; fi
+
+# ── F4: a literal `null` behind_by (absent field) must STOP, not fall through.
+#        `[ null -gt 0 ]` errors to exit 2, the `if` reads false, and the branch
+#        that means "unknown" silently becomes "up to date" — then it merges an
+#        unrebased PR. This is the fail-open direction, on the one question the
+#        cascade exists to answer.
+pull 10 aaaa0001 false open false feat/nullcmp main
+checks aaaa0001 "test-linux@success@completed"
+fixture GET_repos_o_r_compare_main...feat_nullcmp <<< '{"no_behind_field":true}'
+: > "$TMP/calls.log"
+run "$CASCADE" o/r 10
+if [ "$RC" -eq 3 ] && printf '%s' "$OUT" | grep -qi 'cannot determine' && ! grep -q '^PUT' "$TMP/calls.log"; then
+  pass "STOPS when behind_by is null/unparseable — 'unknown' must never read as 'up to date'"
+else fail "null behind_by fell through — exit $RC: $OUT"; fi
+
+# ── the redundant second gate: cascade already gated this exact sha, so
+#        pr-merge is told which sha was cleared and re-gates only if it moved.
+: > "$TMP/calls.log"
+run "$CASCADE" --dry-run o/r 1
+gates=$(grep -c 'check-runs' "$TMP/calls.log")
+if [ "$gates" -le 1 ]; then
+  pass "cascade gates each PR ONCE (check-runs read $gates time(s), not twice)"
+else fail "cascade double-gated: $gates check-runs reads for one PR"; fi
+
+: > "$TMP/calls.log"
+run "$MERGE" --gated-sha aaaa1111 o/r 1
+if [ "$RC" -eq 0 ] && ! grep -q 'check-runs' "$TMP/calls.log"; then
+  pass "--gated-sha skips the duplicate gate when the head is unchanged"
+else fail "--gated-sha still re-gated — exit $RC; calls: $(cat "$TMP/calls.log")"; fi
+
+# …but a head that MOVED since the gate must be re-gated, not trusted. This is
+# the force-push race the plain --skip-gate design would have merged straight
+# through.
+: > "$TMP/calls.log"
+run "$MERGE" --gated-sha stale0000 o/r 1
+if grep -q 'check-runs' "$TMP/calls.log"; then
+  pass "--gated-sha RE-GATES when the head moved since it was cleared (force-push race)"
+else fail "--gated-sha trusted a stale sha — calls: $(cat "$TMP/calls.log")"; fi
 
 run "$CASCADE" o/r
 if [ "$RC" -eq 2 ]; then pass "exit 2 on a usage error"

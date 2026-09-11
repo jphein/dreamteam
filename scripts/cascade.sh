@@ -31,6 +31,12 @@
 #
 # OPTIONS
 #   --dry-run              gate and report, never merge
+#   --allow-no-ci <note>   merge PRs whose repo has NO check runs at all (exit 4
+#                          from the gate — palace-daemon has no .github/). The
+#                          note is REQUIRED and is echoed into the run, because
+#                          the thing standing in for CI is a human review and
+#                          the record should say whose. It does NOT excuse a
+#                          failing or still-running check — only their absence.
 #   --delete-branch        delete each head branch after its merge (read
 #                          pr-merge.sh's header first — this is what breaks
 #                          check-docs on main when an entry cites a branch sha)
@@ -57,13 +63,15 @@ usage() {
   exit 2
 }
 
-DRY=0; DELETE=0; REBASE=0; REPO_PATH="${PWD}"
+DRY=0; DELETE=0; REBASE=0; REPO_PATH="${PWD}"; ALLOW_NO_CI=
 POST_REBASE="${DREAMTEAM_POST_REBASE:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run)       DRY=1; shift ;;
     --delete-branch) DELETE=1; shift ;;
     --rebase)        REBASE=1; shift ;;
+    --allow-no-ci)   ALLOW_NO_CI="${2:-}"; [ -n "$ALLOW_NO_CI" ] || usage
+                     case "$ALLOW_NO_CI" in -*) usage ;; esac; shift 2 ;;
     --repo-path)     REPO_PATH="${2:-}"; shift 2 || usage ;;
     --post-rebase)   POST_REBASE="${2:-}"; shift 2 || usage ;;
     -h|--help)       usage ;;
@@ -106,10 +114,16 @@ for spec in "$@"; do
   #    has landed since this branch was cut, so it must rebase before it can be
   #    trusted green (its CI ran against the old base).
   behind=$("$GH" api "repos/$repo/compare/$base...$branch" --jq '.behind_by' 2>/dev/null || echo "")
-  if [ -z "$behind" ]; then
-    echo "CASCADE STOPPED: cannot compare $base...$branch"
-    exit 3
-  fi
+  # Validate as a NUMBER, not just as non-empty. jq prints a missing field as the
+  # literal string "null", which passes -z, and then `[ "null" -gt 0 ]` is a bash
+  # ERROR (exit 2) that the `if` reads as false — so "I could not tell" silently
+  # became "up to date" and the cascade merged an unrebased PR. That is the
+  # fail-open direction on the one question this script exists to answer.
+  case "$behind" in
+    ''|*[!0-9]*)
+      echo "CASCADE STOPPED: cannot determine how far $branch is behind $base (got '${behind:-<empty>}')"
+      exit 3 ;;
+  esac
 
   if [ "$behind" -gt 0 ]; then
     basesha=$("$GH" api "repos/$repo/commits/$base" --jq '.sha' 2>/dev/null || echo "")
@@ -142,10 +156,25 @@ for spec in "$@"; do
   fi
 
   echo "  up to date with $base — gating (REST, one shot, no polling)"
-  if ! bash "$GATE" "$repo" "$pr"; then
-    echo "  CASCADE STOPPED at $repo#$pr — not green (or still running). Re-run later; merged PRs are skipped."
-    exit 3
-  fi
+  grc=0; bash "$GATE" "$repo" "$pr" || grc=$?
+  case "$grc" in
+    0) ;;
+    4)
+      # No check runs AT ALL. "Re-run later" is advice that can never come true
+      # here — there is nothing to wait for. Say what is actually true, and make
+      # the override a deliberate act that records who vouched for it.
+      if [ -n "$ALLOW_NO_CI" ]; then
+        echo "  no check runs on this repo — proceeding under --allow-no-ci: $ALLOW_NO_CI"
+      else
+        echo "  CASCADE STOPPED at $repo#$pr — the repo has no check runs at all (no CI configured)."
+        echo "  Nothing will ever turn green here. Gate on the local suite + review, then re-run with:"
+        echo "      --allow-no-ci \"<who reviewed it, and what they ran>\""
+        exit 3
+      fi ;;
+    *)
+      echo "  CASCADE STOPPED at $repo#$pr — not green (or still running). Re-run later; merged PRs are skipped."
+      exit 3 ;;
+  esac
 
   if [ "$DRY" -eq 1 ]; then
     echo "  DRY RUN: would merge $repo#$pr"
@@ -153,9 +182,11 @@ for spec in "$@"; do
     continue
   fi
 
-  margs=""; [ "$DELETE" -eq 1 ] && margs="--delete-branch"
-  # shellcheck disable=SC2086  # margs is a single controlled flag or empty
-  if ! bash "$MERGE" $margs "$repo" "$pr"; then
+  # --gated-sha: this exact head was just cleared above, so pr-merge re-gates
+  # only if it moved. Saves a round trip AND closes the force-push race.
+  margs=(--gated-sha "$headsha")
+  [ "$DELETE" -eq 1 ] && margs+=(--delete-branch)
+  if ! bash "$MERGE" "${margs[@]}" "$repo" "$pr"; then
     echo "  CASCADE STOPPED: merge of $repo#$pr failed"
     exit 3
   fi

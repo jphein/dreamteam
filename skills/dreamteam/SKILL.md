@@ -574,7 +574,11 @@ the cascade. It is idempotent — already-merged PRs are skipped.
 
 Exit codes are distinct on purpose: `1` not green, `3` unreadable, `4` no CI at
 all. "Unreadable" and "this repo has no CI" are not "red", and a cascade that
-conflates them either stalls forever or merges blind.
+conflates them either stalls forever or merges blind. For a repo with no CI at
+all (palace-daemon has no `.github/`), pass `--allow-no-ci "<who reviewed it and
+what they ran>"` — the note is required, because the thing standing in for CI is
+a human and the record should say which one. It excuses the *absence* of checks,
+never a failing one.
 
 `--delete-branch` is **opt-in**: a squash merge makes the PR's branch sha a
 non-ancestor of main, so anything citing that sha (a changelog entry, a docs

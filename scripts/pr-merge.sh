@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# dreamteam — pr-merge.sh [--dry-run] [--delete-branch] <owner/repo> <pr>
+# dreamteam — pr-merge.sh [--dry-run] [--delete-branch] [--gated-sha <sha>] <owner/repo> <pr>
 #
 # Squash-merge a PR via REST, but only after pr-gate.sh says it is green.
 # REST, not GraphQL, for the reason in pr-gate.sh's header.
@@ -17,6 +17,13 @@
 #   that state when this was found. So deletion is a deliberate act here, not a
 #   default, and the cascade will remind you.
 #
+# --gated-sha <sha>: the caller (cascade.sh) already gated this exact head, so
+#   skip the duplicate gate — but ONLY if the head is still that sha. A plain
+#   "trust me, it's green" flag would merge straight through a force-push landed
+#   between the caller's gate and this merge; comparing the sha closes that race
+#   AND saves a check-runs round trip, so it is both cheaper and safer than the
+#   double gate it replaces.
+#
 # EXIT CODES
 #   0  merged (or, with --dry-run, would merge)
 #   1  not merged — the gate said no
@@ -28,11 +35,12 @@ GH="${DREAMTEAM_GH:-gh}"
 GATE="${DREAMTEAM_PR_GATE:-$HERE/pr-gate.sh}"
 
 usage() { echo "usage: pr-merge.sh [--dry-run] [--delete-branch] <owner/repo> <pr>" >&2; exit 2; }
-DRY=0; DELETE=0
+DRY=0; DELETE=0; GATED_SHA=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run)       DRY=1; shift ;;
     --delete-branch) DELETE=1; shift ;;
+    --gated-sha)     GATED_SHA="${2:-}"; shift 2 || usage ;;
     -h|--help)       usage ;;
     --) shift; break ;;
     -*) usage ;;
@@ -44,15 +52,22 @@ repo="$1"; pr="$2"
 case "$repo" in */*) ;; *) usage ;; esac
 case "$pr" in ''|*[!0-9]*) usage ;; esac
 
-# The gate's verdict is its EXIT CODE. Do not pipe it; do not read its stdout.
-if ! bash "$GATE" "$repo" "$pr"; then
-  echo "NOT MERGED: gate refused $repo#$pr" >&2
-  exit 1
-fi
-
-meta=$("$GH" api "repos/$repo/pulls/$pr" --jq '[.title, .number, .head.ref, .base.ref] | @tsv' 2>/dev/null) \
+meta=$("$GH" api "repos/$repo/pulls/$pr" --jq '[.title, .number, .head.ref, .base.ref, .head.sha] | @tsv' 2>/dev/null) \
   || { echo "NOT MERGED: cannot read repos/$repo/pulls/$pr" >&2; exit 3; }
-IFS=$'\t' read -r title number branch base <<< "$meta"
+IFS=$'\t' read -r title number branch base headsha <<< "$meta"
+
+# Gate unless the caller already cleared THIS head. The sha comparison is the
+# whole safety of the shortcut — see --gated-sha in the header.
+if [ -n "$GATED_SHA" ] && [ "$GATED_SHA" = "$headsha" ]; then
+  echo "gate skipped: caller already cleared ${headsha:0:8}"
+else
+  [ -n "$GATED_SHA" ] && echo "head moved since it was gated (${GATED_SHA:0:8} → ${headsha:0:8}) — re-gating"
+  # The gate's verdict is its EXIT CODE. Do not pipe it; do not read its stdout.
+  if ! bash "$GATE" "$repo" "$pr"; then
+    echo "NOT MERGED: gate refused $repo#$pr" >&2
+    exit 1
+  fi
+fi
 
 if [ "$DRY" -eq 1 ]; then
   echo "DRY RUN: would squash-merge $repo#$pr \"$title\" into $base (head branch: $branch)"

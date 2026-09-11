@@ -78,6 +78,14 @@ run "$LANE" Monitor 'gh pr checks 458 --repo o/r | grep -v pass'
 if blocked; then pass "BLOCKS a Monitor watch on gh pr checks (a Monitor IS a poller)"
 else fail "Monitor poll not blocked — exit $GRC"; fi
 
+# `--watch` IS the never-terminating watch this guard's header describes, and it
+# needs no loop keyword at all. It slipped the first version of the detector:
+# the loop patterns matched " watch " (space-delimited) and `--watch` is
+# hyphen-prefixed, so the single most dangerous form was the one that passed.
+run "$LANE" Bash 'gh pr checks 458 --repo o/r --watch'
+if blocked; then pass "BLOCKS gh pr checks --watch (a flag, not a loop — and the worst case)"
+else fail "--watch slipped the loop detector — exit $GRC"; fi
+
 run "$LANE" Bash 'gh pr checks 458 --repo o/r; sleep 30; gh pr checks 458 --repo o/r'
 if blocked; then pass "BLOCKS a sleep-separated repeat without an explicit loop keyword"
 else fail "sleep-repeat poll not blocked — exit $GRC"; fi
@@ -109,6 +117,11 @@ else fail "blocked the REST route — exit $GRC; that is the route pr-gate.sh us
 run "$LANE" Bash "$MEASURED" "$TMP/off.json"
 if [ "$GRC" -eq 0 ]; then pass "ALLOWS everything when nopoll.enforce=false (kill switch reachable)"
 else fail "kill switch did not disengage — exit $GRC (jq '//' treats false as empty; use 'if == false')"; fi
+
+# The ignore-list override must honour the EMPTY string — "ignore nothing" is
+# the strictest setting, and `${VAR:-default}` silently replaces it with the
+# default. Asserted in test-pr-tools.sh; noted here because the same idiom
+# appears in both scripts.
 
 run "$LANE" Edit "$MEASURED"
 if [ "$GRC" -eq 0 ]; then pass "ALLOWS a non-Bash/Monitor tool (matcher discipline)"
