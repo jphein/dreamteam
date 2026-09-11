@@ -504,7 +504,25 @@ Constraints:
 - Selective `git add <file>` only — never `-A` or `.` (hook blocks).
 - Commit in your worktree with conventional commit message.
 - Open PR via `gh pr create --repo <org>/<repo> --base main --head <branch>`.
-- When done: SendMessage (silently — completion is not a speak event) orchestrator with PR URL + ETA.
+
+CI AND MERGE — you push, the lead gates. Four rules, all measured 2026-09-11:
+- ⛔ NEVER watch CI. No `gh pr checks` loop, no Monitor on a PR, no "wait for
+  green". The GitHub quota is per-ACCOUNT: three lanes' 30s pollers exhausted
+  it and every gh call in the fleet failed, including the lead's cascade. A
+  watch also survives a force-push and then never terminates. (no-poll-guard.sh
+  blocks this, but the rule is yours to keep — the guard is the backstop.)
+- `gh api rate_limit` CANNOT warn you. It read 5000 remaining throughout that
+  outage; it does not see GraphQL secondary limits.
+- REST, not GraphQL, for every read: `gh api repos/O/R/...`. `gh issue view`
+  and `gh pr edit` are broken outright by GitHub's projects-classic
+  deprecation — use `gh api repos/O/R/issues/N` and
+  `gh api -X PATCH repos/O/R/pulls/N -F body=@file`.
+- REBASE ONLY ON "go". Do not rebase because main moved — every merge moves it,
+  and a rebase whose PR is not next in the queue is thrown away. Wait for the
+  lead's `go #<pr> <sha>`, rebase then, push, reply "pushed".
+- When done: SendMessage (silently — completion is not a speak event) orchestrator
+  with the PR URL + ETA, then STOP. "pushed" is the whole report; the lead runs
+  `scripts/pr-gate.sh` once and tells you if anything is red.
 - If you hit ANY git error referencing a branch you didn't expect, STOP and
   SendMessage Sandman — do not try to recover. The orchestrator has the
   cross-agent view and will salvage."""
@@ -525,6 +543,43 @@ These belong in every agent prompt and have prevented the failure mode when foll
 > writes outside the worktree (`/tmp` + `*/scratch/*` allowed). It fails **open** on any ambiguity
 > so a bug can't brick an agent; shared-checkout spawns are exempt; kill-switch `worktree.enforce=false`.
 > Prompt discipline 1–4 stays the front line; this is the backstop.
+
+### Merging a wave — the just-in-time cascade (orchestrator only)
+
+Three scripts, REST-only, no polling anywhere:
+
+| script | question it answers |
+|---|---|
+| `scripts/pr-gate.sh <owner/repo> <pr>` | is this PR *actually* green? |
+| `scripts/pr-merge.sh [--dry-run] [--delete-branch] <owner/repo> <pr>` | gate, then squash-merge |
+| `scripts/cascade.sh <owner/repo> <pr>[:<lane>] …` | merge a queue in order, rebasing just in time |
+
+**Why just-in-time.** Every merge invalidates every other open PR that touches a
+generated file — and when a changelog table is numbered, one new entry renumbers
+every row, so the conflict is total rather than local. Rebasing all N PRs after
+each merge is O(N²) rebases, N-1 of them discarded. `cascade.sh` therefore stops
+at the first PR that is behind base and prints the exact ping to send
+(`go #<pr> <sha>`); the lane rebases, pushes, replies "pushed", and you re-run
+the cascade. It is idempotent — already-merged PRs are skipped.
+
+**Two traps the scripts encode, both of which bit us before they existed:**
+
+1. **A blank conclusion is a RUNNING check, not a passing one.** GitHub reports
+   an in-flight check as `{status:"in_progress", conclusion:null}`. A gate that
+   treats "not failed" as "passed" merges mid-run.
+2. **The gate's verdict is its exit code, and a pipe throws it away.**
+   `pr-gate.sh o/r 12 | tail -5` exits 0 — tail's status — always. The gate
+   prints its verdict to stderr as well for exactly this reason; if you pipe it,
+   `set -o pipefail` first.
+
+Exit codes are distinct on purpose: `1` not green, `3` unreadable, `4` no CI at
+all. "Unreadable" and "this repo has no CI" are not "red", and a cascade that
+conflates them either stalls forever or merges blind.
+
+`--delete-branch` is **opt-in**: a squash merge makes the PR's branch sha a
+non-ancestor of main, so anything citing that sha (a changelog entry, a docs
+manifest) resolves only while the branch ref survives. Deleting it is what
+finally breaks the check, long after the merge that caused it.
 
 ## 🔴 REACHING JP: ALL THREE CHANNELS, EVERY AGENT (JP, 2026-09-06)
 
