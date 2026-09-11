@@ -72,6 +72,41 @@ TEAM=$(jq -r '.team // "unknown"' "$MARKER" 2>/dev/null || echo unknown)
 REPO=$(jq -r '.repo // empty' "$MARKER" 2>/dev/null || echo "")
 STARTED=$(jq -r '.started // "?"' "$MARKER" 2>/dev/null || echo "?")
 
+# ── concurrent-team guard (2026-09-09) ──────────────────────────────────────
+# $STATE is HOST-WIDE (one marker dir for every project), so a session starting
+# while ANOTHER project's team is still running sees a marker it does not own.
+# That is a neighbour, not crash residue — yet this hook declared a crash and
+# pointed the new lead at `rm MARKER`, which would have yanked the LIVE team's
+# marker (false flag logged 2026-07-03 in HANDOFF.md; again 2026-09-09 with 21
+# idle gnome-speaks agents alive in tmux 'spire'). So ask whether the owner is
+# alive first. Instruments: its containment scope is active (systemd releases
+# a scope once its last process exits, so is-active is a real liveness signal),
+# or a tmux pane still sits in its repo. DREAMTEAM_SCOPE_NAME overrides the
+# derived name (test seam, same precedence as lib.sh dreamteam_scope_name);
+# DREAMTEAM_TEST=1 skips the tmux probe so fixtures stay hermetic.
+owner_alive=""
+if [ -n "$REPO" ]; then
+  if [ -n "${DREAMTEAM_SCOPE_NAME:-}" ]; then
+    OSCOPE="$DREAMTEAM_SCOPE_NAME"
+  else
+    _p="$(basename "$REPO" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-')"
+    _p="$(printf '%s' "$_p" | sed 's/-*$//; s/^-*//' | cut -c1-32)"
+    OSCOPE="dreamteam-${_p:-agents}"
+  fi
+  if systemctl --user is-active --quiet "$OSCOPE.scope" 2>/dev/null; then
+    owner_alive="scope $OSCOPE.scope is active"
+  elif [ -z "${DREAMTEAM_TEST:-}" ] && tmux list-panes -a -F '#{pane_current_path}' 2>/dev/null | grep -qxF -- "$REPO"; then
+    owner_alive="a tmux pane is still running in $REPO"
+  fi
+fi
+if [ -n "$owner_alive" ]; then
+  echo "ℹ️  DREAMTEAM CONCURRENT — team '$TEAM' (started $STARTED, repo $REPO) is still LIVE in another session ($owner_alive)."
+  echo "    Its marker '$MARKER' is NOT crash residue — do NOT rm it; that session's SessionEnd owns it."
+  echo "    If that team is finished, wind it down from its own session (tmux pane in $REPO), not from here."
+  echo ""
+  exit 0
+fi
+
 echo "⚠️  DREAMTEAM CRASH RECOVERY — team '$TEAM' (started $STARTED) did not shut down cleanly."
 echo "    Likely an OOM cascade or terminal loss. Do these BEFORE starting new work:"
 echo ""

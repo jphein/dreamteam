@@ -348,6 +348,20 @@ printf '{"members":[{"name":"team-lead","agentType":"team-lead","agentId":"lead-
 OUT=$(run_ca "$TMP")
 case "$OUT" in *"DREAMTEAM LIVENESS"*) bad "#58: false silent-death advisory on all-live team ($OUT)";; *) ok "#58: no advisory when nobody is dead (non-vacuous)";; esac
 
+# ── concurrent-team guard: a marker whose OWNER is still alive is a neighbour, not a crash.
+# systemctl stub: is-active exits 3 by default (owner dead) and 0 under FAKE_SCOPE=pressure (alive).
+# DREAMTEAM_TEST=1 skips the tmux probe so the host's real panes cannot leak into the fixture.
+run_ca_m() { DREAMTEAM_TEST=1 DREAMTEAM_STATE="$CA_STATE" DREAMTEAM_TEAMS_DIR="$CA_TEAMS" DREAMTEAM_CWD="$TMP" DREAMTEAM_SCOPE_NAME="dreamteam-ca-owner" CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/crash-audit.sh" 2>/dev/null; }
+OUT=$(run_ca_m)   # no marker → neither notice (control)
+case "$OUT" in *"CRASH RECOVERY"*|*"DREAMTEAM CONCURRENT"*) bad "marker guard: notice with no marker present ($OUT)";; *) ok "marker guard: no marker → silent (control)";; esac
+printf '{"team":"neighbour","repo":"/tmp/ca-owner","started":"2026-09-08T00:05:55"}\n' > "$CA_STATE/active"
+OUT=$(run_ca_m)   # marker + owner scope INACTIVE → genuine crash residue
+case "$OUT" in *"CRASH RECOVERY"*"neighbour"*) ok "marker guard: dead owner → CRASH RECOVERY";; *) bad "marker guard: crash notice missing for dead owner ($OUT)";; esac
+OUT=$(FAKE_SCOPE=pressure run_ca_m)   # marker + owner scope ACTIVE → concurrent team, NOT a crash
+case "$OUT" in *"CRASH RECOVERY"*) bad "marker guard: live owner still reported as a crash ($OUT)";; *"DREAMTEAM CONCURRENT"*"neighbour"*"dreamteam-ca-owner.scope"*) ok "marker guard: live owner → CONCURRENT, not crash";; *) bad "marker guard: concurrent notice missing ($OUT)";; esac
+case "$OUT" in *"do NOT rm"*) ok "marker guard: live-owner notice forbids rm of the marker";; *) bad "marker guard: rm warning missing ($OUT)";; esac
+rm -f "$CA_STATE/active"
+
 # #54: real temp git repo. On default → silent; off-default → warn; linked worktree → skip.
 CA_REPO="$TMP/ca-repo"; mkdir -p "$CA_REPO"
 git -C "$CA_REPO" init -q -b main 2>/dev/null

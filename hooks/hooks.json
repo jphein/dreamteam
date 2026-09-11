@@ -33,6 +33,16 @@
         ]
       },
       {
+        "matcher": "Bash|Monitor",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/no-poll-guard.sh\"",
+            "timeout": 4000
+          }
+        ]
+      },
+      {
         "matcher": "Edit|Write",
         "hooks": [
           {

@@ -111,7 +111,16 @@ if [ -z "$ADDR" ]; then
   elif [ "$R_FOUND" = "1" ]; then
     reason="agent '$AGENT' is in the roster but not attached to a tmux pane"
   else
-    reason="no live pane found for '$AGENT' (not a current teammate / not in tmux)"
+    reason="no live pane found for '$AGENT' (not a current teammate / not in tmux)
+  ⚠️  THIS MESSAGE HAS TWO OPPOSITE CAUSES AND CANNOT TELL THEM APART:
+        (a) the agent is genuinely dead, OR
+        (b) it is a LIVE PEER SESSION this tool structurally cannot see.
+      pane-peek resolves name->pane by pid-ancestry through roster.sh, so it sees
+      ROSTER TEAMMATES ONLY. A busy 22-hour peer session prints this exact line.
+      ⇒ This tool FAILS TOWARD A FALSE NEGATIVE ON LIVENESS. Never read it as death.
+  ✅  For a peer session use tmux directly -- ListAgents pane ids work verbatim:
+        tmux capture-pane -p -t '%0'      (%N is globally unique and stabler)
+        ls /tmp/tmux-1000/  -> one server; ember/forge/grove/... are SESSIONS"
   fi
   if [ "$FMT" = "json" ]; then
     R_PID="$R_PID" R_STATUS="$R_STATUS" R_CWD="$R_CWD" AGENT="$AGENT" REASON="$reason" \

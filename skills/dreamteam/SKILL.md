@@ -172,6 +172,48 @@ EMPTY=$(tmux list-panes -t :2 -F '#{pane_index} #{pane_current_command}' | grep 
 
 JP can then flip between tabs with `Ctrl-b n`/`Ctrl-b p`, or open the agents window in a separate Ghostty terminal.
 
+### Slate wall — LE1600 sessions as agent displays
+
+**JP's directive (2026-08-19): katana tmux sessions `slate-low` and `slate-mid` are
+reserved for Claude's agents and subagents. `slate-high` is JP's screen — never claim it.**
+(Renamed 2026-08-20 from `le1600-1/-2/-3`; low/mid/high = physical wall position,
+JP's screen is the top slate.)
+
+The diskless Motion LE1600 slates (see `le1600-pxe-farm` memory) auto-attach these
+sessions on katana's **default tmux server** — whatever katana puts in them renders on
+the slate's fbterm glass. They are display-only (no keyboard/mouse/stylus on the
+slates), so nothing there can type into your session, and putting output there can't
+be hijacked. Each panel is **~93×36 cells** — one agent per slate, don't tile panes.
+
+Two usage patterns:
+
+```bash
+# A) Dedicated worker ON the slate — run an interactive agent directly in the session.
+#    Works for standalone agents; the slate becomes that agent's live face.
+tmux send-keys -t slate-low 'cd ~/Projects/<proj> && claude --model fable' Enter
+
+# B) Mirror the dream wall — dream teams live on the SEPARATE `-L dreamteam` socket,
+#    and panes can't be joined across servers. Instead, open a grouped client from
+#    inside the slate session (TMUX= to allow nesting), then aim it at the agents
+#    window from katana:
+tmux -L dreamteam set -g aggressive-resize on   # FIRST — else the 93x36 slate client
+                                                # shrinks the dream session for everyone
+tmux send-keys -t slate-mid 'TMUX= tmux -L dreamteam new-session -t dream -s slatemid' Enter
+tmux -L dreamteam select-window -t slatemid:agents   # grouped session = independent focus
+```
+
+Rules of the wall:
+- **Check someone's watching before narrating to it:** `tmux list-clients -t slate-<pos>`
+  — empty means the slate is off/rebooting; keys still land, nobody sees them. Never
+  *block* on a slate being attached; it's a display, not a dependency.
+- **Cleanup:** pattern A — end the agent (`/exit` or `C-c`) so the slate falls back to
+  its shell; pattern B — `tmux -L dreamteam kill-session -t slatemid` kills only the
+  grouped mirror, never the `dream` session itself.
+- **Never `kill-session -t slate-<pos>`** — the slate's forced-command key recreates it on
+  reconnect, but you'll flash-restart its screen for nothing. Send keys; don't demolish.
+- These sessions are created by tmux-locked ssh keys from stateless slates; they are
+  JP-visible surfaces, not scratch space — treat anything typed there as on-camera.
+
 ### ⛔ Pre-flight: memory budget (admission control)
 
 > Learned 2026-06-30 (VERIFIED from the kernel OOM dump): **59** Claude procs ran across
@@ -462,7 +504,25 @@ Constraints:
 - Selective `git add <file>` only — never `-A` or `.` (hook blocks).
 - Commit in your worktree with conventional commit message.
 - Open PR via `gh pr create --repo <org>/<repo> --base main --head <branch>`.
-- When done: SendMessage (silently — completion is not a speak event) orchestrator with PR URL + ETA.
+
+CI AND MERGE — you push, the lead gates. Four rules, all measured 2026-09-11:
+- ⛔ NEVER watch CI. No `gh pr checks` loop, no Monitor on a PR, no "wait for
+  green". The GitHub quota is per-ACCOUNT: three lanes' 30s pollers exhausted
+  it and every gh call in the fleet failed, including the lead's cascade. A
+  watch also survives a force-push and then never terminates. (no-poll-guard.sh
+  blocks this, but the rule is yours to keep — the guard is the backstop.)
+- `gh api rate_limit` CANNOT warn you. It read 5000 remaining throughout that
+  outage; it does not see GraphQL secondary limits.
+- REST, not GraphQL, for every read: `gh api repos/O/R/...`. `gh issue view`
+  and `gh pr edit` are broken outright by GitHub's projects-classic
+  deprecation — use `gh api repos/O/R/issues/N` and
+  `gh api -X PATCH repos/O/R/pulls/N -F body=@file`.
+- REBASE ONLY ON "go". Do not rebase because main moved — every merge moves it,
+  and a rebase whose PR is not next in the queue is thrown away. Wait for the
+  lead's `go #<pr> <sha>`, rebase then, push, reply "pushed".
+- When done: SendMessage (silently — completion is not a speak event) orchestrator
+  with the PR URL + ETA, then STOP. "pushed" is the whole report; the lead runs
+  `scripts/pr-gate.sh` once and tells you if anything is red.
 - If you hit ANY git error referencing a branch you didn't expect, STOP and
   SendMessage Sandman — do not try to recover. The orchestrator has the
   cross-agent view and will salvage."""
@@ -483,6 +543,106 @@ These belong in every agent prompt and have prevented the failure mode when foll
 > writes outside the worktree (`/tmp` + `*/scratch/*` allowed). It fails **open** on any ambiguity
 > so a bug can't brick an agent; shared-checkout spawns are exempt; kill-switch `worktree.enforce=false`.
 > Prompt discipline 1–4 stays the front line; this is the backstop.
+
+### Merging a wave — the just-in-time cascade (orchestrator only)
+
+Three scripts, REST-only, no polling anywhere:
+
+| script | question it answers |
+|---|---|
+| `scripts/pr-gate.sh <owner/repo> <pr>` | is this PR *actually* green? |
+| `scripts/pr-merge.sh [--dry-run] [--delete-branch] <owner/repo> <pr>` | gate, then squash-merge |
+| `scripts/cascade.sh <owner/repo> <pr>[:<lane>] …` | merge a queue in order, rebasing just in time |
+
+**Why just-in-time.** Every merge invalidates every other open PR that touches a
+generated file — and when a changelog table is numbered, one new entry renumbers
+every row, so the conflict is total rather than local. Rebasing all N PRs after
+each merge is O(N²) rebases, N-1 of them discarded. `cascade.sh` therefore stops
+at the first PR that is behind base and prints the exact ping to send
+(`go #<pr> <sha>`); the lane rebases, pushes, replies "pushed", and you re-run
+the cascade. It is idempotent — already-merged PRs are skipped.
+
+**Two traps the scripts encode, both of which bit us before they existed:**
+
+1. **A blank conclusion is a RUNNING check, not a passing one.** GitHub reports
+   an in-flight check as `{status:"in_progress", conclusion:null}`. A gate that
+   treats "not failed" as "passed" merges mid-run.
+2. **The gate's verdict is its exit code, and a pipe throws it away.**
+   `pr-gate.sh o/r 12 | tail -5` exits 0 — tail's status — always. The gate
+   prints its verdict to stderr as well for exactly this reason; if you pipe it,
+   `set -o pipefail` first.
+
+Exit codes are distinct on purpose: `1` not green, `3` unreadable, `4` no CI at
+all. "Unreadable" and "this repo has no CI" are not "red", and a cascade that
+conflates them either stalls forever or merges blind. For a repo with no CI at
+all (palace-daemon has no `.github/`), pass `--allow-no-ci "<who reviewed it and
+what they ran>"` — the note is required, because the thing standing in for CI is
+a human and the record should say which one. It excuses the *absence* of checks,
+never a failing one.
+
+`--delete-branch` is **opt-in**: a squash merge makes the PR's branch sha a
+non-ancestor of main, so anything citing that sha (a changelog entry, a docs
+manifest) resolves only while the branch ref survives. Deleting it is what
+finally breaks the check, long after the merge that caused it.
+
+## 🔴 REACHING JP: ALL THREE CHANNELS, EVERY AGENT (JP, 2026-09-06)
+
+> ### **SPEECH + SLACK + AN UNMISSABLE TEXT BLOCK. Not one of them. All three.**
+> ### **EVERY AGENT — LANES AND SUBAGENTS INCLUDED, NOT JUST THE ORCHESTRATOR.**
+
+**JP, verbatim:** *"i want all agents to utilize those three if they really need my intervention,
+or need to give me info that i really need, or thery really need info that i truly only have"*
+
+### THE THREE TRIGGERS — any one fires the rule
+```
+1. YOU NEED HIS INTERVENTION     a power cycle · a cable · approval for a one-way step ·
+                                 anything your hands cannot do
+2. HE NEEDS THE INFORMATION      his cell is down · a key is exposed · you are about to do
+                                 something with a blast radius he has not agreed to
+3. ONLY HE HAS THE INFORMATION   "did you pull the power?" · "is that Verizon SIM yours?" ·
+                                 "did you speak continuously during that call?"
+                                 ⭐ MOST OFTEN MISSED. A question only JP can answer is not a
+                                 note to yourself -- it is a BLOCKED LANE.
+```
+
+### THE THREE CHANNELS — each covers a failure the others do not
+```
+1. gnome-speaks   REACHES HIM NOW, if he is at the desk.
+                  POST http://127.0.0.1:7710/speak  {"text":"...","source":"<agent-name>"}
+                  ⛔ never "interrupt": true -- it flushes other agents' queues
+2. SLACK          DURABLE. The ONLY one that survives him being away. DM: U04GRDBE2UC
+                  ⭐ JP's reason, verbatim: "for durability in case im not around"
+3. TEXT BLOCK     bold, emoji, its own block, at the TOP of the reply -- never the bottom
+```
+
+> ### ⛔ **AND THIS IS BROADER THAN ASKS — *ANY* AGENT SPEECH GOES THROUGH THE QUEUE, ALWAYS.**
+> **JP, 2026-09-06: *"if they are speaking they need to use the gnome-speaks queue"*.**
+> ```
+> ✅ ALWAYS   POST http://127.0.0.1:7710/speak   {"text":"...","source":"<agent-name>"}
+> ⛔ NEVER    speak.py directly -- a PreToolUse hook BLOCKS it
+>             (~/.claude/hooks/gnome-speaks-guard.sh)
+> ⛔ NEVER    "interrupt": true -- it flushes OTHER agents' queues
+> ```
+> **Why the queue and not the script:** it **serialises FIFO** (concurrent agents on `speak.py`
+> clobber each other), it **tags every line by `source`**, and it keeps a **readable transcript**
+> (`GET /queue`). ⭐ **Without it, JP hears overlapping fragments and has no record of who said
+> what.** `POST /skip` drops the current line; `POST /stop` drains all.
+> ⚠️ **`speak.py` is a human-only convenience seam now. Not for agents, ever.**
+
+### ⛔ LANES: DO NOT ROUTE A JP-ONLY QUESTION THROUGH YOUR LEAD AND CALL IT DELIVERED
+⚠️ **That is one more hop where it can be buried — and the lead is usually the one producing the
+wall of text it will be buried in.** ✅ **Send it yourself on all three, then tell your lead you sent it.**
+⚠️ **Use YOUR agent name as the `source` so the transcript attributes it correctly.**
+
+⚠️ **WORKED EXAMPLE, and it is why this rule exists:** 2026-09-06, a lead needed one power cycle
+to finish a test, **put the ask at the bottom of three long status reports in a row, and wondered
+why nothing happened.** ⭐ **It already held a memory note saying asks must be *"bold, emoji, own
+block"* — and still buried it for four hours without once reaching for the speech queue.**
+⇒ ⭐⭐ **A DECISION THAT NEEDS JP IS NOT DELIVERED UNTIL IT HAS ACTUALLY REACHED HIM. Writing it
+down is not sending it, and the agent is the worst judge of whether its own output was read.**
+
+⛔ **NOT for routine progress.** **Three channels for every status line is noise, and noise is how
+the real ones get ignored.** ⭐ **The test is JP's own wording: does this REALLY need him?**
 
 ## Manager roles (standing)
 
@@ -620,6 +780,33 @@ spawn whenever the target team has a reusable idle agent, and names the best-fit
 
 > Reinforces `feedback_reuse_idle_agents.md` and `feedback_never_shutdown_active_agents.md`:
 > keep agents alive AND recycle them. Idle agents are a resource, not waste.
+
+## Remote Build Lane (familiar) — heavy compiles leave the orchestrator's box
+
+**JP directive 2026-08-15, the day two 24G build scopes plus the desktop OOM-killed the
+whole fleet on katana** (systemd-oomd took `tmux.service` — every agent and the
+orchestrator in one stroke; swap was 100% full and per-scope caps summed past physical
+RAM). Compiles are the ballooning workload; they now run on **familiar**
+(10.0.6.107 — 24 cores, NVMe, rustup stable installed 2026-08-15).
+
+- **Pattern**: rsync the working tree to a **per-lane** remote dir, run the build there
+  over ssh, propagate the remote tool's own exit code (`exec ssh`). Reference
+  implementation: `emberburrito/tools/remote-cargo.sh` (proven: 724-test workspace,
+  96 crates cold, ~15s wall). Copy that shape into other projects rather than
+  reinventing — its details are load-bearing: `EB_LANE`-keyed dirs so concurrent
+  agents cannot share a remote tree (the shared-index lesson), `--delete` so removals
+  travel, `target/`+`.git/` excluded, rsync failure = UNKNOWN exit 2 distinct from
+  build failure.
+- **What stays local**: cross-compiles whose toolchain lives only on katana (espup/
+  xtensa firmware — those builds are seconds anyway), anything touching the live
+  daemon (e2e, deploys), and quick single-crate checks where sync overhead dominates.
+- **Agent rule**: heavy gates (`cargo test --workspace`, clippy sweeps, mutation
+  sweeps' inner loops) default to the remote lane with `EB_LANE=<agent-name>`. Local
+  heavy builds need a stated reason. `CARGO_BUILD_JOBS=3` + `nice -n10` (env vars
+  BEFORE `nice`) still govern whatever must run locally.
+- **Capacity honesty**: familiar is also the palace-daemon/TTS host (32G RAM, ~20G
+  free) — it takes build bursts, not resident fleets. Check `ssh familiar free -m`
+  before pointing a mutation sweep's whole loop at it.
 
 ## Local-Model Lane (ollama) — mechanical bulk, summaries, embeddings
 

@@ -37,6 +37,7 @@ set -uo pipefail
 ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 CFG="${DREAMTEAM_CONFIG:-$ROOT/config.json}"
 TEAMS_DIR="${DREAMTEAM_TEAMS_DIR:-$HOME/.claude/teams}"
+. "$ROOT/scripts/lib/agent-id.sh"
 
 # ── (a) stdin: tool_name + file_path in ONE jq. Not Edit/Write, or no path → allow.
 INPUT="$(cat 2>/dev/null || true)"
@@ -57,38 +58,9 @@ ENFORCE=$(jq -r 'if .worktree.enforce == false then "false" else "true" end' "$C
 #        first, else walk /proc ancestry for the `--agent-id <name@team>` flag.
 #        Pure bash, max 8 hops, no subprocess per hop. Not found → we're the
 #        orchestrator/main session (no --agent-id) → guard does not apply.
-find_agent_id() {
-  local cur="$1" hops=0 i ppid k v
-  local -a args
-  while [ -n "$cur" ] && [ "$cur" -gt 1 ] 2>/dev/null && [ "$hops" -lt 8 ]; do
-    if [ -r "/proc/$cur/cmdline" ]; then
-      args=()
-      mapfile -d '' -t args < "/proc/$cur/cmdline" 2>/dev/null || args=()
-      for ((i=0; i<${#args[@]}; i++)); do
-        case "${args[i]}" in
-          --agent-id)
-            if [ $((i+1)) -lt ${#args[@]} ] && [ -n "${args[i+1]}" ]; then
-              printf '%s' "${args[i+1]}"; return 0
-            fi ;;
-          --agent-id=*)
-            printf '%s' "${args[i]#--agent-id=}"; return 0 ;;
-        esac
-      done
-    fi
-    # ascend to parent via /proc/<pid>/status (pure bash, no subprocess)
-    ppid=""
-    while read -r k v _; do
-      [ "$k" = "PPid:" ] && { ppid="$v"; break; }
-    done < "/proc/$cur/status" 2>/dev/null
-    case "$ppid" in ''|*[!0-9]*) break ;; esac
-    [ "$ppid" -le 1 ] && break
-    cur="$ppid"; hops=$((hops+1))
-  done
-  return 1
-}
-
-AGENT_ID="${DREAMTEAM_AGENT_ID:-}"
-[ -z "$AGENT_ID" ] && AGENT_ID="$(find_agent_id "$$" 2>/dev/null || true)"
+#        The walk itself lives in lib/agent-id.sh — no-poll-guard.sh needs the
+#        same answer, and two copies of an ancestry walk drift (#53's lesson).
+AGENT_ID="$(dt_agent_id)"
 [ -z "$AGENT_ID" ] && exit 0                       # no teammate identity → orchestrator → allow
 case "$AGENT_ID" in *@*) ;; *) exit 0 ;; esac      # need name@team to resolve → else fail open
 

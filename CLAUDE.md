@@ -6,8 +6,8 @@ Claude Code plugin for memory-gated parallel agent orchestration. Spawns named d
 
 - `plugin.json` — manifest (name, version, description)
 - `config.json` — tunables (perAgentMB, balloonReserveMB, hostReserveMB, maxAgents)
-- `hooks/hooks.json` — PreToolUse gates (reuse → mem-gate chain), PostToolUse accounting, TeammateIdle/SubagentStop roster injection, Pre/PostCompact HANDOFF guard, sync WorktreeCreate provision adapter (returns the worktree path, #26) + async Task*/WorktreeRemove event log, SessionStart/End lifecycle
-- `scripts/` — gate scripts, budget calculator, scope-attach (automatic cgroup containment), dashboard data generator, statusline (wired via user settings `statusLine`), local-model lane seam (optional ollama, `local-model.sh`), shared lib (`lib.sh`; `lib/pane-resolve.sh` = the canonical agent→pane resolver poke/pane-peek/fleet source, #53)
+- `hooks/hooks.json` — PreToolUse gates (reuse → mem-gate chain; `Bash|Monitor` → no-poll-guard), PostToolUse accounting, TeammateIdle/SubagentStop roster injection, Pre/PostCompact HANDOFF guard, sync WorktreeCreate provision adapter (returns the worktree path, #26) + async Task*/WorktreeRemove event log, SessionStart/End lifecycle
+- `scripts/` — gate scripts, budget calculator, scope-attach (automatic cgroup containment), dashboard data generator, statusline (wired via user settings `statusLine`), local-model lane seam (optional ollama, `local-model.sh`), shared lib (`lib.sh`; `lib/pane-resolve.sh` = the canonical agent→pane resolver poke/pane-peek/fleet source, #53; `lib/agent-id.sh` = the canonical "which teammate am I?" /proc walk, shared by worktree-guard + no-poll-guard), PR tooling (`pr-gate.sh` / `pr-merge.sh` / `cascade.sh` — REST-only, no polling)
 - `skills/dreamteam/SKILL.md` — full orchestration skill (~900 lines)
 - `agents/` — custom agent type definitions (luna, morpheus, lucid, nebula)
 - `commands/` — slash commands (dreamteam, dreamteam-status, dreamteam-roster)
@@ -40,6 +40,24 @@ bash tests/run.sh          # runs every suite, exits non-zero on any failure
 - `tests/test-roster.sh` — roster.sh status classification (lead/idle/dead) against a fixture, the **spawn-accounting line-21 crash regression** (restricted `ps` must not crash the hook), and a **defaults-agreement guard** (dashboard-data.sh vs mem-budget.sh fallback defaults must match — catches the 600/4000 drift class; also `.local.reserveMB` across mem-gate/mem-budget/dashboard-data, #37).
 - `tests/test-dashboard.sh` — dashboard-data.sh `--json` output contract (every key dashboard.html reads) + `--inject` render + template standalone sanity.
 - `tests/test-pane-resolve.sh` — the canonical resolver lib (`lib/pane-resolve.sh`, #53): pane sweep, `pr_pane_of` closest-wins PPid walk, and the **structural @handle footer-rule table** (#61 — rejects a pane merely DISPLAYING `@name`, e.g. a command or roster line), re-run through agent-activity.sh's mirrored Python regex so the two implementations can't drift.
+- `tests/test-no-poll-guard.sh` — the CI-polling gate: positive controls (the measured incident
+  command verbatim, a `while` loop, a `statusCheckRollup` poll, a Monitor watch, a sleep-separated
+  repeat) AND negative controls proving the block is not vacuous (the same loop from a
+  non-teammate is allowed — the lead's cascade must never be blocked; a one-shot check; an
+  unrelated loop; the sanctioned REST route; the kill switch; malformed stdin). A missing config
+  file must still ENFORCE — an absent kill switch is not a disabled guard. `gh pr checks --watch`
+  is pinned separately: it is a poller with no loop keyword, so a space-delimited " watch " pattern
+  misses the single most dangerous form.
+- `tests/test-pr-tools.sh` — `pr-gate.sh` / `pr-merge.sh` / `cascade.sh` against a stubbed `gh`
+  (fixture JSON piped through the real `jq` with the caller's real `--jq` filter, mutating calls
+  logged so the tests assert what the tools DID). Pins the two traps: **a blank conclusion is a
+  RUNNING check**, and **the verdict is the exit code, which a pipe throws away** (so it must also
+  reach stderr). Also pins distinct exit codes for not-green / unreadable / no-CI, the default
+  keep-the-branch behaviour, and the cascade's stop-and-ping-the-lane protocol. Also: an EMPTY
+  `DREAMTEAM_GATE_IGNORE` means "ignore nothing" (`${VAR:-default}` would silently restore the
+  defaults — the strictest request becoming the most permissive); a `null` `behind_by` must STOP
+  rather than read as "up to date"; `--allow-no-ci <note>` covers the absence of checks and never
+  a failing one; and `--gated-sha` re-gates when the head moved (the force-push race).
 - `tests/test-worktree-create.sh` — the #26 WorktreeCreate hook adapter (`worktree-create-hook.sh`): asserts **stdout is exactly the worktree path** (the command-hook contract that was missing), cwd-independence, branch-off-HEAD, opt-in git-ignored-input copy (`.claude/worktree-copy`), name sanitization, and a clean **non-zero exit on failure** (no phantom "succeeded but no path").
 
 Quick static checks:
