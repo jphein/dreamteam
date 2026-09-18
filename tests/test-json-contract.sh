@@ -208,6 +208,31 @@ else
   fail "contract doc exists (expected $DOC)"
 fi
 
+# ── hooks.json: `timeout` is in SECONDS ──────────────────────────────────────
+# Every value in this file was once written ms-style (3000, 30000), which meant
+# 50 minutes to 8 hours — so the ceiling those numbers looked like never existed,
+# and three separate files argued in comments that it did. A number is the wrong
+# place to keep a unit, so the unit is asserted instead of documented.
+#
+# Ceiling of 120: the largest legitimate entry is WorktreeCreate at 30 s, and
+# anything three digits long is almost certainly a millisecond value that slipped
+# back in.
+echo "── hooks.json timeout units ────────────"
+bad=$(python3 - <<'PYEOF'
+import json, pathlib
+h = json.loads(pathlib.Path("hooks/hooks.json").read_text())
+bad = [f'{ev}/{e.get("matcher","-")}={x["timeout"]}'
+       for ev, arr in h["hooks"].items() for e in arr for x in e.get("hooks", [])
+       if isinstance(x.get("timeout"), int) and x["timeout"] > 120]
+print(" ".join(bad))
+PYEOF
+)
+if [ -z "$bad" ]; then
+  pass "every hooks.json timeout is a seconds value (<=120)"
+else
+  fail "ms-style timeout(s) back in hooks.json: $bad"
+fi
+
 # ─────────────────────────────────────────────────────────────────────────────
 echo "────────────────────────────────────────"
 printf 'summary: %d passed, %d failed\n' "$PASS" "$FAIL"

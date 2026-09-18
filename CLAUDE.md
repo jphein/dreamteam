@@ -74,4 +74,14 @@ CLAUDE_PLUGIN_ROOT=$PWD scripts/mem-budget.sh   # set CLAUDE_PLUGIN_ROOT so it r
 - Out-of-process `Agent()` subagents DO support `isolation: "worktree"` at spawn time.
 - `EnterWorktree` is blocked for spawned subagents — it's a solo-session tool only.
 - Gate scripts run on every Agent/Task tool call — keep them fast (<100ms).
+  Measured 2026-09-17: every gate runs in 108-208 ms, so the budget is a target
+  rather than a description; `scripts/no-poll-guard.sh` and `worktree-guard.sh`
+  sit at the top of that range because of the /proc ancestry walk.
+- **`timeout` in `hooks/hooks.json` is in SECONDS, not milliseconds.** Every
+  value in that file was once written ms-style (`3000`, `30000`), which meant
+  50 minutes to 8 hours — so the ceiling those numbers looked like never
+  existed. If you add a hook, write `4`, not `4000`. The same mistake was live
+  in `~/.claude/settings.json` (14 entries, one at `130000` ≈ 36 hours) and in
+  the first draft of the mempalace#497 pre-mutation hook, whose README argued
+  the non-existent ceiling was a safety backstop.
 - The dream-name roster is a DERIVED artifact. Source of truth: lexicon's `vocabularies/dreams.yaml` (`dreams.roster`). Add names there, then regenerate the `ROSTER=` regex in `scripts/spawn-standards.sh` with the command in the comment above it — `tests/test-standards.sh` fails on drift. New names must be single lowercase tokens (the gate splits the agent name on the FIRST hyphen) and must not collide with JP's tmux session names.
