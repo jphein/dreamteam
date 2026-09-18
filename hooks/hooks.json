@@ -1,5 +1,5 @@
 {
-  "description": "Dreamteam OOM + reuse guardrails and team-awareness. PreToolUse(Agent|Task) = reuse gate THEN mem gate (either exit 2 blocks); PreToolUse(TaskStop) = check-the-pane reminder. PostToolUse = footprint accounting + pane organizer (async). TeammateIdle/SubagentStop = live roster injection. Pre/PostCompact = HANDOFF snapshot + post-compaction roster re-arm. WorktreeCreate = SYNC provision adapter ONLY, a SINGLE hook (prints the worktree path the runtime consumes, #26/#66 — the runtime consumes exactly one WorktreeCreate hook, so no second hook may share this matcher); Task*/WorktreeRemove/SubagentStart = async event log. SessionStart = roster + crash recovery. SessionEnd = marker clear.",
+  "description": "Dreamteam OOM + reuse guardrails and team-awareness. PreToolUse(Agent|Task) = reuse gate THEN mem gate (either exit 2 blocks); PreToolUse(TaskStop) = check-the-pane reminder. PostToolUse = footprint accounting + pane organizer (async). TeammateIdle/SubagentStop = live roster injection. Pre/PostCompact = HANDOFF snapshot + post-compaction roster re-arm. WorktreeCreate = SYNC provision adapter ONLY, a SINGLE hook (prints the worktree path the runtime consumes, #26/#66 \u2014 the runtime consumes exactly one WorktreeCreate hook, so no second hook may share this matcher); Task*/WorktreeRemove/SubagentStart = async event log. SessionStart = roster + crash recovery. SessionEnd = marker clear. TIMEOUTS ARE IN SECONDS, not milliseconds: every value here was written ms-style (3000, 30000) and therefore meant 50 minutes to 8 hours \u2014 i.e. no effective ceiling at all. Measured on katana 2026-09-17: every gate runs in 108-208 ms, so the seconds values below leave 15-55x headroom.",
   "hooks": {
     "PreToolUse": [
       {
@@ -8,17 +8,17 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/spawn-standards.sh\"",
-            "timeout": 3000
+            "timeout": 3
           },
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/reuse-gate.sh\"",
-            "timeout": 6000
+            "timeout": 6
           },
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/mem-gate.sh\"",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       },
@@ -28,7 +28,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/sendmessage-reminder.sh\"",
-            "timeout": 3000
+            "timeout": 3
           }
         ]
       },
@@ -38,7 +38,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/no-poll-guard.sh\"",
-            "timeout": 4000
+            "timeout": 4
           }
         ]
       },
@@ -48,7 +48,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/worktree-guard.sh\"",
-            "timeout": 4000
+            "timeout": 4
           }
         ]
       }
@@ -60,7 +60,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/spawn-accounting.sh\"",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       },
@@ -70,7 +70,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/pane-organizer.sh\"",
-            "timeout": 3000,
+            "timeout": 3,
             "async": true
           }
         ]
@@ -82,7 +82,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/team-events.sh\"",
-            "timeout": 6000
+            "timeout": 6
           }
         ]
       }
@@ -93,7 +93,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/team-events.sh\"",
-            "timeout": 6000
+            "timeout": 6
           }
         ]
       }
@@ -104,7 +104,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/team-events.sh\"",
-            "timeout": 4000,
+            "timeout": 4,
             "async": true
           }
         ]
@@ -116,7 +116,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/team-events.sh\"",
-            "timeout": 4000,
+            "timeout": 4,
             "async": true
           }
         ]
@@ -128,7 +128,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/team-events.sh\"",
-            "timeout": 4000,
+            "timeout": 4,
             "async": true
           }
         ]
@@ -140,7 +140,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/worktree-create-hook.sh\"",
-            "timeout": 30000
+            "timeout": 30
           }
         ]
       }
@@ -151,7 +151,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/team-events.sh\"",
-            "timeout": 4000,
+            "timeout": 4,
             "async": true
           }
         ]
@@ -163,7 +163,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/compact-guard.sh\"",
-            "timeout": 10000
+            "timeout": 10
           }
         ]
       }
@@ -174,7 +174,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/compact-guard.sh\"",
-            "timeout": 8000
+            "timeout": 8
           }
         ]
       }
@@ -186,7 +186,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/crash-audit.sh\"",
-            "timeout": 8000
+            "timeout": 8
           }
         ]
       }
@@ -197,7 +197,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/cleanup-marker.sh\"",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       }

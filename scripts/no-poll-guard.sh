@@ -37,6 +37,12 @@
 #
 # SAFETY POSTURE — FAIL OPEN. No identity, malformed payload, missing config,
 # non-Linux/no /proc → exit 0. Kill-switch: config `nopoll.enforce=false`.
+#
+# ⚠️ Do not rely on the harness `timeout` as a backstop for anything in here.
+# It is in SECONDS, and every entry in hooks.json was written ms-style until
+# 2026-09-17 — `4000` meant ~67 minutes, not 4 s. The guard's own speed (measured
+# 114 ms) is what keeps it out of the way; the timeout is a last resort, not a
+# budget.
 set -uo pipefail
 ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 CFG="${DREAMTEAM_CONFIG:-$ROOT/config.json}"
