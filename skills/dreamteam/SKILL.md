@@ -940,14 +940,18 @@ JP identifies agents by **voice**, so agents talk to him over the actual audio c
 the speech-to-cli **CLI**, not the MCP tools (`speak`/`listen`/`converse` are **not** wired
 into subagent sessions; the bash seams are). Two scripts, one shared microphone.
 
-**SPEAK — every agent, directly (`scripts/speak.sh`, #9/#17/#52).**
+**SPEAK — every agent, through the gnome-speaks QUEUE (`scripts/speak.sh`, #9/#17/#52; queue route 2026-09-18).**
 ```bash
-bash "$CLAUDE_PLUGIN_ROOT/scripts/speak.sh" "Reverie — PR is green, merging." --voice en-US-EmmaNeural
+bash "$CLAUDE_PLUGIN_ROOT/scripts/speak.sh" "Reverie — PR is green, merging." --voice en-US-EmmaNeural --source reverie
 ```
 Use it at **key moments only** — task start, a blocker that needs JP, completion — first word
-your name. It resolves the voice, applies the offline `azure→piper` fallback (#17) and the
-per-call `--timeout` (#52), and **detaches** (returns instantly, never blocks a hook or a
-turn). Silent no-op if python/tts/creds are absent. Use your persona's **plain `*Neural`** id
+your name. It resolves the voice and **POSTs to the gnome-speaks queue** (`.speech.queueUrl`,
+default `http://127.0.0.1:7710/speak`) tagged with `--source`, so every gate JP relies on applies:
+**quiet hours, video-call mute, the extension master switch**, FIFO serialization, the chronicle.
+A **503 is the gate working — the line is dropped silently by design**; check `state/voice.log`
+for the reason. The direct `tts.py` engine chain (#17) runs only when the queue is unreachable
+**and** `.speech.directFallback` is true (default false). It **detaches** (returns instantly,
+never blocks a hook or a turn). Use your persona's **plain `*Neural`** id
 (the `DragonHD` ids 400 through the CLI in this region). Don't narrate every step — voice is
 for the moments JP would want to look up.
 
