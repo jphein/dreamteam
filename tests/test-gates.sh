@@ -44,6 +44,14 @@ printf 'Mem:          64000        2000        1000           0        1000     
 printf 'Swap:          8191        %s        7614\n' "${FAKE_SWAP_USED:-500}"
 STUB
 chmod +x "$BIN/free"
+# fake `systemctl` -- mem-gate scales its balloon reserve by LIVE dreamteam-*.scope
+# units over 2 GiB (2026-08-15 lesson). Unstubbed, this host's real scopes doubled
+# the balloon inside the fixture and 4b read "need 400+16000MiB" (2026-09-18).
+cat > "$BIN/systemctl" <<'STUB'
+#!/bin/bash
+case "$*" in *show*MemoryCurrent*) echo 0 ;; *) exit 0 ;; esac
+STUB
+chmod +x "$BIN/systemctl"
 
 # fake `pgrep` — dual role:
 #   count mode  (flag contains 'c', e.g. `pgrep -fc claude/versions`) → echo FAKE_PGREP_COUNT

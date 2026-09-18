@@ -27,9 +27,39 @@ PASS=0; FAIL=0
 pass(){ echo "PASS: $1"; PASS=$((PASS+1)); }
 fail(){ echo "FAIL: $1"; FAIL=$((FAIL+1)); }
 
-TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d)"
 BIN="$TMP/bin"; REC="$TMP/tts-rec.log"
 mkdir -p "$BIN" "$TMP/state" "$TMP/teams/faketeam"
+export DREAMTEAM_STATE="$TMP/state"      # speak.sh's voice.log lands here, never in the repo
+# ── fake gnome-speaks QUEUE (2026-09-18: speak.sh posts here FIRST). Records every
+# POST body; answers the code in $QCODE (200 by default, 503 = "gated").
+QLOG="$TMP/queue.log"; QCODE="$TMP/queue.code"; echo 200 > "$QCODE"
+python3 - "$QLOG" "$QCODE" > "$TMP/queue.port" 2>/dev/null <<'PY' &
+import http.server, socketserver, sys
+log, codef = sys.argv[1], sys.argv[2]
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", 0)); body = self.rfile.read(n)
+        open(log, "ab").write(body + b"\n")
+        code = int(open(codef).read().strip() or 200)
+        self.send_response(code); self.send_header("Content-Type", "application/json")
+        self.end_headers(); self.wfile.write(b'{"ok":true}')
+    def log_message(self, *a): pass
+srv = socketserver.TCPServer(("127.0.0.1", 0), H)
+print(srv.server_address[1], flush=True); srv.serve_forever()
+PY
+QPID=$!
+trap 'kill $QPID 2>/dev/null; rm -rf "$TMP"' EXIT
+for _ in $(seq 1 50); do [ -s "$TMP/queue.port" ] && break; sleep 0.1; done
+QPORT="$(cat "$TMP/queue.port" 2>/dev/null)"
+[ -n "$QPORT" ] || { echo "FAIL: fake queue server did not start"; exit 1; }
+QURL="http://127.0.0.1:$QPORT/speak"
+DEAD_QURL="http://127.0.0.1:1/speak"     # nothing listens on port 1 -> connect refused fast
+# Any fixture WITHOUT its own queueUrl must hit the dead port, never the real
+# service on 7710 -- 2026-09-18 the engine-chain fixtures spoke "chain hi" x4
+# through JP's live queue before this line existed.
+export SPEAK_QUEUE_URL="$DEAD_QURL"
+wait_qlines(){ local n="$1" i; for i in $(seq 1 40); do [ -f "$QLOG" ] && [ "$(wc -l < "$QLOG" 2>/dev/null || echo 0)" -ge "$n" ] && return 0; sleep 0.1; done; return 1; }
 
 # fake tts.py — speak.sh runs `python3 <ttsPath>`, so this MUST be python.
 # It records "<AZURE_SPEECH_VOICE>\t<argv...>" per call; never touches Azure/audio.
@@ -40,14 +70,25 @@ with open("$REC", "a") as f:
 PY
 
 # configs (unquoted heredoc → \$TMP expands)
+# cfg-ok: the ENGINE-CHAIN fixture -- queue unreachable + directFallback on, so
+# the pre-2026-09-18 tts.py contract tests still measure the chain. memoryAlerts
+# on so the team-events voice tests still fire (default is off, tested below).
 cat > "$TMP/cfg-ok.json" <<J
-{"speech":{"ttsPath":"$TMP/tts.py"},"memory":{"minAvailableMB":8000},"scope":{"memoryHigh":"20G"}}
+{"speech":{"ttsPath":"$TMP/tts.py","queueUrl":"$DEAD_QURL","directFallback":true,"memoryAlerts":true},"memory":{"minAvailableMB":8000},"scope":{"memoryHigh":"20G"}}
 J
 cat > "$TMP/cfg-missing.json" <<J
-{"speech":{"ttsPath":"$TMP/nope-does-not-exist.py"}}
+{"speech":{"ttsPath":"$TMP/nope-does-not-exist.py","queueUrl":"$DEAD_QURL","directFallback":true}}
 J
 cat > "$TMP/cfg-off.json" <<J
-{"speech":{"enabled":false,"ttsPath":"$TMP/tts.py"}}
+{"speech":{"enabled":false,"ttsPath":"$TMP/tts.py","queueUrl":"$QURL"}}
+J
+# cfg-queue: the DEFAULT route -- a reachable queue, direct fallback left at its default (off).
+cat > "$TMP/cfg-queue.json" <<J
+{"speech":{"ttsPath":"$TMP/tts.py","queueUrl":"$QURL"},"memory":{"minAvailableMB":8000},"scope":{"memoryHigh":"20G"}}
+J
+# cfg-dead: unreachable queue, directFallback at its default (off) -> must stay silent.
+cat > "$TMP/cfg-dead.json" <<J
+{"speech":{"ttsPath":"$TMP/tts.py","queueUrl":"$DEAD_QURL"}}
 J
 CFG_OK="$TMP/cfg-ok.json"
 
@@ -91,6 +132,42 @@ env DREAMTEAM_CONFIG="$TMP/cfg-missing.json" bash "$SPEAK" "hi" --voice davis; r
 env DREAMTEAM_CONFIG="$TMP/cfg-off.json" bash "$SPEAK" "hi" --voice davis; rc=$?
 { [ "$rc" -eq 0 ] && no_rec; } && pass "speak.sh speech.enabled=false → muted (exit 0, ==false switch works)" || fail "mute switch (rc=$rc, rec: $(cat "$REC"))"
 
+echo "── the gnome-speaks queue route (2026-09-18) ────────────────────"
+# Q1) reachable queue: the line is POSTed with text + source + resolved voice; tts.py is NOT run
+: > "$REC"; : > "$QLOG"; echo 200 > "$QCODE"
+env DREAMTEAM_CONFIG="$TMP/cfg-queue.json" bash "$SPEAK" "queue me please" --voice davis --source reverie; rc=$?
+if [ "$rc" -eq 0 ] && wait_qlines 1 && grep -q '"text":"queue me please"' "$QLOG" && grep -q '"source":"reverie"' "$QLOG" \
+   && grep -q '"voice":"en-US-DavisNeural"' "$QLOG" && no_rec; then
+  pass "speak.sh POSTs text+source+voice to the gnome-speaks queue and never runs tts.py"
+else
+  fail "queue route (rc=$rc qlog: $(cat "$QLOG" 2>/dev/null | head -c 200) rec: $(cat "$REC" 2>/dev/null))"
+fi
+# Q1b) default source tag when --source is omitted
+: > "$QLOG"
+env DREAMTEAM_CONFIG="$TMP/cfg-queue.json" bash "$SPEAK" "default tag" --voice davis
+{ wait_qlines 1 && grep -q '"source":"dreamteam"' "$QLOG"; } && pass "speak.sh tags the queue item source=dreamteam by default" || fail "default source tag (qlog: $(cat "$QLOG" 2>/dev/null))"
+# Q2) queue answers 503 (quiet hours / on a call / extension off): silent by design, no tts fallback, reason logged
+: > "$REC"; : > "$QLOG"; echo 503 > "$QCODE"; : > "$TMP/state/voice.log"
+env DREAMTEAM_CONFIG="$TMP/cfg-queue.json" bash "$SPEAK" "gated line" --voice davis
+if wait_qlines 1 && no_rec && { for _ in $(seq 1 30); do grep -q 'gated 503' "$TMP/state/voice.log" 2>/dev/null && break; sleep 0.1; done; grep -q 'gated 503' "$TMP/state/voice.log"; }; then
+  pass "queue 503 (gated) -> silent: no tts.py fallback, voice.log names the gate"
+else
+  fail "503 handling (rec: $(cat "$REC" 2>/dev/null) log: $(cat "$TMP/state/voice.log" 2>/dev/null))"
+fi
+echo 200 > "$QCODE"
+# Q3) queue unreachable + directFallback default (off) -> silent; the reason is logged
+: > "$REC"; : > "$TMP/state/voice.log"
+env DREAMTEAM_CONFIG="$TMP/cfg-dead.json" bash "$SPEAK" "nobody home" --voice davis
+if no_rec && { for _ in $(seq 1 30); do grep -q 'directFallback=false' "$TMP/state/voice.log" 2>/dev/null && break; sleep 0.1; done; grep -q 'directFallback=false' "$TMP/state/voice.log"; }; then
+  pass "queue unreachable + directFallback off (default) -> silent, reason logged"
+else
+  fail "dead-queue default (rec: $(cat "$REC" 2>/dev/null) log: $(cat "$TMP/state/voice.log" 2>/dev/null))"
+fi
+# Q4) master mute still wins before the queue is even tried
+: > "$QLOG"
+env DREAMTEAM_CONFIG="$TMP/cfg-off.json" bash "$SPEAK" "muted" --voice davis
+{ sleep 0.4; [ ! -s "$QLOG" ]; } && pass "speech.enabled=false -> nothing reaches the queue" || fail "mute reached the queue ($(cat "$QLOG"))"
+
 echo "── engine fallback chain (#17): SPEECH_ENGINE seam + azure→piper ──"
 
 # Engine-aware fake tts.py: records "<SPEECH_ENGINE>\t<AZURE_SPEECH_VOICE>\t
@@ -111,10 +188,10 @@ with open("$RECE", "a") as f:
 sys.exit(1 if eng and eng in fail.split(",") else 0)
 PY
 cat > "$TMP/cfg-chain.json" <<J
-{"speech":{"ttsPath":"$TMP/tts-eng.py","engine":"azure","fallback":["piper"]}}
+{"speech":{"ttsPath":"$TMP/tts-eng.py","engine":"azure","fallback":["piper"],"directFallback":true}}
 J
 cat > "$TMP/cfg-chain-override.json" <<J
-{"speech":{"ttsPath":"$TMP/tts-eng.py","engine":"azure","fallback":["piper"],"voices":{"davis":{"piper":"en_US-custom-low"}}}}
+{"speech":{"ttsPath":"$TMP/tts-eng.py","engine":"azure","fallback":["piper"],"directFallback":true,"voices":{"davis":{"piper":"en_US-custom-low"}}}}
 J
 # poll an arbitrary record file for >= n lines (chain fires detached, like speak).
 wait_file(){ local f="$1" n="$2" i; for i in $(seq 1 40); do [ -f "$f" ] && [ "$(wc -l < "$f" 2>/dev/null || echo 0)" -ge "$n" ] && return 0; sleep 0.1; done; return 1; }
@@ -175,7 +252,7 @@ open("$RECS", "a").write("DONE\n")
 PY
 # config cap is deliberately LONG (180) so any truncation must come from the flag.
 cat > "$TMP/cfg-slow.json" <<J
-{"speech":{"ttsPath":"$TMP/tts-slow.py","timeoutSec":180}}
+{"speech":{"ttsPath":"$TMP/tts-slow.py","timeoutSec":180,"directFallback":true}}
 J
 
 # 10) explicit --timeout wins over config: 1s cap KILLS a 2s synth (config says 180).
@@ -248,6 +325,16 @@ run_ev 'FAKE_SCOPE=pressure FAKE_AVAIL=20000' "$STOP" >/dev/null
 { wait_lines 1 && grep -qi 'scope pressure' "$REC" && grep -q 'en-US-DavisNeural' "$REC"; } \
   && pass "team-events SCOPE PRESSURE fires the spoken davis line" || fail "scope pressure did not speak (rec: $(tr '\t' '|' < "$REC" 2>/dev/null))"
 
+# memoryAlerts DEFAULT (absent) → RED does NOT speak (JP 2026-09-18: the memory gate
+# "should not announce anyway"); the desktop notification and stdout tier line still fire.
+rm -f "$TMP/state/.last-notify"; : > "$REC"; : > "$QLOG"
+cat > "$TMP/cfg-noalerts.json" <<J
+{"speech":{"ttsPath":"$TMP/tts.py","queueUrl":"$QURL"},"memory":{"minAvailableMB":8000},"scope":{"memoryHigh":"20G"}}
+J
+OUT="$(echo "$STOP" | env FAKE_AVAIL=5000 DREAMTEAM_STATE="$TMP/state" DREAMTEAM_TEAMS_DIR="$TMP/teams" \
+    DREAMTEAM_CONFIG="$TMP/cfg-noalerts.json" CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$BIN:$PATH" bash "$EVENTS")"
+case "$OUT" in *"RED TIER"*) pass "memoryAlerts default: RED tier line still on stdout";; *) fail "RED tier stdout missing with memoryAlerts default ($OUT)";; esac
+{ sleep 0.4; [ ! -s "$REC" ] && [ ! -s "$QLOG" ]; } && pass "memoryAlerts default (off): RED does not speak -- not to tts, not to the queue" || fail "RED spoke with memoryAlerts off (rec: $(cat "$REC" 2>/dev/null) qlog: $(cat "$QLOG" 2>/dev/null))"
 # DREAMTEAM_TEST set → voice suppressed on RED (the suite never speaks).
 rm -f "$TMP/state/.last-notify"; : > "$REC"
 run_ev 'FAKE_AVAIL=5000 DREAMTEAM_TEST=1' "$STOP" >/dev/null

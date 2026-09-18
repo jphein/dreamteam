@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # dreamteam — speak.sh: fire-and-forget VOICE seam for attention events.
-# Contract:  speak.sh "<text>" [--voice <voice-or-alias>] [--timeout <sec>]
+# Contract:  speak.sh "<text>" [--voice <voice-or-alias>] [--timeout <sec>] [--source <tag>]
+#
+# ROUTE (2026-09-18): the gnome-speaks QUEUE first (POST .speech.queueUrl, default
+# http://127.0.0.1:7710/speak) — every gate JP relies on (quiet hours, video-call
+# mute, extension master switch, FIFO, chronicle) lives there. 503 = gated, stay
+# silent. The direct tts.py engine chain below runs ONLY when the queue is
+# unreachable AND .speech.directFallback is true (default false). Outcomes are
+# logged one line each to $STATE/voice.log.
 #
 # AGENT USAGE (#71): dream agents speak DIRECTLY through this bash seam — the MCP
 # voice tools are NOT wired into subagent sessions, but speak.sh is bash-invokable by
@@ -55,6 +62,8 @@ while [ $# -gt 0 ]; do
     --voice=*)   VOICE="${1#--voice=}"; shift ;;
     --timeout)   TIMEOUT_FLAG="${2:-}"; shift 2 2>/dev/null || shift ;;
     --timeout=*) TIMEOUT_FLAG="${1#--timeout=}"; shift ;;
+    --source)    SPEAK_SOURCE="${2:-}"; shift 2 2>/dev/null || shift ;;
+    --source=*)  SPEAK_SOURCE="${1#--source=}"; shift ;;
     *)           shift ;;
   esac
 done
@@ -62,6 +71,29 @@ done
 # Master mute (default on). ==false-safe: jq's // treats false as empty, which
 # would make speech.enabled=false unreachable (the reuse-gate/scope-attach bug).
 [ "$(jq -r 'if .speech.enabled == false then "false" else "true" end' "$CFG" 2>/dev/null || echo true)" = "false" ] && exit 0
+# ── THE QUEUE FIRST (JP, 2026-09-06: "if they are speaking they need to use the
+# gnome-speaks queue"; 2026-09-18: "nothing should ever speak when I'm on a video
+# call ... including this dreamteam memory gate thingy"). Every gnome-speaks gate
+# -- quiet hours, video-call mute, the extension master switch, FIFO
+# serialization, the chronicle -- lives on POST /speak. Calling tts.py directly
+# (what this seam did until now) bypassed all of them and spoke into a call.
+# Contract: 2xx = queued, done. 503 = gated (quiet hours / on a call / extension
+# off) -- STAY SILENT, that is the gate working. Other HTTP answers (400 bad
+# voice, 429 queue full) = the service is up and said no -- silent. Only an
+# UNREACHABLE queue (curl exit != 0) may fall through to the direct engine
+# chain, and only when .speech.directFallback is true (default false: a host
+# with no gnome-speaks has no call detection either, so direct speech there
+# is the exact hazard this exists to remove). One line per outcome is appended
+# to $STATE/voice.log so "why didn't it speak?" has an answer.
+QUEUE_URL="$(jq -r '.speech.queueUrl // empty' "$CFG" 2>/dev/null || true)"
+[ -z "$QUEUE_URL" ] && QUEUE_URL="${SPEAK_QUEUE_URL:-}"   # env: a test suite pins a dead port here
+[ -z "$QUEUE_URL" ] && QUEUE_URL="http://127.0.0.1:7710/speak"
+DIRECT_FALLBACK="$(jq -r 'if .speech.directFallback == true then "true" else "false" end' "$CFG" 2>/dev/null || echo false)"
+SOURCE="${SPEAK_SOURCE:-}"
+[ -z "$SOURCE" ] && SOURCE="$(jq -r '.speech.source // empty' "$CFG" 2>/dev/null || true)"
+[ -z "$SOURCE" ] && SOURCE="dreamteam"
+STATE="${DREAMTEAM_STATE:-$ROOT/state}"
+VOICE_LOG="$STATE/voice.log"
 
 # Resolve tts.py: config .speech.ttsPath override → default; expand a leading ~.
 TTS="$(jq -r '.speech.ttsPath // empty' "$CFG" 2>/dev/null || true)"
@@ -109,9 +141,17 @@ resolve_voice(){
 # Env var each engine reads for its voice (mirrors AZURE_SPEECH_VOICE).
 voice_env_name(){ case "$1" in azure) echo AZURE_SPEECH_VOICE ;; piper) echo PIPER_VOICE ;; *) echo SPEECH_VOICE ;; esac; }
 
+# Queue payload: the text, the source tag (gnome-speaks tags every line and
+# transcript by it), and the resolved AZURE voice id so the persona identity
+# (Davis for the orchestrator) survives the hop -- the service sanitizes it.
+QVOICE="$(resolve_voice azure)"
+PAYLOAD="$(jq -cn --arg t "$TEXT" --arg s "$SOURCE" --arg v "$QVOICE" \
+  '{text:$t, source:$s} + (if $v != "" then {voice:$v} else {} end)' 2>/dev/null || true)"
+[ -n "$PAYLOAD" ] || PAYLOAD="{\"text\":$(printf '%s' "$TEXT" | jq -Rs .),\"source\":\"$SOURCE\"}"
+mkdir -p "$STATE" 2>/dev/null || true
 # Flatten the resolved chain into positional args for the detached child:
-#   TEXT PY TTS N  then N × (engine, voiceEnvName, voiceId)
-ARGS=("$TEXT" "$PY" "$TTS" "${#CHAIN[@]}")
+#   PAYLOAD URL DIRECT LOG  TEXT PY TTS N  then N × (engine, voiceEnvName, voiceId)
+ARGS=("$PAYLOAD" "$QUEUE_URL" "$DIRECT_FALLBACK" "$VOICE_LOG" "$TEXT" "$PY" "$TTS" "${#CHAIN[@]}")
 for eng in "${CHAIN[@]}"; do
   ARGS+=("$eng" "$(voice_env_name "$eng")" "$(resolve_voice "$eng")")
 done
@@ -133,7 +173,25 @@ case "$TIMEOUT" in ''|*[!0-9]*) TIMEOUT=180 ;; esac      # 3) default
 # The child walks the chain, stopping at the first engine that exits 0. Data is
 # passed POSITIONALLY (never interpolated into code) so arbitrary TEXT is injection-safe.
 # ($TIMEOUT is the sole exception — a validated integer, baked in at construction.)
-CHILD='text=$1; py=$2; tts=$3; n=$4; shift 4; i=0
+CHILD='payload=$1; url=$2; direct=$3; logf=$4; text=$5; py=$6; tts=$7; n=$8; shift 8
+vlog(){ printf "%s %s | %s\n" "$(date +%FT%T)" "$1" "$(printf "%s" "$text" | head -c 80)" >> "$logf" 2>/dev/null || true; }
+if command -v curl >/dev/null 2>&1; then
+  code=$(curl -s -o /dev/null -w "%{http_code}" -m 4 -H "Content-Type: application/json" \
+           -X POST --data-binary "$payload" "$url" 2>/dev/null); rc=$?
+  if [ "$rc" -eq 0 ] && [ -n "$code" ]; then
+    case "$code" in
+      2*)  vlog "queued $code"; exit 0 ;;
+      503) vlog "gated 503 (quiet hours / on a call / extension off) -- silent"; exit 0 ;;
+      *)   vlog "queue answered $code -- silent"; exit 0 ;;
+    esac
+  fi
+  vlog "queue unreachable (curl rc=$rc)"
+else
+  vlog "no curl -- cannot reach the queue"
+fi
+[ "$direct" = true ] || { vlog "directFallback=false -- silent"; exit 0; }
+vlog "directFallback=true -- engine chain"
+i=0
 while [ "$i" -lt "$n" ]; do
   eng=$1; ven=$2; vid=$3; shift 3; i=$((i+1))
   if env SPEECH_ENGINE="$eng" "$ven=$vid" timeout -k 2 '"$TIMEOUT"' "$py" "$tts" "$text" </dev/null >/dev/null 2>&1; then

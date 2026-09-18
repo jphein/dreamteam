@@ -110,8 +110,13 @@ notify_red() {
   command -v notify-send >/dev/null 2>&1 \
     && DBUS_SESSION_BUS_ADDRESS="$bus" DISPLAY="${DISPLAY:-:0}" \
        notify-send -u critical "dreamteam" "$1" >/dev/null 2>&1 || true
-  # channel 2 — voice (SAME attention event; detached so it never blocks; quiet in tests)
-  if [ -z "${DREAMTEAM_TEST:-}" ] && [ -n "${2:-}" ]; then
+  # channel 2 — voice (SAME attention event; detached so it never blocks; quiet in tests).
+  # OPT-IN since 2026-09-18 (.speech.memoryAlerts, default false): JP -- "this
+  # dreamteam memory gate thingy that kept announcing ... should not announce
+  # anyway". The desktop notification and the tier blackboard still fire.
+  local cfg="${DREAMTEAM_CONFIG:-$ROOT/config.json}"
+  if [ -z "${DREAMTEAM_TEST:-}" ] && [ -n "${2:-}" ] \
+     && [ "$(jq -r 'if .speech.memoryAlerts == true then "true" else "false" end' "$cfg" 2>/dev/null || echo false)" = "true" ]; then
     # #52: cap the attention utterance short — it's one sentence, and a hung synth
     # must not pin a proc for speak.sh's 180s manual default at the worst moment.
     # (--timeout <sec> is reverie's speak.sh contract; ignored until that lands.)
