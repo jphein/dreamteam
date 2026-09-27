@@ -80,7 +80,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/idle-assign.sh context\"",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/idle-assign.sh\" context",
             "timeout": 3
           }
         ]
@@ -96,7 +96,7 @@
           },
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/idle-assign.sh idle\"",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/idle-assign.sh\" idle",
             "timeout": 4
           }
         ]
@@ -112,7 +112,7 @@
           },
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/idle-assign.sh idle\"",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/idle-assign.sh\" idle",
             "timeout": 4
           }
         ]
