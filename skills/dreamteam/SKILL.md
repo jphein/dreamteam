@@ -734,6 +734,10 @@ from lexicon's durable-agent catalog — **one catalog, no dreamteam-side roster
   to `active`.
 - **Sandman** is `spawnable: false` in the catalog (the lead persona, Davis voice). **Ember** is the
   local model (`kind: local-model`, en-GB-Ada) — never a Claude agent.
+- **Not spawnable ⇒ not reusable:** `spawnable` is false for `kind: orchestrator`, `kind: local-model`,
+  any non-`active` status, or `spawnable: false`. Such rows get `"spawnable": false` (key present
+  only then), and `idle-agents.sh` never lists them as reusable — `--json` (the reuse gate's input)
+  omits them; the human view shows them in a separate "not reusable" block with their flag.
 - Agents are tools owned by a named human: not board members, no vote, no signature (org design:
   `techempower-admin/strategy/org-structure-2026-09.md`).
 

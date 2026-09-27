@@ -22,8 +22,8 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d)"
-FAKE_PID=""
-cleanup(){ [ -n "$FAKE_PID" ] && kill "$FAKE_PID" 2>/dev/null; rm -rf "$TMP"; }
+FAKE_PID=""; FAKE_PIDS=()
+cleanup(){ [ -n "$FAKE_PID" ] && kill "$FAKE_PID" 2>/dev/null; for p in "${FAKE_PIDS[@]}"; do kill "$p" 2>/dev/null; done; rm -rf "$TMP"; }
 trap cleanup EXIT INT TERM
 
 PASS=0; FAIL=0
@@ -46,6 +46,7 @@ agents:
   - {id: money-lane, current_name: money-lane, kind: session-lane, match: "money-*", department: finance-compliance, owner: jp, escalates_to: jp}
   - {id: nebula-legal, current_name: nebula-legal, kind: persona, status: proposed, department: legal-compliance, owner: jp, escalates_to: jp}
   - {id: nebula, current_name: nebula, kind: persona, status: active, department: development, owner: jp, escalates_to: sandman}
+  - {id: ember, current_name: ember, kind: local-model, status: active, department: technology, owner: jp, escalates_to: sandman}
 EOF
 export DREAMTEAM_AGENTS_CATALOG="$TMP/agents.yaml"
 
@@ -67,6 +68,16 @@ LJ() { L "$1" --json | jq -r --arg n "$1" ".[\$n]${2:+ | $2}"; }
 [ "$(LJ nebula-research .spawnable)" = "true" ]       && ok "active persona ⇒ spawnable true" || bad "active spawnable"
 [ "$(LJ sandman .spawnable)" = "false" ]              && ok "spawnable:false honoured (sandman)" || bad "sandman spawnable"
 L nebula-legal | grep -q "\[proposed — not yet spawnable\]" && ok "human line flags a proposed role" || bad "human proposed flag: $(L nebula-legal)"
+# Oracle block on #98: kind local-model / orchestrator were ignored by resolve()
+[ "$(LJ ember .spawnable)" = "false" ]                && ok "local-model (ember) ⇒ spawnable false" || bad "ember spawnable: $(LJ ember .spawnable)"
+[ "$(LJ ember-x .spawnable)" = "false" ]              && ok "ember-* (dream prefix) ⇒ spawnable false" || bad "ember-x spawnable: $(LJ ember-x .spawnable)"
+L ember | grep -qF "[local model — never a Claude agent]" && ok "human line flags a local model" || bad "ember flag: $(L ember)"
+L sandman-x | grep -qF "[not spawnable: orchestrator]"    && ok "human line flags an orchestrator" || bad "sandman flag: $(L sandman-x)"
+L morpheus-org | grep -q "\[" && bad "spawnable role carries no flag: $(L morpheus-org)" || ok "spawnable role carries no flag"
+EJ="$(python3 -c "
+import sys, json; sys.path.insert(0,'$ROOT/scripts/lib'); import org_lookup as o
+print(json.dumps([o.enrich({'name':'ember-x'}).get('spawnable'), 'spawnable' in o.enrich({'name':'morpheus-org'})]))")"
+[ "$EJ" = "[false, false]" ] && ok "enrich: spawnable:false added only when false" || bad "enrich spawnable: $EJ"
 
 # ── escalation ───────────────────────────────────────────────────────────────────
 [ "$(LJ hypnos-agent-manager '.chain|join(">")')" = "sandman>jp" ] && ok "chain follows agents to the human" || bad "chain: $(LJ hypnos-agent-manager '.chain|join(">")')"
@@ -147,6 +158,41 @@ IJ_OFF="$(DREAMTEAM_AGENTS_CATALOG=off IA)"
 [ "$(printf '%s' "$IJ_OFF" | jq -r '.[0] | has("owner")')" = "false" ] && ok "idle-agents: no org keys when off" || bad "idle off leaked: $IJ_OFF"
 [ "$(printf '%s' "$IJ" | jq -S 'map(del(.department,.owner,.escalates_to,.escalation))')" = "$(printf '%s' "$IJ_OFF" | jq -S .)" ] \
   && ok "idle-agents: pre-existing fields unchanged" || bad "idle fields changed"
+
+# ── idle-agents: a non-spawnable role is NEVER offered as reusable (Oracle, #98) ──
+# ember-x (local model), sandman-x (orchestrator), nebula-legal (proposed) are
+# idle and alive; only morpheus-x may appear in --json (what the reuse gate reads).
+mkdir -p "$TMP/teams/t2"
+MEMBERS='{"name":"team-lead","agentType":"team-lead","agentId":"lead-y","isActive":true}'
+for n in ember-x sandman-x nebula-legal morpheus-x; do
+  id="orgmap-$$-$n@t2"
+  bash -c 'sleep 30; :' "agent-id $id" & FAKE_PIDS+=("$!")
+  MEMBERS="$MEMBERS,{\"name\":\"$n\",\"agentType\":\"x\",\"agentId\":\"$id\",\"isActive\":false,\"cwd\":\"/w\",\"prompt\":\"Task: $n\"}"
+done
+printf '{"members":[%s]}\n' "$MEMBERS" > "$TMP/teams/t2/config.json"
+sleep 0.3 2>/dev/null || true
+IA2() { DREAMTEAM_TEAMS_DIR="$TMP/teams" bash "$ROOT/scripts/idle-agents.sh" --team t2 "$@"; }
+[ "$(IA2 --json | jq -c 'map(.name)')" = '["morpheus-x"]' ] \
+  && ok "idle-agents --json: ember-x / sandman-x / proposed lane NOT reusable" || bad "non-spawnable offered: $(IA2 --json | jq -c 'map(.name)')"
+[ "$(DREAMTEAM_AGENTS_CATALOG=off IA2 --json | jq 'length')" = "4" ] \
+  && ok "idle-agents --json: no catalog ⇒ all four listed (legacy)" || bad "off json: $(DREAMTEAM_AGENTS_CATALOG=off IA2 --json)"
+[ "$(DREAMTEAM_AGENTS_CATALOG=off IA2 --json)" = "$(DREAMTEAM_AGENTS_CATALOG="$TMP/missing.yaml" IA2 --json)" ] \
+  && [ "$(DREAMTEAM_AGENTS_CATALOG=off IA2)" = "$(DREAMTEAM_AGENTS_CATALOG="$TMP/missing.yaml" IA2)" ] \
+  && ok "idle-agents: off ≡ missing catalog (json + human)" || bad "idle off vs missing differ"
+DREAMTEAM_AGENTS_CATALOG=off IA2 | grep -q "not reusable" && bad "no held block without a catalog" || ok "no held block without a catalog"
+IH="$(IA2)"
+REUSE_BLOCK="$(printf '%s\n' "$IH" | sed '/^not reusable/,$d')"
+HELD_BLOCK="$(printf '%s\n' "$IH" | sed -n '/^not reusable/,$p')"
+printf '%s' "$REUSE_BLOCK" | grep -qE "ember-x|sandman-x|nebula-legal" && bad "human reusable block lists a non-spawnable role: $IH" || ok "human reusable block: only spawnable roles"
+printf '%s' "$HELD_BLOCK" | grep "ember-x" | grep -qF "[local model — never a Claude agent]" \
+  && printf '%s' "$HELD_BLOCK" | grep "sandman-x" | grep -qF "[not spawnable: orchestrator]" \
+  && printf '%s' "$HELD_BLOCK" | grep "nebula-legal" | grep -qF "[proposed — not yet spawnable]" \
+  && ok "human: held roles visible in a separate block with their flags" || bad "held block: $IH"
+# a team of ONLY non-spawnable idle agents ⇒ [] so the reuse gate allows the spawn
+mkdir -p "$TMP/teams/t3"
+jq '.members |= map(select(.name != "morpheus-x"))' "$TMP/teams/t2/config.json" > "$TMP/teams/t3/config.json"
+[ "$(DREAMTEAM_TEAMS_DIR="$TMP/teams" bash "$ROOT/scripts/idle-agents.sh" --team t3 --json)" = "[]" ] \
+  && ok "idle-agents: team of only non-spawnable idle ⇒ [] (reuse gate allows the spawn)" || bad "t3 not empty"
 
 echo "== test-org-map: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

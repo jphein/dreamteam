@@ -162,7 +162,9 @@ idle-agents.sh [--team NAME] [--task "text"] [--json]
 
 **Top-level: a JSON `array`** (not an object), possibly empty `[]`. It contains
 **only idle + alive** members — team-lead, `active`, and `dead` members are
-excluded — **sorted by descending `score`**. The array carries **no team
+excluded, and so is any member the optional org map resolves to a non-spawnable
+role (orchestrator, local model, non-`active` status; see `scripts/lib/org_lookup.py`)
+— **sorted by descending `score`**. The array carries **no team
 identifier** — see *Team selection & wrong-team detection* before consuming it
 programmatically.
 

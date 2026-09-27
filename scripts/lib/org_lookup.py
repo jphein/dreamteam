@@ -35,6 +35,13 @@ STATUS
   lexicon does not validate `status`; by convention anything other than
   "active" (e.g. "proposed") is a designed-but-unapproved role. resolve()
   reports it and sets spawnable=false; enrich() adds `org_status` only then.
+
+SPAWNABLE
+  false when the entry says spawnable: false, when status is not "active", or
+  when kind is "orchestrator" or "local-model" (ember: a Qwen lane, never a
+  Claude agent). enrich() adds `"spawnable": false` ONLY when false, and
+  idle-agents.sh never offers such a row as reusable (so the reuse gate cannot
+  point a spawn at it).
 """
 import fnmatch
 import json
@@ -146,9 +153,33 @@ def resolve(name, agents=None):
         # lexicon does not validate status values; "proposed" (or anything other
         # than active) means the role is designed but NOT yet approved to spawn.
         "status": a.get("status") or None,
-        "spawnable": bool(a.get("spawnable", True)) and (a.get("status") or "active") == "active",
+        "kind": a.get("kind") or None,
+        # spawnable = may a Claude agent be spawned (or reused) under this role?
+        # Never for an orchestrator (the lead is not a worker), never for a
+        # local model (ember is a Qwen lane on familiar, not a Claude agent),
+        # never for a role that is not yet active, and never when the catalog
+        # says spawnable: false outright.
+        "spawnable": (a.get("spawnable", True) is not False
+                      and (a.get("status") or "active") == "active"
+                      and a.get("kind") not in _NOT_SPAWNABLE_KINDS),
     }
     return out
+
+
+_NOT_SPAWNABLE_KINDS = ("orchestrator", "local-model")
+
+
+def spawn_flag(info):
+    """Why a resolved role is not spawnable, as a bracketed tag; "" when it is."""
+    if not info or info.get("spawnable", True):
+        return ""
+    if info.get("kind") == "local-model":
+        return "[local model — never a Claude agent]"
+    if info.get("kind") == "orchestrator":
+        return "[not spawnable: orchestrator]"
+    if info.get("status") and info["status"] != "active":
+        return "[%s — not yet spawnable]" % info["status"]
+    return "[not spawnable]"
 
 
 def enrich(row, name_key="name", agents=None):
@@ -161,6 +192,8 @@ def enrich(row, name_key="name", agents=None):
         row["escalation"] = {"chain": info["chain"], "human": info["human"], "channel": info["channel"]}
         if info.get("status") and info["status"] != "active":
             row["org_status"] = info["status"]
+        if not info["spawnable"]:
+            row["spawnable"] = False   # additive: the key appears ONLY when false
     return row
 
 
@@ -179,6 +212,7 @@ def summary(info):
             esc += " (%s)" % info["channel"]
         parts.append("escalate " + esc)
     line = " · ".join(parts)
-    if info.get("status") and info["status"] != "active":
-        line += " [%s — not yet spawnable]" % info["status"]
+    flag = spawn_flag(info)
+    if flag:
+        line += (" " if line else "") + flag
     return line
