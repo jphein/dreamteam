@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # idle-assign.sh: freed agent → systemMessage with held context + ranked backlog; deduped per stretch.
 set -u; cd "$(dirname "$0")/.."
-S=scripts/idle-assign.sh; export CLAUDE_PROJECT_DIR=$(mktemp -d); mkdir -p "$CLAUDE_PROJECT_DIR/scratch/dreamteam"
-CTX="$HOME/.claude/state/agent-context.json"; cp "$CTX" "$CTX.bak-test" 2>/dev/null || true
+S=$PWD/scripts/idle-assign.sh; export HOME=$(mktemp -d) CLAUDE_PROJECT_DIR=$(mktemp -d); mkdir -p "$HOME/.claude/state" "$HOME/.claude/teams"; mkdir -p "$CLAUDE_PROJECT_DIR/scratch/dreamteam"
 fail=0; ok(){ echo "  ok: $1"; }; bad(){ echo "  FAIL: $1"; fail=1; }
 bash $S backlog add "[lifeline] fetch register items" >/dev/null; bash $S backlog add "[tapstone] rebase vr-m1b-s" >/dev/null
 echo '{"tool_name":"Agent","tool_input":{"name":"ia-test","prompt":"IDLE-CHECKED: x\nYou are Lucid, project lifeline."}}' | bash $S context
@@ -19,18 +18,14 @@ out4=$(echo '{"hook_event_name":"TeammateIdle","teammate_name":"team-lead"}' | b
 # the guard must fail once on purpose: an agent with no backlog still gets announced (message is the mechanism)
 : > "$CLAUDE_PROJECT_DIR/scratch/dreamteam/backlog.md"; echo '{"tool_name":"Agent","tool_input":{"name":"ia-empty","prompt":"x"}}' | bash $S context
 out5=$(echo '{"hook_event_name":"TeammateIdle","teammate_name":"ia-empty"}' | bash $S idle); grep -q 'backlog empty' <<<"$out5" && ok "empty backlog still announces" || bad "empty backlog: $out5"
-python3 - <<'PY'
-import json,os; p=os.path.expanduser('~/.claude/state/agent-context.json'); d=json.load(open(p)); [d.pop(k,None) for k in ('ia-test','ia-empty')]; json.dump(d,open(p,'w'))
-PY
 # robustness (Oracle, #95 review): wrong-shape state must not crash; one-shot subagents are never "free"
-CTXF="$HOME/.claude/state/agent-context.json"; cp "$CTXF" "$CTXF.rb" 2>/dev/null || true
-bad=0; for junk in '[]' '"x"' '{"w1":"str"}'; do echo "$junk" > "$CTXF"
+CTXF="$HOME/.claude/state/agent-context.json"
+bad=0; for junk in '[]' '"x"' '{"w1":"str"}' '{"w1":{"ts":"notanumber"}}'; do echo "$junk" > "$CTXF"
   echo '{"tool_name":"SendMessage","tool_input":{"to":"z","message":"m"}}' | bash $S context >/dev/null 2>&1 || bad=1
   echo '{"hook_event_name":"TeammateIdle","teammate_name":"z"}' | bash $S idle >/dev/null 2>&1 || bad=1; done
 [ $bad = 0 ] && ok "wrong-shape state file tolerated ([], \"x\", {w1:str})" || bad "wrong-shape state crashed the hook"
-cp "$CTXF.rb" "$CTXF" 2>/dev/null; rm -f "$CTXF.rb"
 o=$(echo '{"hook_event_name":"SubagentStop","agent_id":"a1b2c3","agent_type":"general-purpose"}' | bash $S idle)
 [ -z "$o" ] && ok "one-shot subagent stop is silent" || bad "one-shot subagent announced as free: $o"
 o=$(echo '{"hook_event_name":"SubagentStop","agent_id":"ghost-x@nosuchteam"}' | bash $S idle)
 [ -z "$o" ] && ok "agent_id not in any team config is silent" || bad "unknown agent_id announced"
-rm -rf "$CLAUDE_PROJECT_DIR" "$CTX.bak-test"; [ $fail = 0 ] && echo "test-idle-assign: PASS" || { echo "test-idle-assign: FAIL"; exit 1; }
+rm -rf "$CLAUDE_PROJECT_DIR" "$HOME"; [ $fail = 0 ] && echo "test-idle-assign: PASS" || { echo "test-idle-assign: FAIL"; exit 1; }
