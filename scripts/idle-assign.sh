@@ -58,7 +58,10 @@ with open(ctx_path, "r+") as f:
     fcntl.flock(f, fcntl.LOCK_EX)
     try: ctx = json.load(f)
     except Exception: ctx = {}
-    ctx = {k: v for k, v in ctx.items() if now - v.get("ts", 0) < 24 * 3600}
+    # A valid-JSON state file of the wrong shape ([], "x", {"w1": "str"}) used to crash every
+    # Agent/SendMessage call (AttributeError). Treat anything but a dict of dicts as empty.
+    if not isinstance(ctx, dict): ctx = {}
+    ctx = {k: v for k, v in ctx.items() if isinstance(v, dict) and now - v.get("ts", 0) < 24 * 3600}
 
     if mode == "context":
         tool = ev.get("tool_name") or ""
@@ -82,9 +85,20 @@ with open(ctx_path, "r+") as f:
         sys.exit(0)
 
     # mode == idle
-    name = ev.get("teammate_name") or ev.get("agent_name") or ev.get("subagent_name") or ""
-    if not name and ev.get("agent_id"):
-        name = str(ev["agent_id"]).split("@")[0]
+    # Only a TEAMMATE can be reused. A one-shot subagent's SubagentStop carries no teammate name
+    # (only agent_id/agent_type), and a stopped one-shot is gone, so announcing it as "free" was
+    # a false reuse cue.
+    name = ev.get("teammate_name") or ""
+    if not name and ev.get("agent_id") and "@" in str(ev["agent_id"]):
+        cand = str(ev["agent_id"]).split("@")[0]
+        # accept only if some team config lists it (read-only)
+        import glob, os
+        for cfg in glob.glob(os.path.expanduser("~/.claude/teams/*/config.json")):
+            try:
+                if cand in {m.get("name") for m in json.load(open(cfg)).get("members", [])}:
+                    name = cand; break
+            except Exception:
+                pass
     if not name or name == "team-lead":
         sys.exit(0)
     held = ctx.get(name)
