@@ -482,6 +482,14 @@ Voice: en-US-Brian:DragonHDLatestNeural, quality hd, subtitle_color green.
 - To HEAR JP when blocked on a decision: do NOT take the mic yourself (ONE shared mic). Ask
   Hypnos (the mic arbiter) to run scripts/listen.sh and relay JP's spoken reply (see "Agent Voice I/O").
 
+ORG — who owns you (fill from `scripts/org-lookup.sh <agent-name>`; drop this block if it prints nothing):
+- Department: technology · Owner: jp · Escalate: sandman → jp (three-channel)
+- You are a tool with a named human owner: no vote, no signature, no authority to bind the org.
+  Outward-facing or irreversible steps (send, publish, file, sign, pay, merge, delete) need your
+  owner's approval — draft instead.
+- Escalate along the chain. When it ends at jp (three-channel), a JP-only question goes on all
+  three channels YOURSELF — see § REACHING JP — then tell your lead you sent it.
+
 WORKTREE — absolute requirement:
 - Your worktree is at: /home/jp/Projects/<repo>/.claude/worktrees/lucid-262-chroma-cache-close
 - Your branch is already checked out there: fix/262-chroma-cache-close
@@ -700,6 +708,34 @@ down is not sending it, and the agent is the worst judge of whether its own outp
 
 ⛔ **NOT for routine progress.** **Three channels for every status line is noise, and noise is how
 the real ones get ignored.** ⭐ **The test is JP's own wording: does this REALLY need him?**
+
+## Org map — department, owner, escalation (optional)
+
+Every agent can answer *"what department am I in, who owns me, who do I escalate to?"*
+from lexicon's durable-agent catalog — **one catalog, no dreamteam-side roster**:
+
+- **Source:** `~/Projects/lexicon.realm.watch/catalog/agents.yaml` (`config.json .org.agentsCatalog`,
+  env `DREAMTEAM_AGENTS_CATALOG=<path>|off`). Optional fields `department`, `owner`, `escalates_to`
+  are plain ids; the owning org resolves them (TechEMPOWER: `techempower-admin/org/`, validated
+  there with `org/validate.py --agents`). dreamteam only READS it — never writes the catalog,
+  never writes `~/.claude/teams/*`.
+- **Resolution** (`scripts/lib/org_lookup.py`): exact `id`/`current_name` → session-lane `match`
+  glob (`money-*`, `techempower-*`, `jp-*`) → dream prefix before the first hyphen (id *or*
+  current_name). The chain follows `escalates_to` through agents to the human.
+- **Channel:** a human listed in `.org.threeChannelOwners` (default `["jp"]`) is reached with the
+  three-channel rule (§ REACHING JP); any other owner gets a durable message + the top-of-reply block.
+- **Surfaces:** `scripts/org-lookup.sh <name…> [--json]`; `roster-live.sh` and `idle-agents.sh`
+  `--json` rows gain `department` / `owner` / `escalates_to` / `escalation{chain,human,channel}`
+  **only when an agent resolves** (existing fields unchanged; no catalog ⇒ byte-identical output);
+  `roster-live.sh` human view adds an ORG column only then. The spawn template's ORG block.
+- **Status:** lexicon does not validate `status`; by convention anything but `active` (e.g.
+  `proposed`) is a designed-but-unapproved role — `org-lookup.sh` reports `spawnable: false` and
+  flags it `[proposed — not yet spawnable]`. Don't spawn it until JP approves and the entry flips
+  to `active`.
+- **Sandman** is `spawnable: false` in the catalog (the lead persona, Davis voice). **Ember** is the
+  local model (`kind: local-model`, en-GB-Ada) — never a Claude agent.
+- Agents are tools owned by a named human: not board members, no vote, no signature (org design:
+  `techempower-admin/strategy/org-structure-2026-09.md`).
 
 ## Manager roles (standing)
 

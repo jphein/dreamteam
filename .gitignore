@@ -7,3 +7,6 @@ state/*
 *.tmp
 *.swp
 .DS_Store
+
+# Python bytecode (scripts/lib/*.py is imported from the source tree)
+__pycache__/

@@ -65,6 +65,11 @@
       "memoryAccounting": "RESOLVED in #37 via reserveMB above (was the #16-bullet-3 deferral). The chosen lever is a config reserve subtracted from the admission budget when armed — NOT attaching the ollama server to the dreamteam scope: ollama is a shared SYSTEM daemon (own systemd unit), so pulling it into dreamteam-<project>.scope would (a) make a scope OOM-kill take ollama down with the team, and (b) not change the free-based admission math anyway. The reserve throttles spawns to leave RAM for the model; the scope + earlyoom remain the containment backstops."
     }
   },
+  "org": {
+    "agentsCatalog": "~/Projects/lexicon.realm.watch/catalog/agents.yaml",
+    "threeChannelOwners": ["jp"],
+    "_notes": "OPTIONAL org map — who owns an agent, which department it serves, who it escalates to. scripts/lib/org_lookup.py reads lexicon's agents.yaml (fields department/owner/escalates_to; plain ids resolved by the owning org — TechEMPOWER: techempower-admin/org/). Read-only; never writes the catalog or the harness team config. Consumers: org-lookup.sh, roster-live.sh and idle-agents.sh --json (keys added ONLY when an agent resolves), the spawn template's ORG block. Missing file / no PyYAML / no match = byte-identical legacy output. Env DREAMTEAM_AGENTS_CATALOG=<path>|off overrides agentsCatalog. threeChannelOwners: humans whose escalation uses the REACHING JP rule (speech queue + Slack + top-of-reply block); any other owner gets slack+text. Readers default to these values if this section is absent."
+  },
   "speech": {
     "queueUrl": "http://127.0.0.1:7710/speak",
     "source": "dreamteam",
