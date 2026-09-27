@@ -61,7 +61,7 @@ with open(ctx_path, "r+") as f:
     # A valid-JSON state file of the wrong shape ([], "x", {"w1": "str"}) used to crash every
     # Agent/SendMessage call (AttributeError). Treat anything but a dict of dicts as empty.
     if not isinstance(ctx, dict): ctx = {}
-    ctx = {k: v for k, v in ctx.items() if isinstance(v, dict) and now - v.get("ts", 0) < 24 * 3600}
+    ctx = {k: v for k, v in ctx.items() if isinstance(v, dict) and isinstance(v.get("ts", 0), (int, float)) and now - v.get("ts", 0) < 24 * 3600}
 
     if mode == "context":
         tool = ev.get("tool_name") or ""
@@ -95,7 +95,7 @@ with open(ctx_path, "r+") as f:
         import glob, os
         for cfg in glob.glob(os.path.expanduser("~/.claude/teams/*/config.json")):
             try:
-                if cand in {m.get("name") for m in json.load(open(cfg)).get("members", [])}:
+                if cand in {m.get("name") for m in json.load(open(cfg)).get("members", []) if isinstance(m, dict)}:
                     name = cand; break
             except Exception:
                 pass
