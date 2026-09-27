@@ -90,7 +90,7 @@ ACT_JSON="$(bash "$ENGINE" ${TEAM:+--team "$TEAM"} --json 2>/dev/null || true)"
 [ "$OVERLAY" = "1" ] || ROSTER_MD="__NONE__"     # sentinel: overlay explicitly disabled
 
 ACT_JSON="$ACT_JSON" ROSTER_MD="$ROSTER_MD" PROJECTS_DIR="$PROJECTS_DIR" \
-TEAM="$TEAM" FMT="$FMT" python3 <<'PY'
+TEAM="$TEAM" FMT="$FMT" ORG_LIB="$ROOT/scripts/lib" python3 <<'PY'
 import json, os, sys, glob, re
 
 act = json.loads(os.environ.get("ACT_JSON") or "[]")
@@ -259,6 +259,22 @@ for r in act:
         "task":   ov.get("task") or "",
     })
 
+# ── org map (optional): department / owner / escalation from lexicon agents.yaml ──
+# Keys are ADDED only when an agent resolves; with no catalog the output is
+# byte-identical to before (lib/org_lookup.py never raises).
+org_any = False
+try:
+    sys.dont_write_bytecode = True   # plugin runs from the source tree: no __pycache__ litter
+    sys.path.insert(0, os.environ.get("ORG_LIB") or "")
+    import org_lookup as _ol
+    _agents = _ol.load()
+    if _agents:
+        for m in merged:
+            _ol.enrich(m, agents=_agents)
+            org_any = org_any or "department" in m
+except Exception:
+    org_any = False
+
 if fmt == "json":
     print(json.dumps({
         "team": team or None,
@@ -294,6 +310,11 @@ cols = [
     ("BRANCH", lambda m: clip(m["branch"], 46)),
     ("TASK",   lambda m: clip(m["task"], 40)),
 ]
+if org_any:
+    cols.append(("ORG (dept · owner → escalation)", lambda m: clip(
+        " · ".join(x for x in (m.get("department"), m.get("owner")) if x)
+        + ((" → " + " → ".join(m["escalation"]["chain"])) if m.get("escalation", {}).get("chain") else ""), 48)
+        if m.get("department") or m.get("owner") else "-"))
 widths = []
 for title, fn in cols:
     w = max([len(title)] + [len(fn(m)) for m in merged])

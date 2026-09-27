@@ -33,6 +33,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+ORG_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib" \
 python3 - "$TEAMS_DIR" "$TEAM" "$TASK" "$FMT" <<'PY'
 import json, os, sys, glob, re, subprocess
 
@@ -81,14 +82,48 @@ for cfg in cfgs:
 
 idle.sort(key=lambda x: -x["score"])
 
+# org map (optional, lib/org_lookup.py): adds department/owner/escalates_to/escalation
+# to a row ONLY when the agent resolves in lexicon agents.yaml. No catalog ⇒ unchanged.
+# A row that resolves to a NON-spawnable role (orchestrator, local model such as
+# ember, a proposed/non-active role, or spawnable:false) is NOT reusable: it is
+# moved out of `idle` so neither --json nor the reuse gate can offer it, and is
+# shown only in the human output's separate "not reusable" block with its flag.
+held = []
+try:
+    sys.dont_write_bytecode = True   # plugin runs from the source tree: no __pycache__ litter
+    sys.path.insert(0, os.environ.get("ORG_LIB") or "")
+    import org_lookup as _ol
+    _agents = _ol.load() if idle else []
+    for a in idle:
+        _ol.enrich(a, agents=_agents)
+    if _agents:
+        keep = []
+        for a in idle:
+            if a.get("spawnable") is False:
+                held.append((a, _ol.spawn_flag(_ol.resolve(a.get("name"), _agents))))
+            else:
+                keep.append(a)
+        idle = keep
+except Exception:
+    pass
+
+def print_held():
+    if not held: return
+    print("not reusable (org map — assign nothing to these):")
+    for a, flag in held:
+        print("  • %-22s %s" % (a["name"], flag or "[not spawnable]"))
+
 if fmt == "json":
     print(json.dumps(idle)); sys.exit(0)
 
 if not idle:
-    print("no reusable idle agents (all members busy, or none alive)"); sys.exit(0)
+    print("no reusable idle agents (all members busy, or none alive)"); print_held(); sys.exit(0)
 print("reusable idle agents%s:" % (" (ranked by affinity to task)" if task else ""))
 for a in idle:
     tag = ("  [score %d: %s]" % (a["score"], a["why"])) if task else ""
     print("  • %-22s cwd=%s%s" % (a["name"], a["cwd"] or "-", tag))
     print("      context: %s" % a["context"])
+    if a.get("department") or a.get("owner"):
+        print("      org:     %s" % " · ".join(x for x in (a.get("department"), a.get("owner") and "owner " + a["owner"]) if x))
+print_held()
 PY
