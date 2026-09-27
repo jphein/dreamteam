@@ -37,6 +37,7 @@ dreamteam/
 │   ├── reuse-gate.sh              ★ PreToolUse gate — blocks a spawn when an idle teammate fits
 │   ├── roster.sh                  authoritative team roster + liveness (--json contract)
 │   ├── idle-agents.sh             idle-agent oracle + context-affinity scorer (--json contract)
+│   ├── idle-assign.sh             ★ TeammateIdle/SubagentStop — freed agent's held context + best-fit backlog item, so it is reused (JP 2026-09-26)
 │   ├── crash-audit.sh             SessionStart — surfaces the recovery checklist
 │   ├── spawn-accounting.sh        PostToolUse — cumulative footprint log
 │   ├── cleanup-marker.sh          SessionEnd — clears the active marker (clean exit)

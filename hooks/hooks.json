@@ -1,5 +1,5 @@
 {
-  "description": "Dreamteam OOM + reuse guardrails and team-awareness. PreToolUse(Agent|Task) = reuse gate THEN mem gate (either exit 2 blocks); PreToolUse(TaskStop) = check-the-pane reminder. PostToolUse = footprint accounting + pane organizer (async). TeammateIdle/SubagentStop = live roster injection. Pre/PostCompact = HANDOFF snapshot + post-compaction roster re-arm. WorktreeCreate = SYNC provision adapter ONLY, a SINGLE hook (prints the worktree path the runtime consumes, #26/#66 \u2014 the runtime consumes exactly one WorktreeCreate hook, so no second hook may share this matcher); Task*/WorktreeRemove/SubagentStart = async event log. SessionStart = roster + crash recovery. SessionEnd = marker clear. TIMEOUTS ARE IN SECONDS, not milliseconds: every value here was written ms-style (3000, 30000) and therefore meant 50 minutes to 8 hours \u2014 i.e. no effective ceiling at all. Measured on katana 2026-09-17: every gate runs in 108-208 ms, so the seconds values below leave 15-55x headroom.",
+  "description": "Dreamteam OOM + reuse guardrails and team-awareness. PreToolUse(Agent|Task) = reuse gate THEN mem gate (either exit 2 blocks); PreToolUse(TaskStop) = check-the-pane reminder. PostToolUse = footprint accounting + pane organizer (async). TeammateIdle/SubagentStop = live roster injection + idle-assign (JP 2026-09-26: the freed agent's held context and best-fit backlog item, so it is reused not replaced; PostToolUse[Agent|SendMessage] records that context). Pre/PostCompact = HANDOFF snapshot + post-compaction roster re-arm. WorktreeCreate = SYNC provision adapter ONLY, a SINGLE hook (prints the worktree path the runtime consumes, #26/#66 \u2014 the runtime consumes exactly one WorktreeCreate hook, so no second hook may share this matcher); Task*/WorktreeRemove/SubagentStart = async event log. SessionStart = roster + crash recovery. SessionEnd = marker clear. TIMEOUTS ARE IN SECONDS, not milliseconds: every value here was written ms-style (3000, 30000) and therefore meant 50 minutes to 8 hours \u2014 i.e. no effective ceiling at all. Measured on katana 2026-09-17: every gate runs in 108-208 ms, so the seconds values below leave 15-55x headroom.",
   "hooks": {
     "PreToolUse": [
       {
@@ -74,6 +74,16 @@
             "async": true
           }
         ]
+      },
+      {
+        "matcher": "Agent|SendMessage",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/idle-assign.sh context\"",
+            "timeout": 3
+          }
+        ]
       }
     ],
     "TeammateIdle": [
@@ -83,6 +93,11 @@
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/team-events.sh\"",
             "timeout": 6
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/idle-assign.sh idle\"",
+            "timeout": 4
           }
         ]
       }
@@ -94,6 +109,11 @@
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/team-events.sh\"",
             "timeout": 6
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/idle-assign.sh idle\"",
+            "timeout": 4
           }
         ]
       }

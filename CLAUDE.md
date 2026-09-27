@@ -6,7 +6,7 @@ Claude Code plugin for memory-gated parallel agent orchestration. Spawns named d
 
 - `plugin.json` — manifest (name, version, description)
 - `config.json` — tunables (perAgentMB, balloonReserveMB, hostReserveMB, maxAgents)
-- `hooks/hooks.json` — PreToolUse gates (reuse → mem-gate chain; `Bash|Monitor` → no-poll-guard), PostToolUse accounting, TeammateIdle/SubagentStop roster injection, Pre/PostCompact HANDOFF guard, sync WorktreeCreate provision adapter (returns the worktree path, #26) + async Task*/WorktreeRemove event log, SessionStart/End lifecycle
+- `hooks/hooks.json` — PreToolUse gates (reuse → mem-gate chain; `Bash|Monitor` → no-poll-guard), PostToolUse accounting, TeammateIdle/SubagentStop roster injection + `idle-assign.sh` (the freed agent's held context — recorded from its spawn prompt / last SendMessage by PostToolUse[Agent|SendMessage] — and the best-fit open item from `scratch/dreamteam/backlog.md` or `~/.claude/state/dreamteam-backlog.md`; `idle-assign.sh backlog add|list|done`), Pre/PostCompact HANDOFF guard, sync WorktreeCreate provision adapter (returns the worktree path, #26) + async Task*/WorktreeRemove event log, SessionStart/End lifecycle
 - `scripts/` — gate scripts, budget calculator, scope-attach (automatic cgroup containment), dashboard data generator, statusline (wired via user settings `statusLine`), local-model lane seam (optional ollama, `local-model.sh`), shared lib (`lib.sh`; `lib/pane-resolve.sh` = the canonical agent→pane resolver poke/pane-peek/fleet source, #53; `lib/agent-id.sh` = the canonical "which teammate am I?" /proc walk, shared by worktree-guard + no-poll-guard), PR tooling (`pr-gate.sh` / `pr-merge.sh` / `cascade.sh` — REST-only, no polling)
 - `skills/dreamteam/SKILL.md` — full orchestration skill (~900 lines)
 - `agents/` — custom agent type definitions (luna, morpheus, lucid, nebula)
@@ -36,6 +36,7 @@ PATH-stubbed `free`/`ps`/`pgrep` + fixture team configs + temp state via the scr
 bash tests/run.sh          # runs every suite, exits non-zero on any failure
 ```
 
+- `tests/test-idle-assign.sh` — idle-assign: announce + held context (gate preamble stripped) + ranking follows context + per-stretch dedupe + re-arm on new assignment + lead never announced + empty backlog still announces.
 - `tests/test-gates.sh` — mem-gate (RAM-floor block, count-cap block, non-Agent passthrough, **local-lane reserve #37** — armed lane subtracts `.local.reserveMB`, matched off/armed pair) + reuse-gate (block on live idle teammate, allow on FRESH-SPAWN / no team). Includes negative controls proving the block-paths aren't vacuous.
 - `tests/test-roster.sh` — roster.sh status classification (lead/idle/dead) against a fixture, the **spawn-accounting line-21 crash regression** (restricted `ps` must not crash the hook), and a **defaults-agreement guard** (dashboard-data.sh vs mem-budget.sh fallback defaults must match — catches the 600/4000 drift class; also `.local.reserveMB` across mem-gate/mem-budget/dashboard-data, #37).
 - `tests/test-dashboard.sh` — dashboard-data.sh `--json` output contract (every key dashboard.html reads) + `--inject` render + template standalone sanity.
