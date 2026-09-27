@@ -93,3 +93,7 @@ development.)
 OS-level companions (see [postmortem §4](docs/postmortem-2026-06-30.md)): configure `systemd-oomd` (PSI+cgroup-aware,
 fixes the Waydroid victim-poisoning), re-tune `earlyoom`, and cut the 32 GB swap. Those
 make any future OOM a clean 2-second kill instead of a 30-min thrash.
+
+## License
+
+AGPL-3.0-or-later © 2026 Jeffrey Pine Hein. See [LICENSE](LICENSE).
