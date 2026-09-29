@@ -241,6 +241,11 @@ def eff_peak(c: dict, fleet: dict) -> int:
     return int(math.ceil(c["peak_ram_mb"] * (fleet.get("defaults", {}).get("grows_margin", 1.5) if c.get("grows") else 1)))
 
 
+def eff_vram(c: dict, fleet: dict) -> int:
+    """VRAM the card sum counts: the measured peak, x1.5 when the job grows with run length (rule 3)."""
+    return int(math.ceil(c.get("peak_vram_mib", 0) * (fleet.get("defaults", {}).get("grows_margin", 1.5) if c.get("grows") else 1)))
+
+
 def host_budget(fleet: dict, host: str, claims: list, add: dict | None = None) -> list:
     """The host-level arithmetic over claims that overlap in time, as lines. Raises Refused when it fails."""
     h = fleet["hosts"][host]
@@ -316,11 +321,18 @@ def check_claim(fleet: dict, claims: dict, new: dict, windows: dict, vulkan: boo
     margin = fleet.get("defaults", {}).get("vram_margin_mib", 1024)
     res = resident_vram(c)
     physical = c["vram_mib"] - res
-    room = physical - margin
-    used = sum(v.get("peak_vram_mib", 0) for v in on_card) + new.get("peak_vram_mib", 0)
+    tenants = on_card + [new]
+    # VRAM that grows with run length counts x1.5 (morpheus-gems rule 3: familiar:0 beside its llama-servers takes a
+    # growing job only at <= 4.4 GiB, since x1.5 <= 6.6). The x1.5 IS that job's headroom; the 1 GiB margin covers
+    # fixed-shape tenants only, so it is not stacked on top.
+    eff = [eff_vram(v, fleet) for v in tenants]
+    used = sum(eff)
+    fixed = any(not v.get("grows") and v.get("peak_vram_mib", 0) > 0 for v in tenants)
+    room = physical - (margin if fixed else 0)
     shared = f" (sharing with {', '.join(v['lane'] for v in on_card)})" if on_card else ""
-    lines.append(f"{new['card']} VRAM: {' + '.join(str(v.get('peak_vram_mib', 0)) for v in on_card + [new])} = {used} MiB"
-                 f" <= {c['vram_mib']}" + (f" - {res} resident services" if res else "") + f" - {margin} margin = {room} MiB")
+    lines.append(f"{new['card']} VRAM: {' + '.join(f'{e}' + ('(x1.5)' if v.get('grows') else '') for v, e in zip(tenants, eff))}"
+                 f" = {used} MiB <= {c['vram_mib']}" + (f" - {res} resident services" if res else "")
+                 + (f" - {margin} margin" if fixed else " (growth x1.5 is the headroom)") + f" = {room} MiB")
     if used > physical:   # the physics: never overridden
         raise Refused(f"{new['card']} VRAM: {used} MiB > {c['vram_mib']}" + (f" - {res} resident services" if res else "")
                       + f" = {physical} MiB: it does not fit on the card at all{shared}")
@@ -855,6 +867,24 @@ def detect(cmd: str, fleet: dict) -> dict:
         why = why or "safe_run.sh --protected (a training run)"
     elif names & {"run_exp.sh", "remote_run.sh"}:
         why = why or ", ".join(sorted(names & {"run_exp.sh", "remote_run.sh"}))
+    # docker: a container gets a GPU from --gpus, --runtime=nvidia or a raw --device /dev/nvidia*. Luna's audits and
+    # vesper's verify windows on katana run this way, outside guest_run's budget (morpheus-gems, 09-29).
+    dk = re.search(r"\bdocker\s+(?:container\s+)?(?:run|create)\b(.*)", body or "")
+    if dk and not why:
+        opts = dk.group(1)
+        mg = re.search(r"--gpus[= ]+(['\"]?)([^\s'\"]+)\1", opts)
+        if mg or re.search(r"--runtime[= ]+nvidia\b", opts) or re.search(r"--device[= ]+/dev/nvidia", opts):
+            why = "docker run with a GPU"
+            spec = mg.group(2) if mg else "all"
+            md = re.search(r"device=([0-9][0-9,]*)", spec)
+            if md and idx is None:
+                idx, prefix = [int(x) for x in md.group(1).split(",") if x], ""
+            elif spec == "all" and idx is None and host in fleet["hosts"]:
+                allc = [cid for cid, cc in fleet["cards"].items() if cc["host"] == host and cc.get("compute_ok", True)]
+                if len(allc) > 1:
+                    out["cards"] = allc   # --gpus all takes every usable card on the host
+                    out.update(launch=True, why=why)
+                    return out
     if not why and has_ssh and ssh_host in GPU_ONLY_HOSTS_DEFAULT and PY_LAUNCH.search(remote or ""):
         why = f"python on {ssh_host} over ssh"
     if not why:

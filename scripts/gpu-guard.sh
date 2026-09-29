@@ -6,7 +6,8 @@
 #   - CUDA_VISIBLE_DEVICES=<n>, ZE_AFFINITY_MASK=<n>, or --device cuda:<n> / xpu:<n> on a command;
 #   - the GEMS launchers: gpu1_launch.sh, run_exp.sh, remote_run.sh, guest_run.sh with a GPU cap, and
 #     safe_run.sh --protected (a training run);
-#   - python, torchrun, accelerate or `ollama run` over ssh to a GPU-only host (gpu0, gpu1, game).
+#   - python, torchrun, accelerate or `ollama run` over ssh to a GPU-only host (gpu0, gpu1, game);
+#   - `docker run` with --gpus, --runtime=nvidia or --device /dev/nvidia* (luna's audits, vesper's verify windows).
 #   `dreamteam gpu run` passes: it checks the claim itself. Reads never count (nvidia-smi, tail, board).
 #
 # MODES (config.json gpu.guard): warn (the rollout default: allow, and log the would-block line to
@@ -23,6 +24,7 @@ case "$INPUT" in
   *CUDA_VISIBLE_DEVICES=*|*ZE_AFFINITY_MASK=*|*--device*cuda:*|*--device*xpu:*) ;;
   *gpu1_launch.sh*|*run_exp.sh*|*remote_run.sh*|*guest_run.sh*|*safe_run.sh*) ;;
   *ssh*gpu0*|*ssh*gpu1*|*ssh*game*) ;;
+  *docker*--gpus*|*docker*runtime*nvidia*|*docker*/dev/nvidia*) ;;
   *) exit 0 ;;
 esac
 command -v python3 >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || exit 0

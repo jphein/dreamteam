@@ -929,7 +929,8 @@ measured sizes and each host's admission rules in `gpu/fleet.json`. Spec:
   - gpu0/gpu1 pair rule: Σ caps + 1.5 GiB ≤ RAM − 0.5 GiB;
   - katana/game guest budgets are sums (katana 12 GB and 9 GiB; game 8 GB and 3.5 GiB);
   - familiar: one heavy job;
-  - VRAM leaves 1 GiB beside the resident services.
+  - VRAM leaves 1 GiB beside the resident services; katana's desktop is one, at about 2.7 GiB. A growing job's VRAM
+    counts ×1.5, which is its headroom, with no 1 GiB on top.
 
   An unmeasured peak needs `--estimate --solo`, meaning alone on its host until measured.
   - **Cards are shared** while their VRAM and the host budget hold. gpu0's one card runs two lanes' DEM3 jobs.
@@ -945,12 +946,14 @@ measured sizes and each host's admission rules in `gpu/fleet.json`. Spec:
 
   `--dry-run` prints the exact launch.
 - **The guard:** `gpu-guard.sh` (PreToolUse Bash) sees GPU launches outside `gpu run`. That means
-  `CUDA_VISIBLE_DEVICES=…`, the GEMS launchers, and python over ssh to gpu0, gpu1 or game, on a card the lane does
-  not hold. It runs in **warn** mode until the current holdings are seeded, and logs to
+  `CUDA_VISIBLE_DEVICES=…`, the GEMS launchers, python over ssh to gpu0, gpu1 or game, and `docker run --gpus` or
+  `--runtime=nvidia`, on a card the lane does not hold. It runs in **warn** mode until the current holdings are seeded, and logs to
   `~/.claude/state/dreamteam/gpu/guard.log`. Then it moves to **enforce** (exit 2). Orchestrators always pass.
 - **katana during calls:** OBS holds the virtual camera all day, so that is not a call. A live call is a non-OBS reader of
-  `/dev/video9`. The call watcher (`dreamteam-gpu-callwatch` user service) writes `~/.gems-pause` and
-  `docker pause`s GPU containers for the call's length. After 60 s of calm it removes only what it wrote.
+  `/dev/video9`. The call watcher (`dreamteam-gpu-callwatch` user service) writes `~/.gems-pause` for the call's
+  length. It kills a GPU container holding ≥ 1 GiB of VRAM, because a paused one keeps its VRAM, and pauses a smaller
+  one. After 60 s of calm it removes only what it wrote. At any time, call or not, below 512 MiB of free VRAM it kills
+  the GPU container holding the most: JP's desktop comes first.
 
 ## Local-Model Lane (ollama) — mechanical bulk, summaries, embeddings
 

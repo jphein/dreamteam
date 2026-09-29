@@ -81,7 +81,12 @@
   "cards": {
     "katana:0": {"host": "katana", "index": 0, "model": "NVIDIA GeForce RTX 2080 Ti", "vram_mib": 11264, "arch": "turing", "compute_cap": "7.5",
                  "caps": {"cuda": true, "bf16": false, "fp16": "fast", "tensor_cores": true, "xpu": false, "vulkan": true},
-                 "compute_ok": true, "drives_display": true, "pci": "01:00.0"},
+                 "compute_ok": true, "drives_display": true, "pci": "01:00.0",
+                 "residents": [
+                   {"name": "the desktop: GNOME, the browsers, OBS's virtual camera (it grows: JP's Brave grew during luna's audits)", "vram_mib": 2700,
+                    "match": "gnome|xorg|xwayland|xdg-|mutter|firefox|chrom|brave|code|electron|obs|crashpad|renderD"}
+                 ],
+                 "_residents_note": "the desktop holds ~2.6-3.1 GiB (morpheus-gems 10:1x: 2.6 of 11 GiB; board 09:34: 2648 MiB with desktop apps only). Claimable = 11264 - 2700 - margin. The call watcher also kills GPU containers when free VRAM falls below 512 MiB."},
     "familiar:0": {"host": "familiar", "index": 0, "model": "NVIDIA P102-100", "vram_mib": 10240, "arch": "pascal", "compute_cap": "6.1",
                    "caps": {"cuda": true, "bf16": false, "fp16": "slow", "tensor_cores": false, "xpu": false, "vulkan": true},
                    "compute_ok": true, "drives_display": false, "pci": "06:00.0",
