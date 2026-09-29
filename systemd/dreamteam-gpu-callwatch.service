@@ -1,7 +1,8 @@
 # dreamteam GPU fleet: katana's call watcher (scripts/gpu/callwatch.sh; spec
 # docs/superpowers/specs/2026-09-29-gpu-fleet-design.md §3b). A live call is a non-OBS process reading
 # the virtual camera (/dev/video9). While one does, the watcher writes ~/.gems-pause, which guest-form GPU
-# jobs obey, and docker-pauses GPU containers. After 60 s of calm it removes only what it created.
+# jobs obey, kills GPU containers holding >= 1 GiB of VRAM and docker-pauses smaller ones. After 60 s of calm
+# it removes only what it created. Call or not, below 512 MiB of free VRAM it kills the biggest GPU container.
 # Install (katana, as JP):
 #   cp systemd/dreamteam-gpu-callwatch.service ~/.config/systemd/user/
 #   systemctl --user daemon-reload && systemctl --user enable --now dreamteam-gpu-callwatch

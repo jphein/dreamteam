@@ -86,7 +86,10 @@ check "$(claim gpu0:0 --lane reverie-gems --until 2h --peak-ram 500 --peak-vram 
 # ── 3. the other host rules ──────────────────────────────────────────────────────────────────────
 fresh
 check "$(claim katana:0 --lane reverie-gems --until 2h --peak-ram 11000 --peak-vram 4000)" 75 "katana guest budget: a cap above 12 GB is refused (the sum rule)"
-check "$(claim katana:0 --lane reverie-gems --until 2h --peak-ram 5000 --peak-vram 8000)" 0 "katana guest budget: 6 GB cap and 8 GiB VRAM fit"
+check "$(claim katana:0 --lane reverie-gems --until 2h --peak-ram 5000 --peak-vram 5000)" 0 "katana guest budget: a 6 GB cap and 5 GiB VRAM fit beside the desktop's 2700 MiB"
+fresh
+check "$(claim katana:0 --lane luna-refurb --until 1h --peak-ram 5000 --peak-vram 8000)" 75 "katana: an 8 GB docker audit breaks the margin beside the desktop (8000 + 1024 > 11264 - 2700)"
+check "$(claim katana:0 --lane luna-refurb --until 1h --peak-ram 5000 --peak-vram 8000 --override 'lead: the call watcher kills it under 512 MiB free')" 0 "katana: the lead may override the margin (8000 <= 8564 physically)"
 fresh
 check "$(claim familiar:0 --lane morpheus-gems --until 2h --peak-ram 3000 --peak-vram 3000 --protected)" 0 "familiar: one heavy job"
 check "$(claim familiar:xpu0 --lane tapstone --until 2h --peak-ram 2000 --peak-vram 8000 --vulkan)" 75 "familiar: a second heavy job is refused (rule 2)"
@@ -126,6 +129,10 @@ check "$(claim familiar:0 --lane vesper-mozilla --until 2h --peak-ram 3000 --pea
 check "$(claim familiar:0 --lane vesper-mozilla --until 2h --peak-ram 3000 --peak-vram 6560 --protected --override 'lead: running at 97% since 09:40, measured')" 0 "the margin is policy: a granter's override seeds what already runs"
 check "$(claim familiar:0 --lane drift-gems --until 1h --peak-ram 500 --peak-vram 400 --override 'no')" 75 "but the physics holds: 6560 + 400 > 10240 - 3406, whatever the override"
 fresh
+check "$(claim familiar:0 --lane vesper-mozilla --until 2h --peak-ram 3000 --peak-vram 4506 --grows)" 0 "rule 3: a GROWING 4.4 GiB VRAM job fits beside the residents (x1.5 = 6759 <= 6834; the x1.5 is its headroom)"
+fresh
+check "$(claim familiar:0 --lane vesper-mozilla --until 2h --peak-ram 3000 --peak-vram 4608 --grows --override 'no')" 75 "rule 3: a growing 4.5 GiB job does not (x1.5 = 6912 > 6834), override or not"
+fresh
 check "$(claim gpu1:0 --lane morpheus-gems --until 13:15 --peak-ram 2000 --peak-vram 2000 --exclusive --purpose bench)" 0 "schedule: morpheus's bench until 13:15"
 check "$(claim gpu1:0 --lane nebula-gems --from 13:15 --until 14:35 --peak-ram 3277 --peak-vram 1400)" 0 "schedule: nebula's lindep from 13:15 (a handoff, no overlap)"
 check "$(claim gpu1:0 --lane drift-gems --from 13:00 --until 14:00 --peak-ram 1000 --peak-vram 1000)" 75 "schedule: a claim overlapping the exclusive bench is refused"
@@ -164,10 +171,15 @@ check "$(cards 'tools/guest_run.sh --mem 4G -- python ssl.py')" "katana:0" "dete
 check "$(cards 'CUDA_VISIBLE_DEVICES=0 python -m train')" "katana:0" "detect: a local CUDA_VISIBLE_DEVICES=0 -> katana:0"
 check "$(cards 'ssh gpu1 python3 run.py')" "gpu1:*" "detect: python on gpu1 with no index -> any gpu1 card"
 check "$(cards 'ssh familiar "ZE_AFFINITY_MASK=0 python bench.py"')" "familiar:xpu0" "detect: ZE_AFFINITY_MASK=0 on familiar -> familiar:xpu0"
+check "$(cards 'docker run --rm --gpus all -m 8g lostintranscription/audit:latest')" "katana:0" "detect: docker run --gpus all on katana -> katana:0 (luna's audits, vesper's verify windows)"
+check "$(cards 'ssh gpu1 docker run --rm --gpus device=1 img:latest')" "gpu1:1" "detect: docker run --gpus device=1 on gpu1 -> gpu1:1"
+check "$(cards 'ssh gpu1 docker run --rm --gpus all img:latest')" "gpu1:0,gpu1:1" "detect: --gpus all on gpu1 takes both cards"
+check "$(cards 'docker run --rm --runtime=nvidia img')" "katana:0" "detect: docker --runtime=nvidia -> katana:0"
 # negative controls: reads and non-GPU work are not launches (the guard must not be vacuous either way)
 for c in 'nvidia-smi' 'ssh gpu1 nvidia-smi --query-gpu=memory.used --format=csv' 'ssh gpu1 tail -f /var/tmp/fwork/gems/runs/x.log' \
          'dreamteam gpu board' 'python3 analyze.py' 'ssh familiar python3 palace_stats.py' 'tools/guest_run.sh --gpu-mem 0 --mem 2G -- make' \
-         'ssh familiar tools/safe_run.sh 3G python sweep.py' 'CUDA_VISIBLE_DEVICES= python cpu_only.py'; do
+         'ssh familiar tools/safe_run.sh 3G python sweep.py' 'CUDA_VISIBLE_DEVICES= python cpu_only.py' \
+         'docker run --rm -v /x:/x alpine ls' 'docker ps --filter status=running' 'docker logs lit-audit-1'; do
   check "$(cards "$c")" "" "not a launch: $c"
 done
 check "$(cards 'ssh "$HOST" "CUDA_VISIBLE_DEVICES=0 python x.py"')" "" "an ssh to an unresolved host fails OPEN (never blames the wrong card)"
@@ -196,6 +208,8 @@ payload 'ssh gpu1 "CUDA_VISIBLE_DEVICES=0 python x.py"' | DREAMTEAM_AGENT_ID=orc
 check "$?" 0 "wrapper: a non-teammate identity fails open"
 payload 'ls -la' | DREAMTEAM_AGENT_ID=luna-refurb@jp DREAMTEAM_CONFIG="$E" bash "$W" 2>/dev/null
 check "$?" 0 "wrapper: an ordinary command never reaches python (pre-filter)"
+payload 'docker run --rm --gpus all -m 8g audit:latest' | DREAMTEAM_AGENT_ID=luna-refurb@jp DREAMTEAM_CONFIG="$E" bash "$W" 2>/dev/null
+check "$?" 2 "wrapper: a docker --gpus launch reaches the decision through the pre-filter (enforce blocks it)"
 echo 'not json' | DREAMTEAM_AGENT_ID=luna-refurb@jp DREAMTEAM_CONFIG="$E" bash "$W" 2>/dev/null
 check "$?" 0 "wrapper: a malformed payload fails open"
 
@@ -269,13 +283,22 @@ cat > "$DS/docker" <<STUB
 case "\$1" in
   ps) printf 'gpu-box\nweb-box\n' ;;
   inspect) case "\$*" in *"{{.Name}}"*) echo "/runtime-box" ;; *) [ "\${@: -1}" = gpu-box ] && echo '[{"Driver":"nvidia","Count":-1}]' || echo null ;; esac ;;
-  pause|unpause) echo "\$1 \$2" >> "$DREC" ;;
+  pause|unpause|kill) echo "\$1 \$2" >> "$DREC" ;;
 esac
 STUB
 chmod +x "$DS/docker"
 # a GPU compute pid (4711) whose cgroup is a docker scope: a container started with --runtime=nvidia (no DeviceRequests)
 mkdir -p "$C/proc/4711"; echo "0::/system.slice/docker-$(printf 'ab%.0s' {1..32}).scope" > "$C/proc/4711/cgroup"
-printf '#!/bin/sh\necho 4711\n' > "$DS/nvidia-smi"; chmod +x "$DS/nvidia-smi"
+echo "4711, 6000" > "$DS/apps"; echo 4000 > "$DS/free"
+cat > "$DS/nvidia-smi" <<SMI
+#!/bin/sh
+case "\$*" in
+  *query-compute-apps=pid,used_memory*) cat "$DS/apps" ;;
+  *query-compute-apps=pid*) cut -d, -f1 "$DS/apps" ;;
+  *query-gpu=memory.free*) cat "$DS/free" ;;
+esac
+SMI
+chmod +x "$DS/nvidia-smi"
 cw() { CALLWATCH_DEVS="$C/video9" CALLWATCH_PAUSE="$C/pause" CALLWATCH_STATE="$C/state" CALLWATCH_LOG="$C/log" \
        CALLWATCH_CALM_S=0 CALLWATCH_DOCKER="$DS/docker" CALLWATCH_NVIDIA_SMI="$DS/nvidia-smi" CALLWATCH_CGROUP_ROOT="$C/proc" \
        bash "$CW" --once; }
@@ -289,15 +312,19 @@ cw; [ ! -e "$C/pause" ] && pass "callwatch: OBS alone holding the camera is NOT 
 sleep 60 3<"$C/video9" & CALLP=$!; sleep 0.3
 cw; head -c 9 "$C/pause" 2>/dev/null | grep -qx callwatch && pass "callwatch: a second, non-OBS reader is a call: the pause file appears (ours)" || fail "no pause on a call"
 grep -qx "pause gpu-box" "$DREC" && ! grep -q "web-box" "$DREC" && pass "callwatch: only the GPU container is docker-paused" || fail "docker pause: $(cat "$DREC")"
-grep -qx "pause runtime-box" "$DREC" && pass "callwatch: a container holding GPU memory WITHOUT DeviceRequests is paused too (pid -> docker scope)" || fail "pid-mapped container not paused: $(cat "$DREC")"
+grep -qx "kill runtime-box" "$DREC" && ! grep -qx "pause runtime-box" "$DREC" && pass "callwatch: a container holding 6000 MiB (found via its pid, no DeviceRequests) is KILLED on a call: a paused one keeps its VRAM" || fail "heavy container not killed: $(cat "$DREC")"
 kill $CALLP; wait $CALLP 2>/dev/null
 cw; [ -e "$C/pause" ] && pass "callwatch: the call ended, but the pause holds for the calm period" || fail "cleared with no calm"
 cw; [ ! -e "$C/pause" ] && pass "callwatch: after the calm period our pause file is removed" || fail "pause not cleared"
-grep -qx "unpause gpu-box" "$DREC" && pass "callwatch: the container it paused is unpaused" || fail "docker unpause: $(cat "$DREC")"
+grep -qx "unpause gpu-box" "$DREC" && ! grep -qx "unpause runtime-box" "$DREC" && pass "callwatch: only the container it paused is unpaused (not the killed one)" || fail "docker unpause: $(cat "$DREC")"
 echo "manual pause by the lead" > "$C/pause"; : > "$DREC"
 sleep 60 3<"$C/video9" & CALLP=$!; sleep 0.3; cw; kill $CALLP; wait $CALLP 2>/dev/null; cw; cw
 [ "$(cat "$C/pause")" = "manual pause by the lead" ] && pass "callwatch: a pause file it did not write is never touched or removed" || fail "foreign pause file changed"
 kill $OBSP; wait $OBSP 2>/dev/null
+: > "$DREC"; rm -f "$C/state" "$C/state.containers" "$C/pause"; echo 300 > "$DS/free"
+cw; grep -qx "kill runtime-box" "$DREC" && pass "callwatch: with no call, free VRAM 300 < 512 MiB kills the biggest GPU container (JP's desktop first)" || fail "low-VRAM kill: $(cat "$DREC")"
+: > "$DREC"; echo 4000 > "$DS/free"
+cw; [ ! -s "$DREC" ] && pass "callwatch: ample free VRAM and no call touch nothing (negative control)" || fail "acted with no call: $(cat "$DREC")"
 
 echo ""
 echo "test-gpu: $PASS passed, $FAIL failed"

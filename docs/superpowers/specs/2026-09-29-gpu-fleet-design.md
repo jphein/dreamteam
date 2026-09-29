@@ -1,7 +1,7 @@
 # The GPU fleet: inventory, claims, one launcher, a launch guard (design spec)
 
 - **Date:** 2026-09-29 (drafted 09:2x–09:4x PDT by cirrus-scry, a Morpheus lane)
-- **Status:** v1 is live (dreamteam #101, f55fbd2). v1.1 (this revision, 10:0x) adds shared and scheduled claims, the raw-peak pair rule keyed to idle MemAvailable, and katana's call watcher. The guard is still in `warn` mode (§5.3).
+- **Status:** v1 is live (dreamteam #101, f55fbd2). v1.1 (#102, #103) added shared and scheduled claims, the raw-peak pair rule keyed to idle MemAvailable, and katana's call watcher. v1.2 (10:3x) adds morpheus-gems's rules 3 and 6 as refined (VRAM growth; kill a VRAM-heavy container on a call, or when free VRAM is low), docker GPU launch detection, and katana's desktop as a VRAM resident. The guard stays in `warn` through today's GEMS window; the lead seeds and flips it tonight (§5.3).
 - **Asked by:** JP, 08:5x, relayed by team-lead: *"we need a gpu part for dreamteam plugin pls"*.
 - **Domain sources:**
   - `money/scratch/contests/gems/FAMILIAR-RULES.md` (the lead, Lucid, Drift and Morpheus-gems, 2026-09-28);
@@ -131,7 +131,9 @@ Every job prints its measured peak, and the claim is updated from it.
   It thaws after 60 s calm, with hysteresis. It is never left frozen: the launcher's TERM handler thaws it.
 - The GPU watchdog TERMs, then KILLs after 30 s, a job whose processes hold more VRAM than their cap.
 
-**Every card.** `Σ claimed VRAM on the card ≤ vram − 1 GiB − resident services`. At launch, `run` also checks
+**Every card.** `Σ claimed VRAM on the card ≤ vram − 1 GiB − resident services`, where a growing job's VRAM counts ×1.5.
+That growth factor is also the job's headroom, so no 1 GiB margin is stacked on top (morpheus-gems rule 3: familiar:0
+takes a growing job only at ≤ 4.4 GiB, since ×1.5 ≤ 6.6). katana:0's desktop is a resident, at about 2.7 GiB. At launch, `run` also checks
 the card's **live** free VRAM (another process may hold it) and names what does. A card whose `compute_ok` is false
 is refused.
 
@@ -144,9 +146,12 @@ is refused.
   one `find /proc/*/fd -lname` pass (~50 ms). This mirrors `guest_run.sh`'s own call guard, which refuses and freezes
   guest GPU jobs during a call.
 - **On a call:** it writes `~/.gems-pause` with a `callwatch` marker, unless a pause file already exists that it did not
-  write (set on JP's word: left alone). It also `docker pause`s running containers that hold a GPU
-  (`HostConfig.DeviceRequests`): a container runs outside a user scope, so freezing the launcher does not reach it
-  (morpheus-gems).
+  write (set on JP's word: left alone). GPU containers are stopped by name, because a container runs outside a user
+  scope, so freezing the launcher does not reach it. They are found by `DeviceRequests`, and by mapping nvidia-smi's
+  compute pids to docker scopes. A container holding ≥ 1 GiB of VRAM is **killed**, because a paused one keeps its
+  VRAM. A smaller one is paused and unpaused after the call (morpheus-gems rule 6, refined).
+- **At any time:** if katana's free VRAM falls below 512 MiB, the GPU container holding the most VRAM is killed, one per
+  tick. JP's desktop comes first, as in luna-refurb's `docker_guard.sh`, whose low-VRAM kill fired twice on 09-29.
 - **After 60 s of calm:** it removes only its own pause file, and unpauses only the containers it paused.
 - **Controls:**
   - In `tests/test-gpu.sh`, a stand-in device, never the real camera. The "OBS alone" negative uses one process with
@@ -203,7 +208,9 @@ A Bash command is a launch on card C when it:
   `scripts/gpu/*.sh` directly. The card comes from its arguments and `HOST=`/ssh target;
 - sets `CUDA_VISIBLE_DEVICES=<n>` or `ZE_AFFINITY_MASK=<n>` on a command, or passes `--device cuda:<n>`. The host
   is the command's ssh target, else katana;
-- is `ssh <gpu host> …` running `python`, `torchrun`, `accelerate` or `ollama run`.
+- is `ssh <gpu host> …` running `python`, `torchrun`, `accelerate` or `ollama run`;
+- is `docker run` with `--gpus`, `--runtime=nvidia` or `--device /dev/nvidia*` (v1.2). `--gpus all` takes every usable
+  card on the host.
 
 Reads never count: `nvidia-smi`, `xpu-smi`, `tail`/`cat` of logs, `dreamteam gpu board`. That is the negative
 control list.
