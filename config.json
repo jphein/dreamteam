@@ -88,7 +88,7 @@
   },
   "_notes_history_2026_08_26": "balloonReserveMB cut 8000→4000 a THIRD time (JP-approved, jp-4c session). CONDITION THIS RESTS ON: heavy builds now run on familiar per JP directive (memory feedback_offload_to_familiar), removing the build-toolchain balloon driver that caused both prior reverts (07-01, 07-14). ALSO in place since 08-25/26: hookify blocks /tmp build artifacts; tmux.service + ghostty CPUWeight levers exist; guardrail monitor alerts mem<3G. IF an oomd kill recurs: restore to 8000 immediately AND check whether agents stopped offloading builds — that is the premise, not the reserve number. Backup: config.json.bak-20260826",
   "gpu": {
-    "guard": "warn",
+    "guard": "enforce",
     "granters": [
       "nyx*",
       "morpheus-gems"
