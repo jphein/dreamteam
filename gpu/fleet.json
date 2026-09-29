@@ -13,6 +13,11 @@
       "refuse_exit": "75 = EX_TEMPFAIL, retry later: the code all three GEMS launchers already use for an admission refusal."
     }
   },
+  "guard": {
+    "_comment": "The launch guard (scripts/gpu-guard.sh, scripts/lib/gpu_detect.py). A launch is recognised where a shell RUNS it, never where it is mentioned. python counts only with GPU evidence: a CUDA_VISIBLE_DEVICES or ZE_AFFINITY_MASK index, --device cuda[:N], a GPU launcher, torchrun/deepspeed/accelerate launch, or a script whose basename matches gpu_programs. CUDA_VISIBLE_DEVICES= (empty) or -1, or --device cpu, marks a job CPU-only. A GPU program missing here still shows on the board as IN USE, NO CLAIM: add it here.",
+    "gpu_programs": ["^stage2_train.*\\.py$", "^dino_features.*\\.py$", "^train\\.py$", "^(finetune|fine_tune).*\\.py$"],
+    "_sources": {"stage2_train": "GEMS's trainer (run_exp.sh runs it)", "dino_features": "drift-gems's DINO feature extraction on gpu0 (09-29)", "train.py": "vesper-mozilla's omni-3b fine-tune (gpu1:1 and familiar, 09-29)"}
+  },
   "hosts": {
     "katana": {
       "ram_mb": 32003,

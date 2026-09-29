@@ -160,7 +160,11 @@ decide() {  # decide <agent-id> <config> <command> -> action
   jq -nc --arg c "$3" '{tool_name:"Bash", tool_input:{command:$c}}' \
     | DREAMTEAM_AGENT_ID="$1" DREAMTEAM_CONFIG="$2" python3 "$LIB" guard | jq -r .action
 }
-cards() { DREAMTEAM_AGENT_ID=x python3 "$LIB" detect "$1" | jq -r '(.cards + (.host_any | map(. + ":*"))) | join(",")'; }
+cards() {  # the cards detect names; every command checked here is replayed through the real wrapper in section 7
+  local r; r=$(DREAMTEAM_AGENT_ID=x python3 "$LIB" detect "$1" | jq -r '(.cards + (.host_any | map(. + ":*"))) | join(",")')
+  if [ -n "$r" ]; then printf '%s\0' "$1" >> "$TMP/positives"; else printf '%s\0' "$1" >> "$TMP/negatives"; fi
+  echo "$r"
+}
 E="$TMP/enforce.json"
 # positive controls: each is a launch, attributed to the right card
 check "$(cards 'ssh -o ConnectTimeout=10 gpu1 "cd /var/tmp/fwork/gems && CUDA_VISIBLE_DEVICES=1 python stage2_train.py"')" "gpu1:1" "detect: CUDA_VISIBLE_DEVICES=1 over ssh -> gpu1:1"
@@ -169,7 +173,7 @@ check "$(cards 'lanes/drift/gpu1_launch.sh 1 B g1-S3-x --seeds 6')" "gpu1:1" "de
 check "$(cards 'ssh familiar ~/Projects/x/tools/safe_run.sh --protected 6G .venv/bin/python train.py')" "familiar:0" "detect: safe_run --protected on familiar -> familiar:0 (the B60 is compute-blocked)"
 check "$(cards 'tools/guest_run.sh --mem 4G -- python ssl.py')" "katana:0" "detect: guest_run with a GPU cap on katana -> katana:0"
 check "$(cards 'CUDA_VISIBLE_DEVICES=0 python -m train')" "katana:0" "detect: a local CUDA_VISIBLE_DEVICES=0 -> katana:0"
-check "$(cards 'ssh gpu1 python3 run.py')" "gpu1:*" "detect: python on gpu1 with no index -> any gpu1 card"
+check "$(cards 'ssh gpu1 python3 train.py')" "gpu1:*" "detect: a GPU program (train.py) on gpu1 with no index -> any gpu1 card"
 check "$(cards 'ssh familiar "ZE_AFFINITY_MASK=0 python bench.py"')" "familiar:xpu0" "detect: ZE_AFFINITY_MASK=0 on familiar -> familiar:xpu0"
 check "$(cards 'docker run --rm --gpus all -m 8g lostintranscription/audit:latest')" "katana:0" "detect: docker run --gpus all on katana -> katana:0 (luna's audits, vesper's verify windows)"
 check "$(cards 'ssh gpu1 docker run --rm --gpus device=1 img:latest')" "gpu1:1" "detect: docker run --gpus device=1 on gpu1 -> gpu1:1"
@@ -186,8 +190,8 @@ check "$(cards 'ssh "$HOST" "CUDA_VISIBLE_DEVICES=0 python x.py"')" "" "an ssh t
 # decisions
 check "$(decide drift-gems@jp "$E" 'ssh gpu1 "CUDA_VISIBLE_DEVICES=1 python train.py"')" allow "enforce: the holder launches on its card"
 check "$(decide drift-gems@jp "$E" 'ssh gpu1 "CUDA_VISIBLE_DEVICES=0 python train.py"')" block "enforce: the same lane on a card it does not hold is BLOCKED"
-check "$(decide luna-refurb@jp "$E" 'ssh gpu1 python3 run.py')" block "enforce: python on gpu1 with no claim there is blocked"
-check "$(decide drift-gems@jp "$E" 'ssh gpu1 python3 run.py')" allow "enforce: a lane holding any gpu1 card may run unindexed python there"
+check "$(decide luna-refurb@jp "$E" 'ssh gpu1 python3 train.py')" block "enforce: a GPU program on gpu1 with no claim there is blocked"
+check "$(decide drift-gems@jp "$E" 'ssh gpu1 python3 train.py')" allow "enforce: a lane holding any gpu1 card may run an unindexed GPU program there"
 check "$(decide luna-refurb@jp "$E" 'dreamteam gpu run --card gpu1:0 -- python x.py')" allow "gpu run passes the guard (it checks the claim itself)"
 check "$(decide luna-refurb@jp "$E" 'nvidia-smi')" allow "a read is always allowed"
 check "$(decide "" "$E" 'ssh gpu1 "CUDA_VISIBLE_DEVICES=0 python x.py"')" allow "an orchestrator (no --agent-id) is never blocked (fail open)"
@@ -195,6 +199,66 @@ check "$(decide luna-refurb@jp "$TMP/warn.json" 'ssh gpu1 "CUDA_VISIBLE_DEVICES=
 grep -q '"luna-refurb@jp"' "$TMP/state/guard.log" 2>/dev/null && pass "warn mode logs the would-block line" || fail "no guard.log line"
 check "$(decide luna-refurb@jp "$TMP/empty.json" 'ssh gpu1 "CUDA_VISIBLE_DEVICES=0 python x.py"')" warn "a missing gpu.guard is warn, never off"
 check "$(decide luna-refurb@jp "$TMP/off.json" 'ssh gpu1 "CUDA_VISIBLE_DEVICES=0 python x.py"')" allow "off disables the check"
+
+# ── 6b. v1.3: a launch is where a shell RUNS it, never where it is mentioned ───────────────────────
+# The replay of 2026-09-29 (3560 lane commands) found ~100 of v1.2's 125 would-blocks were reads and edits that
+# named a launcher. Each class below is one of them, with fictional paths; the positives are the real launch forms.
+NL=$'\n'
+for c in 'cat tools/gpu1_launch.sh; sed -n 1,60p tools/guest_run.sh; grep -n obs tools/guest_run.sh' \
+         'cp -p run_exp.sh run_exp.sh.new && scp -q run_exp.sh gpu0:/work/tools/ && sha256sum run_exp.sh' \
+         "cat > run.sh <<'EOF'${NL}CUDA_VISIBLE_DEVICES=0 python stage2_train.py${NL}EOF" \
+         "git commit -q -F - <<'EOF'${NL}feat: docker run --gpus all and guest_run.sh --gpu-mem 3 are detected${NL}EOF" \
+         "python3 - <<'PY'${NL}s = 'CUDA_VISIBLE_DEVICES=1 python train.py'${NL}PY" \
+         "jq -nc --arg c 'ssh gpu1 \"CUDA_VISIBLE_DEVICES=0 python probe.py\"' '{c:\$c}'" \
+         "ssh gpu1 'ps -eo pid,args | grep -E \"run_exp|stage2_train\" | grep -v grep'" \
+         "until ssh gpu1 'test -s /work/runs/done.log'; do sleep 60; done" \
+         "ssh gpu0 'cd /work && /work/tools/safe_run.sh 4G env OMP_NUM_THREADS=1 .venv/bin/python build_stack.py --out x.tif'" \
+         "ssh gpu0 '.venv/bin/python -c \"import rasterio; print(rasterio.open(\\\"x.tif\\\").count)\"'" \
+         "cat >> NOTES.md <<'EOF'${NL}- katana: tools/guest_run.sh --mem 6G --gpu-mem 3 -- queue.sh${NL}EOF" \
+         'bash -n tools/run_exp.sh && echo ok' \
+         'diff <(sed -n 1,40p a/guest_run.sh) <(sed -n 1,40p b/guest_run.sh)' \
+         "ssh gpu1 'CUDA_VISIBLE_DEVICES= python train.py'" "ssh gpu1 'python train.py --device cpu'" \
+         'ssh gpu1 python3 run.py' 'ssh gpu1 .venv/bin/python train.py --help' \
+         'docker run --rm img:latest python x.py --gpus all' 'CUDA_VISIBLE_DEVICES=0 nvidia-smi' \
+         'tools/../../../tools/guest_run.sh --help 2>&1 | head -0' "ssh familiar '/work/tools/safe_run.sh --protected 64M true; echo exit \$?'"; do
+  check "$(cards "$c")" "" "v1.3 not a launch: ${c%%$NL*}"
+done
+check "$(cards "(FEATURES=f.tif setsid nohup tools/guest_run.sh --mem 6G --gpu-mem 3 -- queue.sh a b > q.log 2>&1 &)")" "katana:0" "v1.3 launch: a detached guest_run queue in a subshell"
+check "$(cards "ssh gpu1 'cd /work; CUDA_VISIBLE_DEVICES=1 FEATURES=x setsid nohup bash /work/queue.sh rad6 > log 2>&1 &'")" "gpu1:1" "v1.3 launch: CUDA_VISIBLE_DEVICES=1 in front of a remote queue script"
+check "$(cards "ssh gpu0 'cd /work && cat > runs/bench.sh <<\"EOF\"${NL}#!/bin/bash${NL}CUDA_VISIBLE_DEVICES=0 python stage2_train.py --seed 0${NL}EOF${NL}setsid nohup bash runs/bench.sh > runs/bench.log 2>&1 &'")" "gpu0:0" "v1.3 launch: a bench script written by a heredoc and run by the same command"
+check "$(cards "ssh familiar \"CUDA_VISIBLE_DEVICES=0 PYTHONUNBUFFERED=1 setsid nohup systemd-inhibit --what=sleep --mode=block .venv/bin/python cache.py > log 2>&1 &\"")" "familiar:0" "v1.3 launch: CUDA_VISIBLE_DEVICES=0 through setsid, nohup and systemd-inhibit"
+check "$(cards "ssh gpu0 'OMP_NUM_THREADS=4 /work/tools/safe_run.sh 3G .venv/bin/python dino_features.py --out smoke.tif'")" "gpu0:0" "v1.3 launch: a GPU program (dino_features.py) under an unprotected cap"
+check "$(cards "ssh gpu1 bash -s <<'EOF'${NL}export CUDA_VISIBLE_DEVICES=0${NL}python stage2_train.py${NL}EOF")" "gpu1:0" "v1.3 launch: a heredoc fed to a remote shell, with an exported index"
+check "$(cards 'P=.venv/bin/python; ssh gpu1 "CUDA_VISIBLE_DEVICES=1 $P train.py"')" "gpu1:1" "v1.3 launch: the index in front of a variable program"
+# a local chain script followed two levels: chain.sh -> gpu_run.sh -> ssh gpu1 (vesper's chain-nh.sh, 09-29)
+mkdir -p "$TMP/chain"
+printf '#!/usr/bin/env bash\nset -u\n./gpu_run.sh 1 nh-C\n' > "$TMP/chain/chain.sh"
+printf '#!/usr/bin/env bash\nssh gpu1 "cd /work && CUDA_VISIBLE_DEVICES=1 nohup .venv/bin/python train.py --tag $2 > log 2>&1 &"\n' > "$TMP/chain/gpu_run.sh"
+check "$(cards "cd $TMP/chain && nohup bash chain.sh > chain.log 2>&1 &")" "gpu1:1" "v1.3 launch: a local chain script followed to the ssh it runs (two levels)"
+check "$(cards "cat $TMP/chain/chain.sh $TMP/chain/gpu_run.sh")" "" "v1.3 not a launch: reading the same two scripts"
+# a script copied to the host by the same command, then chained there behind GEMS's queue_after.sh (drift, 09-29)
+printf '#!/usr/bin/env bash\nG=/work; PY=$G/.venv/bin/python; SAFE=$G/tools/safe_run.sh\nexport CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=4\n"$SAFE" 3G /usr/bin/time -v -o t.time "$PY" dino_features.py --device cuda --batch 32\n' > "$TMP/chain/run_infer.sh"
+check "$(cards "cd $TMP/chain && scp -q run_infer.sh gpu0:/work/lanes/ && ssh gpu0 'cd /work && nohup setsid bash tools/queue_after.sh runs/bench.log \"BENCH_DONE\" env CAP=4G bash lanes/run_infer.sh > q.log 2>&1 &'")" "gpu0:0" "v1.3 launch: a script scp'd to gpu0 and run there behind queue_after.sh is followed"
+check "$(cards "ssh gpu0 'cd /work && nohup setsid bash tools/queue_after.sh runs/bench.log \"BENCH_DONE\" bash lanes/run_infer.sh > q.log 2>&1 &'")" "" "v1.3 known limit: an unreadable remote script with no GPU evidence is not a launch (the board catches it)"
+check "$(cards "cd $TMP/chain && cat > fresh_idea.sh <<'EOF'${NL}#!/usr/bin/env bash${NL}CUDA_VISIBLE_DEVICES=1 python stage2_train.py${NL}EOF${NL}scp -q fresh_idea.sh gpu1:/work/tools/ && ssh gpu1 'setsid nohup bash /work/tools/fresh_idea.sh > /dev/null 2>&1 &'")" "gpu1:1" "v1.3 launch: written by heredoc, scp'd and run in ONE call (the file is not on disk yet at hook time)"
+[ ! -e "$TMP/chain/fresh_idea.sh" ] && pass "v1.3: that control never wrote the file (the heredoc body alone was read)" || fail "fresh_idea.sh exists: the control is vacuous"
+
+# ── 6c. `dreamteam gpu replay`: the warn-phase instrument has its own positive control ────────────────
+# Hooks load at session start, so lanes alive before the guard never log; the replay reads their transcripts instead.
+P="$TMP/proj/-work-lane"; mkdir -p "$P"
+line() { jq -nc --arg who "$1" --arg c "$2" --arg id "$3" \
+  '{type:"assistant", agentName:(if $who == "" then null else $who end), teamName:"t", cwd:"/work",
+    timestamp:"2026-09-29T12:00:00Z", message:{content:[{type:"tool_use", id:$id, name:"Bash", input:{command:$c}}]}}'; }
+{ line fixture-lane "ssh gpu1 'CUDA_VISIBLE_DEVICES=1 nohup python train.py > t.log 2>&1 &'" a1
+  line fixture-lane 'cat tools/gpu1_launch.sh' a2
+  line fixture-lane 'cat tools/gpu1_launch.sh' a2                      # a resumed transcript repeats a line
+  line "" "CUDA_VISIBLE_DEVICES=0 python train.py" a3; } > "$P/s.jsonl"   # an orchestrator: passes by design
+out=$(python3 "$ROOT/scripts/lib/gpu_replay.py" --projects "$TMP/proj" --since '2026-09-29 00:00' --until '2026-09-30 00:00' --plugin "$ROOT" 2>&1)
+case "$out" in *"calls in the window: **2**"*) pass "replay: counts the lane's 2 calls once each, skips the orchestrator" ;; *) fail "replay calls: $(echo "$out" | sed -n 3p)" ;; esac
+case "$out" in *"would-block with no claims seeded): **1**"*) pass "replay: the one launch is a would-block, the read is not" ;; *) fail "replay launches: $(echo "$out" | sed -n 5p)" ;; esac
+case "$out" in *"[gpu1:1] (CUDA_VISIBLE_DEVICES=1"*) pass "replay: names the lane's card" ;; *) fail "replay card: $out" ;; esac
+case "$(DREAMTEAM_AGENT_ID=x python3 "$LIB" replay --projects "$TMP/proj" --since '2026-09-29 00:00' --until '2026-09-30 00:00' 2>&1)" in
+  *"would-block with no claims seeded): **1**"*) pass "replay: reachable as \`dreamteam gpu replay\`" ;; *) fail "replay subcommand" ;; esac
 
 # ── 7. the bash wrapper (exit codes a hook runner sees) ──────────────────────────────────────────
 W="$ROOT/scripts/gpu-guard.sh"
@@ -212,6 +276,20 @@ payload 'docker run --rm --gpus all -m 8g audit:latest' | DREAMTEAM_AGENT_ID=lun
 check "$?" 2 "wrapper: a docker --gpus launch reaches the decision through the pre-filter (enforce blocks it)"
 echo 'not json' | DREAMTEAM_AGENT_ID=luna-refurb@jp DREAMTEAM_CONFIG="$E" bash "$W" 2>/dev/null
 check "$?" 0 "wrapper: a malformed payload fails open"
+# every command the detect checks above called a launch must reach the decision THROUGH the pre-filter (so the
+# pre-filter stays a superset of detect), and every non-launch must pass; luna-refurb holds no card here
+np=0; bad=""
+while IFS= read -r -d '' c; do
+  np=$((np + 1)); payload "$c" | DREAMTEAM_AGENT_ID=luna-refurb@jp DREAMTEAM_CONFIG="$E" bash "$W" 2>/dev/null
+  r=$?; [ "$r" = 2 ] || [ "$c" = 'dreamteam gpu run --card gpu1:0 -- python x.py' ] || bad="$bad | $r: ${c%%$'\n'*}"
+done < "$TMP/positives"
+check "${bad:-none}" none "wrapper: all $np detected launches are blocked through the pre-filter (enforce, no claim)"
+nn=0; bad=""
+while IFS= read -r -d '' c; do
+  nn=$((nn + 1)); payload "$c" | DREAMTEAM_AGENT_ID=luna-refurb@jp DREAMTEAM_CONFIG="$E" bash "$W" 2>/dev/null
+  r=$?; [ "$r" = 0 ] || bad="$bad | $r: ${c%%$'\n'*}"
+done < "$TMP/negatives"
+check "${bad:-none}" none "wrapper: all $nn non-launches pass (reads, edits, heredocs, CPU jobs)"
 
 # ── 8. run: the launch each host form builds (dry run) ───────────────────────────────────────────
 fresh

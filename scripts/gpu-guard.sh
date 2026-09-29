@@ -9,6 +9,8 @@
 #   - python, torchrun, accelerate or `ollama run` over ssh to a GPU-only host (gpu0, gpu1, game);
 #   - `docker run` with --gpus, --runtime=nvidia or --device /dev/nvidia* (luna's audits, vesper's verify windows).
 #   `dreamteam gpu run` passes: it checks the claim itself. Reads never count (nvidia-smi, tail, board).
+#   v1.3: only where a shell RUNS it. A launcher named as an argument (cat, sed, grep, scp), a heredoc written
+#   to a file, or a commit message is not a launch; scripts the command writes or runs locally are followed.
 #
 # MODES (config.json gpu.guard): warn (the rollout default: allow, and log the would-block line to
 # ~/.claude/state/dreamteam/gpu/guard.log) · enforce (exit 2 = deny, with the reason on stderr) · off.
@@ -20,17 +22,22 @@
 set -uo pipefail
 ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 INPUT="$(cat 2>/dev/null || true)"
+# The pre-filter is a SUPERSET of what detect can call a launch (gpu_detect.py): python, a script it may follow
+# (.sh), the GPU variables, the launchers, the GPU runners, and docker/podman. tests/test-gpu.sh replays every
+# positive control through this wrapper, so a trigger missing here goes red there.
 case "$INPUT" in
-  *CUDA_VISIBLE_DEVICES=*|*ZE_AFFINITY_MASK=*|*--device*cuda:*|*--device*xpu:*) ;;
+  *CUDA_VISIBLE_DEVICES*|*ZE_AFFINITY_MASK*|*--device*cuda*|*--device*xpu*) ;;
   *gpu1_launch.sh*|*run_exp.sh*|*remote_run.sh*|*guest_run.sh*|*safe_run.sh*) ;;
-  *ssh*gpu0*|*ssh*gpu1*|*ssh*game*) ;;
-  *docker*--gpus*|*docker*runtime*nvidia*|*docker*/dev/nvidia*) ;;
+  *python*|*.sh*|*torchrun*|*deepspeed*|*accelerate*|*ollama*) ;;
+  *docker*|*podman*) ;;
   *) exit 0 ;;
 esac
 command -v python3 >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || exit 0
 . "$ROOT/scripts/lib/agent-id.sh" 2>/dev/null || exit 0
 AGENT_ID="$(dt_agent_id 2>/dev/null || true)"
 RES="$(printf '%s' "$INPUT" | DREAMTEAM_AGENT_ID="$AGENT_ID" python3 "$ROOT/scripts/lib/gpu_fleet.py" guard 2>/dev/null)" || exit 0
+# The allow path (nearly every call) never forks jq: json.dumps writes `{"action": "allow", …` verbatim.
+case "$RES" in '{"action": "allow"'*) exit 0 ;; esac
 ACTION="$(printf '%s' "$RES" | jq -r '.action // "allow"' 2>/dev/null || echo allow)"
 MSG="$(printf '%s' "$RES" | jq -r '.message // ""' 2>/dev/null || true)"
 case "$ACTION" in

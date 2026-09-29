@@ -1,7 +1,7 @@
 # The GPU fleet: inventory, claims, one launcher, a launch guard (design spec)
 
 - **Date:** 2026-09-29 (drafted 09:2x–09:4x PDT by cirrus-scry, a Morpheus lane)
-- **Status:** v1 is live (dreamteam #101, f55fbd2). v1.1 (#102, #103) added shared and scheduled claims, the raw-peak pair rule keyed to idle MemAvailable, and katana's call watcher. v1.2 (10:3x) adds morpheus-gems's rules 3 and 6 as refined (VRAM growth; kill a VRAM-heavy container on a call, or when free VRAM is low), docker GPU launch detection, and katana's desktop as a VRAM resident. The guard stays in `warn` through today's GEMS window; the lead seeds and flips it tonight (§5.3).
+- **Status:** v1 is live (dreamteam #101, f55fbd2). v1.1 (#102, #103) added shared and scheduled claims, the raw-peak pair rule keyed to idle MemAvailable, and katana's call watcher. v1.2 (10:3x) adds morpheus-gems's rules 3 and 6 as refined (VRAM growth; kill a VRAM-heavy container on a call, or when free VRAM is low), docker GPU launch detection, and katana's desktop as a VRAM resident. v1.3 (11:5x) makes the guard's detection precise: a launch is where a shell runs it, never where it is mentioned (§5.1; 109 of v1.2's 125 would-blocks were false, and it missed 18 real launches). It also records that no lane session alive today runs the hook (§5.3). The guard stays in `warn` through today's GEMS window; the lead seeds and flips it tonight (§5.3).
 - **Asked by:** JP, 08:5x, relayed by team-lead: *"we need a gpu part for dreamteam plugin pls"*.
 - **Domain sources:**
   - `money/scratch/contests/gems/FAMILIAR-RULES.md` (the lead, Lucid, Drift and Morpheus-gems, 2026-09-28);
@@ -200,20 +200,58 @@ dreamteam gpu run --card <host:idx> [--protected] [--grows] [--peak-ram MB] [--g
 
 ## 5. The launch guard (`scripts/gpu-guard.sh`, PreToolUse Bash)
 
-### 5.1 What counts as a GPU launch
-A Bash command is a launch on card C when it:
-- runs `dreamteam gpu run --card C` or `scripts/gpu.sh run --card C`. Those are checked inside `run` itself, so
-  the guard passes them;
-- invokes a known launcher: `safe_run.sh`, `guest_run.sh`, `gpu1_launch.sh`, `run_exp.sh`, or
-  `scripts/gpu/*.sh` directly. The card comes from its arguments and `HOST=`/ssh target;
-- sets `CUDA_VISIBLE_DEVICES=<n>` or `ZE_AFFINITY_MASK=<n>` on a command, or passes `--device cuda:<n>`. The host
-  is the command's ssh target, else katana;
-- is `ssh <gpu host> …` running `python`, `torchrun`, `accelerate` or `ollama run`;
-- is `docker run` with `--gpus`, `--runtime=nvidia` or `--device /dev/nvidia*` (v1.2). `--gpus all` takes every usable
-  card on the host.
+### 5.1 What counts as a GPU launch (v1.3: where a shell RUNS it, never where it is mentioned)
+v1.2 scanned the command's tokens: any launcher name or `CUDA_VISIBLE_DEVICES=` anywhere was a launch, and so was
+any python over ssh to gpu0, gpu1 or game. Replayed over 3600 lane Bash calls from 2026-09-29 00:00 to 11:30
+(`money/scratch/gpu-fleet/replay_guard.py`), it flagged 125 would-blocks:
+- **109 were false.** They were `cat`, `sed`, `grep`, `scp` and `diff` of launcher scripts, heredocs written to files,
+  commit messages, python edit scripts, `ps | grep` status checks, and nebula's all-day CPU raster builds on gpu0.
+- **It missed 18 real launches.** They were chained through scripts: reverie's `after_queue.sh` and
+  `night_chain.sh` queues, vesper's `chain-nh.sh → gpu1_run.sh` (the gpu1:1 train.py of 11:04), luna-refurb's
+  verify script, and drift's DINO inference, scp'd to gpu0 and queued behind `queue_after.sh`.
 
-Reads never count: `nvidia-smi`, `xpu-smi`, `tail`/`cat` of logs, `dreamteam gpu board`. That is the negative
-control list.
+v1.3 (`scripts/lib/gpu_detect.py`) parses the command as a shell does. It honours quotes, escapes, heredocs,
+`$(…)`, `<(…)` and `;`/`&&`/`||`/`|`/`&`/newlines, and looks only at the program word of each simple command,
+after `NAME=value` prefixes and wrappers. The wrappers are nohup, setsid, env, timeout, nice, ionice, stdbuf,
+chrt, taskset, flock, sudo, time, watch, systemd-run (its `-E` sets the environment), systemd-inhibit, GEMS's
+`queue_after.sh`, and `safe_run.sh CAP` without `--protected`. A simple command launches GPU work when:
+- it is a launcher: `gpu1_launch.sh [N]` (host from `HOST=`, else gpu1), `run_exp.sh`, `remote_run.sh`,
+  `guest_run.sh` unless `--gpu-mem 0`, or `safe_run.sh --protected`. Not with `--help`, and not wrapping a no-op
+  (`safe_run.sh --protected 64M true` is an admission smoke test);
+- a GPU index is set on it: `CUDA_VISIBLE_DEVICES=N` or `ZE_AFFINITY_MASK=N` as a prefix, through `env`, or
+  exported earlier. An explicit prefix makes any program a launch (except a read such as `nvidia-smi` or
+  `echo`). An exported index counts only for python and for scripts that cannot be followed. A variable value
+  (`=$GPU`) means some card of that host;
+- it is python with GPU evidence: an index as above, `--device cuda[:N]`/`xpu:N`, `-m torch.distributed.run`, or
+  a script whose basename matches `fleet.json guard.gpu_programs` (stage2_train, dino_features, train.py,
+  finetune);
+- it is `torchrun`, `deepspeed`, `accelerate launch` or `ollama run`;
+- it is `docker`/`podman run|create` with `--gpus`, `--runtime=nvidia` or `--device /dev/nvidia*` before the image;
+- it runs a script that is **followed**. The detector reads the script and applies the same rules inside it,
+  with the environment the script inherits. Three kinds are followed:
+  - a script this command writes with a heredoc (`cat > bench.sh <<EOF … bash bench.sh`);
+  - a script this command `scp`s to a host and then runs there (the heredoc body wins over the disk, because the
+    hook runs BEFORE the command);
+  - a script on this machine, up to three levels deep (chain.sh → gpu1_run.sh → the ssh).
+
+  `bash X` is treated as `X` for launchers and wrappers.
+
+The ssh remote command, a heredoc fed to a remote shell (`ssh gpu1 bash -s <<EOF`), and `bash -c STRING` are
+parsed the same way, on their host. An ssh to an unresolvable host (`ssh "$H"`) fails open.
+
+**Not launches:** every argument and every quoted string, heredoc data (`cat > f`, `git commit -F -`, `jq`),
+reads, `bash -n`, `--help`, python without GPU evidence (CPU jobs), and the CPU markers:
+`CUDA_VISIBLE_DEVICES=` (empty), `-1`, and `--device cpu`. drift's 09:09 `dino_features.py --device cpu` smoke is
+a CPU job.
+
+**Precision over recall, on purpose.** A false block bricks a lane in `enforce`, while a missed launch still
+shows on `dreamteam gpu board` as `IN USE, NO CLAIM` within minutes. So an unreadable remote script with no GPU
+evidence is not a launch, and that known limit is pinned by a test. The replay of the same window gives 34
+would-blocks, each one reviewed as a real launch: v1.2's 16, plus the 18 it missed. The pre-filter in
+`gpu-guard.sh` is a superset of these triggers. It passes python, `.sh`, the GPU variables, the launchers, the
+GPU runners and docker/podman. The tests replay every detect check through the real wrapper, so a trigger
+missing from the pre-filter goes red. It costs about 10 ms for a command the pre-filter skips and about 85 ms for
+one it passes; in the replay it passed 58% of lane calls, against 14% in v1.2.
 
 ### 5.2 The decision
 - Identity: `dt_agent_id` from `lib/agent-id.sh`. Empty identity is an orchestrator or JP, and is allowed
@@ -233,6 +271,14 @@ enforcing on day one would stop GEMS mid-run. Hence:
    `money/scratch/gpu-fleet/seed-2026-09-29.sh`, which should be dry-run first.
 3. Flip `gpu.guard` to `enforce` in `config.json`, a one-line reversible change, once a day of warn lines shows
    no false positives.
+
+**The warn log cannot see yet (found 11:2x, 09-29).** Plugin hooks load at session start. All 13 lane sessions
+alive at 11:20 started before the guard reached main (09:40), so no lane runs `gpu-guard.sh`, and `guard.log`
+did not exist. This was proven two ways. First, a would-block command in such a session logged nothing. Second,
+the same payload piped to the hook script logged a warn. So an empty `guard.log` is a zero from an instrument
+that cannot see. The warn-phase review uses the replay instead:
+`python3 money/scratch/gpu-fleet/replay_guard.py --since '<date> 00:00' --plugin ~/Projects/dreamteam`.
+Enforcement also reaches only sessions started after 09:40: a lane is guarded once it is respawned.
 
 ## 6. `dreamteam gpu board`
 
