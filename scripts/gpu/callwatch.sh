@@ -17,14 +17,15 @@
 # Usage: callwatch.sh [--once]
 #   Without --once it loops every POLL_S seconds (default 5); systemd/dreamteam-gpu-callwatch.service runs it.
 # Env (tests): CALLWATCH_DEVS (space-separated; default /dev/video9) CALLWATCH_PAUSE CALLWATCH_STATE
-#              CALLWATCH_LOG CALLWATCH_POLL_S CALLWATCH_CALM_S CALLWATCH_DOCKER
+#              CALLWATCH_LOG CALLWATCH_POLL_S CALLWATCH_CALM_S CALLWATCH_DOCKER CALLWATCH_NVIDIA_SMI
+#              CALLWATCH_CGROUP_ROOT (where <pid>/cgroup is read; default /proc)
 set -u
 DEVS=${CALLWATCH_DEVS:-/dev/video9}
 PAUSE=${CALLWATCH_PAUSE:-$HOME/.gems-pause}
 STATE=${CALLWATCH_STATE:-$HOME/.claude/state/dreamteam/gpu/callwatch.state}
 LOG=${CALLWATCH_LOG:-$HOME/.claude/state/dreamteam/gpu/callwatch.log}
 POLL=${CALLWATCH_POLL_S:-5}; CALM=${CALLWATCH_CALM_S:-60}
-DOCKER=${CALLWATCH_DOCKER:-docker}
+DOCKER=${CALLWATCH_DOCKER:-docker}; SMI=${CALLWATCH_NVIDIA_SMI:-nvidia-smi}; CGR=${CALLWATCH_CGROUP_ROOT:-/proc}
 mkdir -p "$(dirname "$STATE")" "$(dirname "$LOG")"
 say() { printf '%s [callwatch %s] %s\n' "$(date '+%F %T')" "$$" "$*" >> "$LOG"; }
 
@@ -42,13 +43,22 @@ holder() {  # "pid comm dev" of the first non-OBS process holding a watched devi
   return 1
 }
 
-gpu_containers() {  # running containers that request a GPU
+gpu_containers() {  # running containers that request a GPU OR whose processes hold GPU memory right now
   command -v "$DOCKER" >/dev/null 2>&1 || return 0
-  "$DOCKER" ps --filter status=running --format '{{.Names}}' 2>/dev/null | while read -r n; do
-    [ -n "$n" ] || continue
-    dr=$("$DOCKER" inspect -f '{{json .HostConfig.DeviceRequests}}' "$n" 2>/dev/null)
-    case "$dr" in ""|null|"[]") ;; *) echo "$n" ;; esac
-  done
+  {
+    # `docker run --gpus` shows in DeviceRequests
+    "$DOCKER" ps --filter status=running --format '{{.Names}}' 2>/dev/null | while read -r n; do
+      [ -n "$n" ] || continue
+      dr=$("$DOCKER" inspect -f '{{json .HostConfig.DeviceRequests}}' "$n" 2>/dev/null)
+      case "$dr" in ""|null|"[]") ;; *) echo "$n" ;; esac
+    done
+    # --runtime=nvidia or a raw --device /dev/nvidia* does not: map the GPU's compute pids to their docker scope.
+    # (10:04 2026-09-29: a Mozilla competition container held 6.5 GB of katana's 2080 Ti.)
+    for pid in $("$SMI" --query-compute-apps=pid --format=csv,noheader 2>/dev/null); do
+      id=$(grep -o 'docker-[0-9a-f]\{64\}' "$CGR/$pid/cgroup" 2>/dev/null | head -1); id=${id#docker-}
+      [ -n "$id" ] && "$DOCKER" inspect -f '{{.Name}}' "$id" 2>/dev/null | sed 's#^/##'
+    done
+  } | sort -u
 }
 
 ours() { [ -f "$PAUSE" ] && head -c 9 "$PAUSE" 2>/dev/null | grep -qx callwatch; }
