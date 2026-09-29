@@ -95,6 +95,11 @@ bash tests/run.sh          # runs every suite, exits non-zero on any failure
     - an explicit `--device` beats a CPU name;
     - `command` runs its argument (`-v` is a lookup);
     - an XPU index beats the CUDA CPU marker;
+  - **the final review (#113):**
+    - a CPU decoy beside an unjudged program keeps the protected run;
+    - `. gpujob` goes through the pre-filter;
+    - tmux if-shell/pipe-pane and `screen -X stuff` are scanned;
+    - export/declare variables are tracked;
   - **the board's guard section:**
     - unguarded = a lane session started before the hook's reflog arrival; an orchestrator is no lane, and an unknown arrival counts every lane unguarded;
     - the incremental replay cache: a new line is read once, a line still being written waits, the offset stops at the last complete line, and a replaced transcript rebuilds;
