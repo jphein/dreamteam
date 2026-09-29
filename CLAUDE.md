@@ -100,6 +100,9 @@ bash tests/run.sh          # runs every suite, exits non-zero on any failure
     - `. gpujob` goes through the pre-filter;
     - tmux if-shell/pipe-pane and `screen -X stuff` are scanned;
     - export/declare variables are tracked;
+  - **#114:**
+    - utilities (mv, mkdir, rm), builtins (cd, `[[`) and GDAL/PDAL CLIs are no runs, so a CPU pipeline under `--protected` stays CPU;
+    - `uv run`, `conda run -n` and the other runners run their command;
   - **the board's guard section:**
     - unguarded = a lane session started before the hook's reflog arrival; an orchestrator is no lane, and an unknown arrival counts every lane unguarded;
     - the incremental replay cache: a new line is read once, a line still being written waits, the offset stops at the last complete line, and a replaced transcript rebuilds;
