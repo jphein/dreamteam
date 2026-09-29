@@ -379,10 +379,12 @@ def _scan(cmd: str, st: _Scan, host, env: dict, cwd: str, depth: int, written: d
 def _run_script(path_word: str, st: _Scan, host, env: dict, cwd: str, depth: int, written: dict) -> bool:
     """A script the command runs: one it wrote itself, or a local file. Returns True when it was followed."""
     base = os.path.basename(path_word)
+    if depth >= MAX_DEPTH:                  # also bounds a script that runs itself (cat > a.sh <<EOF … bash a.sh)
+        return False
     if base in written:
         _scan(written[base], st, host, env, cwd, depth + 1, written)
         return True
-    if host != st.local or depth >= MAX_DEPTH or SUB in path_word or "$" in path_word:
+    if host != st.local or SUB in path_word or "$" in path_word:
         return False
     p = os.path.normpath(os.path.join(cwd, os.path.expanduser(path_word)))
     try:
@@ -773,7 +775,11 @@ def detect(cmd: str, fleet: dict, local: str, cwd: str | None = None) -> dict:
     Returns {"launch", "via_run", "cards", "host_any", "why"}: host_any lists hosts where the command runs GPU
     work on an unnamed card (a lane must hold at least one card there)."""
     st = _Scan(fleet, local)
-    _scan(cmd or "", st, local, {}, cwd or os.getcwd(), 0, {})
+    try:
+        _scan(cmd or "", st, local, {}, cwd or os.getcwd(), 0, {})
+    except Exception as e:                  # fail open, visibly: a parser bug must never brick a lane
+        return {"launch": False, "via_run": False, "cards": [], "host_any": [],
+                "why": f"parse error, fail open ({type(e).__name__})"}
     out = {"launch": False, "via_run": st.via_run, "cards": [], "host_any": [], "why": ""}
     whys = []
     for host, idx, prefix, why, all_cards in st.finds:

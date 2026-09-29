@@ -241,6 +241,12 @@ printf '#!/usr/bin/env bash\nG=/work; PY=$G/.venv/bin/python; SAFE=$G/tools/safe
 check "$(cards "cd $TMP/chain && scp -q run_infer.sh gpu0:/work/lanes/ && ssh gpu0 'cd /work && nohup setsid bash tools/queue_after.sh runs/bench.log \"BENCH_DONE\" env CAP=4G bash lanes/run_infer.sh > q.log 2>&1 &'")" "gpu0:0" "v1.3 launch: a script scp'd to gpu0 and run there behind queue_after.sh is followed"
 check "$(cards "ssh gpu0 'cd /work && nohup setsid bash tools/queue_after.sh runs/bench.log \"BENCH_DONE\" bash lanes/run_infer.sh > q.log 2>&1 &'")" "" "v1.3 known limit: an unreadable remote script with no GPU evidence is not a launch (the board catches it)"
 check "$(cards "cd $TMP/chain && cat > fresh_idea.sh <<'EOF'${NL}#!/usr/bin/env bash${NL}CUDA_VISIBLE_DEVICES=1 python stage2_train.py${NL}EOF${NL}scp -q fresh_idea.sh gpu1:/work/tools/ && ssh gpu1 'setsid nohup bash /work/tools/fresh_idea.sh > /dev/null 2>&1 &'")" "gpu1:1" "v1.3 launch: written by heredoc, scp'd and run in ONE call (the file is not on disk yet at hook time)"
+s0=$(date +%s%N); r=$(DREAMTEAM_AGENT_ID=x python3 "$LIB" detect "cat > loop.sh <<'EOF'${NL}bash loop.sh${NL}EOF${NL}bash loop.sh" | jq -r '"\(.launch) \(.why)"'); ms=$(( ($(date +%s%N) - s0) / 1000000 ))
+check "$r" "false " "v1.3: a script that runs itself is bounded by MAX_DEPTH (not a launch, and no parse-error fail-open)"
+deep=$(python3 -c 'print("echo " + "$(echo " * 150 + "x" + ")" * 150)')
+check "$(DREAMTEAM_AGENT_ID=x python3 "$LIB" detect "$deep" | jq -r '"\(.launch) \(.why)"')" "false " "v1.3: 150 nested \$(…) parse (no parse-error fail-open)"
+check "$(DREAMTEAM_AGENT_ID=x python3 -c 'import sys, json; sys.path.insert(0, sys.argv[1]); import gpu_detect as g; print(g.detect(None, json.load(open(sys.argv[2])), "katana", "/")["launch"])' "$ROOT/scripts/lib" "$ROOT/gpu/fleet.json")" "False" "v1.3: an empty command is not a launch"
+[ "$ms" -lt 3000 ] && pass "v1.3: the self-running script is decided in ${ms} ms (< 3 s; the hook's timeout is 4 s)" || fail "self-running script took ${ms} ms"
 [ ! -e "$TMP/chain/fresh_idea.sh" ] && pass "v1.3: that control never wrote the file (the heredoc body alone was read)" || fail "fresh_idea.sh exists: the control is vacuous"
 
 # ── 6c. `dreamteam gpu replay`: the warn-phase instrument has its own positive control ────────────────
