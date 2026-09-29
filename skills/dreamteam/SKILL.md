@@ -956,7 +956,7 @@ measured sizes and each host's admission rules in `gpu/fleet.json`. Spec:
     from `fleet.json guard.gpu_programs`. Mark CPU work explicitly with `CUDA_VISIBLE_DEVICES=` (empty) or
     `--device cpu`.
   - **Hooks load at session start,** so a lane is guarded only once it is respawned. An empty `guard.log` proves
-    nothing. Review warn mode with `money/scratch/gpu-fleet/replay_guard.py`, which replays the lanes' real
+    nothing. Review warn mode with `dreamteam gpu replay --since '<date> 00:00'`, which replays the lanes' real
     commands through the guard.
 - **katana during calls:** OBS holds the virtual camera all day, so that is not a call. A live call is a non-OBS reader of
   `/dev/video9`. The call watcher (`dreamteam-gpu-callwatch` user service) writes `~/.gems-pause` for the call's

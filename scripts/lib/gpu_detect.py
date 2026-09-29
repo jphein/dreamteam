@@ -11,7 +11,7 @@ A launch is recognised where a shell would RUN it, never where it is merely ment
     `ssh gpu1 … CUDA_VISIBLE_DEVICES=1 … train.py`, 09-29).
 A launcher named as an ARGUMENT (cat, sed, grep, cp, scp), a heredoc written to a file, a commit message or a
 quoted string is data, not a launch. Replayed on the 3560 lane commands of 2026-09-29, the v1.2 token scan
-flagged 125 would-blocks and about 100 of them were reads and edits (money/scratch/gpu-fleet/replay-2026-09-29.md).
+flagged 125 would-blocks and 109 of them were reads and edits (dreamteam #106; `dreamteam gpu replay`).
 
 Precision comes first: a false block bricks a lane, while a missed launch still shows on
 `dreamteam gpu board` as IN USE, NO CLAIM. So python counts only with GPU evidence: a CUDA_VISIBLE_DEVICES or
