@@ -203,7 +203,7 @@ dreamteam gpu run --card <host:idx> [--protected] [--grows] [--peak-ram MB] [--g
 ### 5.1 What counts as a GPU launch (v1.3: where a shell RUNS it, never where it is mentioned)
 v1.2 scanned the command's tokens: any launcher name or `CUDA_VISIBLE_DEVICES=` anywhere was a launch, and so was
 any python over ssh to gpu0, gpu1 or game. Replayed over 3600 lane Bash calls from 2026-09-29 00:00 to 11:30
-(`money/scratch/gpu-fleet/replay_guard.py`), it flagged 125 would-blocks:
+(`dreamteam gpu replay`, `scripts/lib/gpu_replay.py`), it flagged 125 would-blocks:
 - **109 were false.** They were `cat`, `sed`, `grep`, `scp` and `diff` of launcher scripts, heredocs written to files,
   commit messages, python edit scripts, `ps | grep` status checks, and nebula's all-day CPU raster builds on gpu0.
 - **It missed 18 real launches.** They were chained through scripts: reverie's `after_queue.sh` and
@@ -277,7 +277,8 @@ alive at 11:20 started before the guard reached main (09:40), so no lane runs `g
 did not exist. This was proven two ways. First, a would-block command in such a session logged nothing. Second,
 the same payload piped to the hook script logged a warn. So an empty `guard.log` is a zero from an instrument
 that cannot see. The warn-phase review uses the replay instead:
-`python3 money/scratch/gpu-fleet/replay_guard.py --since '<date> 00:00' --plugin ~/Projects/dreamteam`.
+`dreamteam gpu replay --since '<date> 00:00'`. To compare two plugin versions on the same window, run
+`python3 scripts/lib/gpu_replay.py --plugin <other checkout> --tsv <file>` from each.
 Enforcement also reaches only sessions started after 09:40: a lane is guarded once it is respawned.
 
 ## 6. `dreamteam gpu board`
