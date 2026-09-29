@@ -495,7 +495,7 @@ def live_vram_check(fleet: dict, card: str, peak_vram_mib: int) -> str:
     free = g["total_mib"] - g["used_mib"]
     line = f"{card} live VRAM: free {free} MiB >= peak {peak_vram_mib} + {margin} margin"
     if free < peak_vram_mib + margin:
-        holders = "; ".join(f"{x['pid']} {x['used_mib']}MiB {os.path.basename(x['name'])}"
+        holders = "; ".join(f"{x['pid']} {x['used_mib']}MiB {proc_label(x['name'])}"
                             for x in p.get("apps", []) if x.get("index") == c["index"])
         raise Refused(line.replace(">=", "<") + (f" (in use: {holders})" if holders else ""))
     return line
@@ -574,6 +574,17 @@ DESKTOP_APPS = re.compile(r"(gnome|xorg|xwayland|xdg-|mutter|kwin|plasmashell|fi
                           r"crashpad|renderD\d+)", re.I)   # the full name: Chromium/Electron GPU procs report their args
 
 
+def proc_label(name: str) -> str:
+    """A GPU process's short name for the board and refusals. Chromium and Electron GPU processes report their whole
+    command line to nvidia-smi, so the basename of the full string lands inside an argument
+    ('renderD128 --crashpad-handler-pid=…' from --render-node-override=/dev/dri/renderD128)."""
+    n = (name or "").strip()
+    if not n or n.startswith("["):     # "[Not Found]": a process in another pid namespace, e.g. a container
+        return n or "?"
+    first = n.split()[0]
+    return os.path.basename(first) or first
+
+
 def unclaimed_use(apps: list, residents: list | None = None) -> list:
     """Compute processes that look like jobs (not the desktop, not a known resident service) holding >= 256 MiB."""
     pats = [re.compile(r["match"]) for r in (residents or []) if r.get("match")]
@@ -635,7 +646,7 @@ def cmd_board(a, fleet, cfg) -> int:
         nxt = "; next " + ", ".join(f"{n['lane']} {fmt_t(n['from'])}" for n in c["next"]) if c["next"] else ""
         win = "" if c["window"] == "always" else f"  window {c['window']} ({'open' if c['window_open'] else 'closed'})"
         apps = sorted(c["apps"], key=lambda x: -int(x["used_mib"]) if str(x["used_mib"]).isdigit() else 0)
-        jobs = "; ".join(f"{x['pid']} {x['used_mib']}MiB {os.path.basename(x['name'])}" for x in apps[:3])
+        jobs = "; ".join(f"{x['pid']} {x['used_mib']}MiB {proc_label(x['name'])}" for x in apps[:3])
         if len(apps) > 3:
             jobs += f"; +{len(apps) - 3} more"
         print(f"  {c['card']:<14} {c['model'][:26]:<26} {state:<18} {who}{nxt}{win}" + (f"  [{jobs}]" if jobs else ""))
