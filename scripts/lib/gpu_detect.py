@@ -43,27 +43,76 @@ READS = {"echo", "printf", "true", "false", ":", "test", "[", "nvidia-smi", "exp
          "alias", "read", "let", "hash", "shopt", "getopts", "break", "continue", "kill", "[[", "]]", "nproc", "seq",
          "mv", "cp", "mkdir", "rm", "rmdir", "ln", "touch", "chmod", "chown", "chgrp", "install", "truncate", "split",
          "tar", "gzip", "gunzip", "zcat", "zstd", "unzstd", "xz", "unxz", "bzip2", "bunzip2", "zip", "unzip", "pigz",
-         "sync", "tee", "find", "curl", "wget", "sqlite3", "yq", "pip", "uv",
+         "sync", "tee", "find", "curl", "wget", "sqlite3", "yq", "pip",
          "gdalinfo", "gdal_translate", "gdalwarp", "gdalbuildvrt", "gdaladdo", "ogr2ogr", "ogrinfo", "rio", "pdal"}
-# python project runners: `uv run CMD` runs CMD (uv's other verbs, `uv pip`/`uv sync`, are no GPU job)
-PY_RUNNERS = {"uv": {"--with", "--with-requirements", "--with-editable", "--python", "-p", "--project", "--directory",
-                     "--env-file", "--extra", "--group", "--package", "--index", "--index-url", "--default-index"},
-              "poetry": set(), "pdm": set(), "hatch": set(), "pipx": {"--spec", "--python"},
-              "conda": {"-n", "--name", "-p", "--prefix", "--cwd"}, "mamba": {"-n", "--name", "-p", "--prefix"},
-              "micromamba": {"-n", "--name", "-p", "--prefix"}}
+# python project runners (the Oracle, 09-29: `uv --directory /w run python train.py` put global options before the
+# verb, so a runner matched on words[1] read as a no-op and hid a protected run). Each runner: its global options that
+# take a value, its `run` options that take a value, and the verbs that run nothing (reads). Any OTHER verb fails
+# closed: an opaque run (the --protected fallback still fires; an explicit GPU variable still counts).
+PY_RUNNERS = {
+    "uv": ({"--directory", "--project", "--cache-dir", "--config-file", "--color", "--python-preference",
+            "--allow-insecure-host", "--python", "-p"},
+           {"--with", "--with-requirements", "--with-editable", "--python", "-p", "--project", "--directory",
+            "--env-file", "--extra", "--group", "--only-group", "--package", "--index", "--index-url",
+            "--default-index", "-w"},
+           {"pip", "sync", "lock", "add", "remove", "venv", "tree", "export", "init", "python", "cache", "self",
+            "version", "build", "publish", "help", "format", "generate-shell-completion", "auth"}),
+    "uvx": ({"--from", "--with", "--with-requirements", "--with-editable", "--python", "-p", "--directory",
+             "--project", "--cache-dir", "--index", "--index-url", "--default-index", "-w"}, set(), set()),
+    "poetry": ({"-C", "--directory", "-P", "--project"}, set(),
+               {"install", "update", "add", "remove", "lock", "show", "build", "publish", "check", "config", "env",
+                "export", "init", "new", "search", "self", "source", "version", "about", "list", "help", "cache",
+                "sync", "debug"}),
+    "pdm": ({"-p", "--project"}, set(), {"install", "add", "remove", "lock", "update", "sync", "list", "show",
+                                         "build", "publish", "init", "info", "config", "cache", "venv", "export",
+                                         "import", "self", "fix", "search", "outdated", "use"}),
+    "hatch": ({"-e", "--env", "-p", "--project", "--data-dir", "--cache-dir", "--config"}, set(),
+              {"build", "clean", "config", "dep", "env", "fmt", "new", "project", "publish", "python", "self",
+               "status", "test", "version", "shell"}),
+    "pipx": (set(), {"--spec", "--python", "--pip-args"},
+             {"install", "uninstall", "upgrade", "upgrade-all", "list", "inject", "uninject", "ensurepath",
+              "environment", "reinstall", "reinstall-all", "completions", "interpreter", "pin", "unpin"}),
+    "conda": (set(), {"-n", "--name", "-p", "--prefix", "--cwd"},
+              {"install", "update", "remove", "uninstall", "create", "list", "info", "search", "config", "env",
+               "clean", "activate", "deactivate", "init", "export", "package", "compare", "doctor", "notices"}),
+    "mamba": (set(), {"-n", "--name", "-p", "--prefix", "--cwd"},
+              {"install", "update", "remove", "uninstall", "create", "list", "info", "search", "config", "env",
+               "clean", "activate", "deactivate", "init", "repoquery"}),
+    "micromamba": ({"-r", "--root-prefix"}, {"-n", "--name", "-p", "--prefix", "--cwd"},
+                   {"install", "update", "remove", "uninstall", "create", "list", "info", "search", "config",
+                    "env", "clean", "activate", "deactivate", "shell", "self-update", "repoquery", "package"}),
+}
 
 
-def _runner_rest(words: list):
-    """The command a `uv run` / `conda run -n env` / `poetry run` runs, or None when it is not a run."""
-    vals = PY_RUNNERS.get(os.path.basename(words[0]))
-    if vals is None or words[1:2] != ["run"]:
-        return None
-    rest = words[2:]
+def _skip(rest: list, vals: set) -> list:
+    """Drop leading options; one in vals takes the next word (unless written --opt=value)."""
     while rest and rest[0].startswith("-") and rest[0] != "-":
         if rest[0] == "--":
             return rest[1:]
         rest = rest[2:] if (rest[0] in vals and "=" not in rest[0]) else rest[1:]
     return rest
+
+
+def _runner(words: list):
+    """("run", command words) | ("read", None) | ("opaque", None) for a python project runner; None if not one."""
+    name = os.path.basename(words[0]) if words else ""
+    spec = PY_RUNNERS.get(name)
+    if spec is None:
+        return None
+    globals_, run_opts, reads = spec
+    rest = _skip(words[1:], globals_)
+    if name == "uvx":                              # uvx [options] COMMAND …: always a run
+        return ("run", rest) if rest else ("read", None)
+    if not rest:
+        return ("read", None)                      # `uv --version`, `poetry -h`
+    verb = rest[0]
+    if verb == "run":
+        return ("run", _skip(rest[1:], run_opts))
+    if name == "uv" and verb == "tool" and rest[1:2] == ["run"]:
+        return ("run", _skip(rest[2:], PY_RUNNERS["uvx"][0]))
+    if verb in reads or (name == "uv" and verb == "tool"):
+        return ("read", None)
+    return ("opaque", None)                        # an unknown verb fails closed
 
 
 # tmux subcommands that run a shell command, and the flags that take a value in each
@@ -548,8 +597,13 @@ def _simple(sc: dict, st: _Scan, host, env: dict, shvars: dict, cwd: str, depth:
                 _scan(args[1], st, host, cenv, cwd, depth, written)
                 return
             words = args
-        elif _runner_rest(words) is not None:   # uv run / poetry run / conda run -n env …: a wrapper
-            words = _runner_rest(words)
+        elif _runner(words) is not None:   # uv run / poetry run / conda run -n env …: a wrapper
+            kind, cmd = _runner(words)
+            if kind == "read":
+                return                     # `uv pip install …`: runs nothing a GPU could see
+            if kind == "opaque":
+                break                      # an unknown verb: falls through as an opaque run (fails closed)
+            words = cmd
         elif prog == "command":            # `command X` runs X; `command -v X` only looks it up
             args = words[1:]
             if args and args[0].startswith("-") and any(ch in "vV" for ch in args[0][1:]):
@@ -952,8 +1006,13 @@ def _program_of(words: list) -> str | None:
             while words and words[0].startswith("-") and words[0] != "-":
                 words = words[2:] if words[0] in ("-u", "--unset", "-C", "--chdir") else words[1:]
             continue
-        if _runner_rest(words) is not None:
-            words = _runner_rest(words)
+        if _runner(words) is not None:
+            kind, cmd = _runner(words)
+            if kind == "read":
+                return None                  # `uv pip …` under --protected: nothing is run
+            if kind == "opaque":
+                return b                     # an unknown verb: not a read, so the fallback still fires
+            words = cmd
             continue
         if b == "command":
             if words[1:2] and words[1].startswith("-") and any(ch in "vV" for ch in words[1][1:]):
