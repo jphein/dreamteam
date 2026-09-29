@@ -25,7 +25,9 @@ import socket
 import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gpu_detect  # noqa: E402  (the launch parser, beside this file)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 REFUSED, NOPERM, USAGE = 75, 77, 2
@@ -605,6 +607,7 @@ def board_data(fleet: dict) -> dict:
     t = now()
     with Ledger() as L:
         live, upcoming, windows = L.live(t), L.upcoming(t), dict(L.data["windows"])
+    from concurrent.futures import ThreadPoolExecutor  # lazy: the guard path never pays ~14 ms for it
     with ThreadPoolExecutor(max_workers=len(fleet["hosts"])) as ex:
         probes = dict(zip(fleet["hosts"], ex.map(lambda h: probe(fleet, h), fleet["hosts"])))
     cards = []
@@ -800,131 +803,18 @@ def cmd_run(a, fleet, cfg) -> int:
 
 # ── the guard's decision ──────────────────────────────────────────────────────────────────────────
 
-SSH_OPTS_WITH_ARG = set("-B -b -c -D -E -e -F -I -i -J -L -l -m -O -o -p -Q -R -S -W -w".split())
-LAUNCHERS = {"gpu1_launch.sh", "run_exp.sh", "remote_run.sh", "guest_run.sh", "safe_run.sh"}
-GPU_ONLY_HOSTS_DEFAULT = ("gpu0", "gpu1", "game")
-PY_LAUNCH = re.compile(r"(^|[\s;&|(/])(python3?|torchrun|accelerate|ollama\s+run)\b")
+def detect(cmd: str, fleet: dict, cwd: str | None = None) -> dict:
+    """Which cards a Bash command launches GPU work on: by command position, never by mention (v1.3).
+    The parser lives in gpu_detect.py; cwd is where the lane ran the command (its scripts resolve there)."""
+    return gpu_detect.detect(cmd, fleet, local_host(), cwd)
 
 
-def _host_alias(tok: str, fleet: dict) -> str | None:
-    h = tok.split("@", 1)[-1].lower()
-    for suffix in (".lan", ".jphe.in", ".realm.watch"):
-        if h.endswith(suffix):
-            h = h[: -len(suffix)]
-    return h if h in fleet["hosts"] else None
-
-
-def _tokens(cmd: str) -> list:
-    try:
-        return shlex.split(cmd, posix=True)
-    except ValueError:
-        return cmd.split()
-
-
-def _ssh_target(toks: list, fleet: dict):
-    """(present, host, remote_command) for the first ssh in the command. present=False: no ssh at all.
-    host=None with present=True: an ssh whose target does not resolve (a variable, an unknown name)."""
-    for i, tok in enumerate(toks):
-        if os.path.basename(tok) != "ssh":
-            continue
-        j = i + 1
-        while j < len(toks) and toks[j].startswith("-"):
-            j += 2 if toks[j] in SSH_OPTS_WITH_ARG else 1
-        if j < len(toks):
-            return True, _host_alias(toks[j], fleet), " ".join(toks[j + 1:])
-        return True, None, ""
-    return False, None, None
-
-
-def detect(cmd: str, fleet: dict) -> dict:
-    """Which cards a Bash command launches GPU work on.
-    Returns {"launch", "via_run", "cards", "host_any", "why"}: host_any lists hosts where the command runs GPU
-    work on an unnamed card (a lane must hold at least one card there)."""
-    out = {"launch": False, "via_run": False, "cards": [], "host_any": [], "why": ""}
-    flat = " ".join(cmd.split())
-    if re.search(r"(^|[\s;&|(])(dreamteam\s+gpu|(\S*/)?scripts/gpu\.sh)\s+run\b", flat):
-        out.update(launch=True, via_run=True, why="dreamteam gpu run (checked inside run)")
-        return out
-    toks = _tokens(cmd)
-    has_ssh, ssh_host, remote = _ssh_target(toks, fleet)
-    body = remote if has_ssh else flat
-    btoks = _tokens(body or "")
-    names = {os.path.basename(t) for t in btoks} | {os.path.basename(t) for t in toks}
-    host = ssh_host if has_ssh else local_host()
-    idx, prefix, why = None, "", ""
-    m = re.search(r"\b(CUDA_VISIBLE_DEVICES|ZE_AFFINITY_MASK)=['\"]?([0-9][0-9,]*)", body or "")
-    if m:
-        idx = [int(x) for x in m.group(2).split(",") if x]
-        prefix, why = ("xpu" if m.group(1) == "ZE_AFFINITY_MASK" else ""), f"{m.group(1)}={m.group(2)}"
-    m2 = re.search(r"--device[= ]+(cuda|xpu):(\d+)", body or "")
-    if m2 and idx is None:
-        idx, prefix = [int(m2.group(2))], ("xpu" if m2.group(1) == "xpu" else "")
-        why = f"--device {m2.group(1)}:{m2.group(2)}"
-    if "gpu1_launch.sh" in names:
-        mh = re.search(r"\bHOST=(\w+)", flat)
-        host = _host_alias(mh.group(1), fleet) if mh else "gpu1"   # gpu1_launch does its own ssh
-        allt = _tokens(flat)
-        k = next((i for i, t in enumerate(allt) if t.endswith("gpu1_launch.sh")), None)
-        if k is not None and k + 1 < len(allt) and allt[k + 1].isdigit():
-            idx, prefix = [int(allt[k + 1])], ""
-        why = "gpu1_launch.sh"
-    elif "guest_run.sh" in names:
-        mg = re.search(r"--gpu-mem[= ]+([0-9.]+)", body or "")
-        if not (mg and float(mg.group(1)) == 0):
-            why = why or "guest_run.sh (a GPU cap)"
-        elif idx is None:
-            why = ""   # --gpu-mem 0: a CPU-only guest job
-    elif "safe_run.sh" in names and re.search(r"(^|\s)--protected(\s|$)", body or ""):
-        why = why or "safe_run.sh --protected (a training run)"
-    elif names & {"run_exp.sh", "remote_run.sh"}:
-        why = why or ", ".join(sorted(names & {"run_exp.sh", "remote_run.sh"}))
-    # docker: a container gets a GPU from --gpus, --runtime=nvidia or a raw --device /dev/nvidia*. Luna's audits and
-    # vesper's verify windows on katana run this way, outside guest_run's budget (morpheus-gems, 09-29).
-    dk = re.search(r"\bdocker\s+(?:container\s+)?(?:run|create)\b(.*)", body or "")
-    if dk and not why:
-        opts = dk.group(1)
-        mg = re.search(r"--gpus[= ]+(['\"]?)([^\s'\"]+)\1", opts)
-        if mg or re.search(r"--runtime[= ]+nvidia\b", opts) or re.search(r"--device[= ]+/dev/nvidia", opts):
-            why = "docker run with a GPU"
-            spec = mg.group(2) if mg else "all"
-            md = re.search(r"device=([0-9][0-9,]*)", spec)
-            if md and idx is None:
-                idx, prefix = [int(x) for x in md.group(1).split(",") if x], ""
-            elif spec == "all" and idx is None and host in fleet["hosts"]:
-                allc = [cid for cid, cc in fleet["cards"].items() if cc["host"] == host and cc.get("compute_ok", True)]
-                if len(allc) > 1:
-                    out["cards"] = allc   # --gpus all takes every usable card on the host
-                    out.update(launch=True, why=why)
-                    return out
-    if not why and has_ssh and ssh_host in GPU_ONLY_HOSTS_DEFAULT and PY_LAUNCH.search(remote or ""):
-        why = f"python on {ssh_host} over ssh"
-    if not why:
-        return out
-    out["why"] = why
-    if host is None or host not in fleet["hosts"]:
-        out["why"] += " (host unresolved: fail open)"
-        return out   # an ssh to a variable or unknown host cannot be attributed; never blame the wrong card
-    out["launch"] = True
-    host_cards = [cid for cid, c in fleet["cards"].items() if c["host"] == host]
-    usable = [c for c in host_cards if fleet["cards"][c].get("compute_ok", True)]
-    if idx is not None:
-        want = [f"{host}:{prefix}{i}" for i in idx]
-        out["cards"] = want
-    elif len(usable) == 1:
-        out["cards"] = usable
-    elif len(host_cards) == 1:
-        out["cards"] = host_cards
-    else:
-        out["host_any"] = [host]
-    return out
-
-
-def decide(cmd: str, fleet: dict, cfg: dict, agent_id: str, t: float) -> dict:
+def decide(cmd: str, fleet: dict, cfg: dict, agent_id: str, t: float, cwd: str | None = None) -> dict:
     mode = guard_mode(cfg)
-    d = detect(cmd, fleet)
+    d = detect(cmd, fleet, cwd)
     res = {"action": "allow", "mode": mode, **d, "message": ""}
-    if mode == "off" or not d["launch"] or d["via_run"] or not agent_id or "@" not in agent_id:
-        return res  # not a launch, checked inside run, or an orchestrator/unknown identity (fail open)
+    if mode == "off" or not d["launch"] or not agent_id or "@" not in agent_id:
+        return res  # not a launch (`gpu run` checks its own), or an orchestrator/unknown identity (fail open)
     lane = lane_of(agent_id)
     with Ledger() as L:
         live = L.live(t)
@@ -956,7 +846,7 @@ def cmd_guard(a, fleet, cfg) -> int:
         print(json.dumps({"action": "allow", "message": "unparseable payload (fail open)"}))
         return 0
     command = (payload.get("tool_input") or {}).get("command") or ""
-    res = decide(command, fleet, cfg, caller(), now())
+    res = decide(command, fleet, cfg, caller(), now(), cwd=payload.get("cwd"))
     if res["action"] != "allow":
         with contextlib.suppress(OSError):
             os.makedirs(state_dir(), exist_ok=True)
@@ -1036,6 +926,13 @@ def main(argv=None) -> int:
     p = sub.add_parser("detect", help="(debug) which cards a command would launch on")
     p.add_argument("command", nargs=argparse.REMAINDER)
     p.set_defaults(fn=cmd_detect)
+    p = sub.add_parser("replay", help="replay the lanes' real Bash calls through the guard (the warn-phase review)",
+                       add_help=False)
+    p.add_argument("rest", nargs=argparse.REMAINDER)
+    p.set_defaults(fn=lambda a, fleet, cfg: __import__("gpu_replay").main(a.rest))
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["replay"]:                    # its own flags (--since, --until, --plugin, …) pass through
+        return __import__("gpu_replay").main(argv[1:])
     a = ap.parse_args(argv)
     if getattr(a, "cmd", None) and a.cmd[:1] == ["--"]:
         a.cmd = a.cmd[1:]

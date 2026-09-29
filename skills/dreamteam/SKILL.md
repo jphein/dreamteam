@@ -949,6 +949,15 @@ measured sizes and each host's admission rules in `gpu/fleet.json`. Spec:
   `CUDA_VISIBLE_DEVICES=…`, the GEMS launchers, python over ssh to gpu0, gpu1 or game, and `docker run --gpus` or
   `--runtime=nvidia`, on a card the lane does not hold. It runs in **warn** mode until the current holdings are seeded, and logs to
   `~/.claude/state/dreamteam/gpu/guard.log`. Then it moves to **enforce** (exit 2). Orchestrators always pass.
+  - **v1.3 counts a launch only where a shell runs it.** Reading, copying, grepping or editing a launcher is never
+    a launch, and neither is a heredoc written to a file. It follows the scripts a command writes, scp's or runs
+    locally.
+  - **python on a GPU host is a CPU job** unless it has GPU evidence: an index, `--device cuda`, or a GPU program
+    from `fleet.json guard.gpu_programs`. Mark CPU work explicitly with `CUDA_VISIBLE_DEVICES=` (empty) or
+    `--device cpu`.
+  - **Hooks load at session start,** so a lane is guarded only once it is respawned. An empty `guard.log` proves
+    nothing. Review warn mode with `money/scratch/gpu-fleet/replay_guard.py`, which replays the lanes' real
+    commands through the guard.
 - **katana during calls:** OBS holds the virtual camera all day, so that is not a call. A live call is a non-OBS reader of
   `/dev/video9`. The call watcher (`dreamteam-gpu-callwatch` user service) writes `~/.gems-pause` for the call's
   length. It kills a GPU container holding ≥ 1 GiB of VRAM, because a paused one keeps its VRAM, and pauses a smaller
