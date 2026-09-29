@@ -294,23 +294,40 @@ class _Scan:
     def __init__(self, fleet: dict, local: str):
         self.fleet, self.local = fleet, local
         g = fleet.get("guard") or {}
-        self.gpu_programs = [re.compile(p, re.I) for p in (g.get("gpu_programs") or DEFAULT_GPU_PROGRAMS)]
+        self.gpu_programs = _patterns(g.get("gpu_programs") or DEFAULT_GPU_PROGRAMS)
+        self.gpu_scripts = _patterns(g.get("gpu_scripts") or [])
+        self.cpu_programs = [rx for rx, _ in _patterns(g.get("cpu_programs") or [])]
         self.finds = []          # (host, [idx] | None, prefix, why, all_cards)
         self.via_run = False
         self.copied = {}         # host -> {basename: text}: local scripts this command scp'd there
 
-    def find(self, host, env: dict, why: str, idx=None, prefix="", all_cards=False):
+    def find(self, host, env: dict, why: str, idx=None, prefix="", all_cards=False, kind=None):
+        """kind None: the environment names the device (CUDA_VISIBLE_DEVICES or ZE_AFFINITY_MASK). kind "cuda" or
+        "xpu": a program of that kind, indexed only by its own variable (a CUDA index does not move an XPU job)."""
         if idx is None:
-            idx, prefix = gpu_index(env)
-            if idx == "cpu":
+            gidx, gprefix = gpu_index(env, kind)
+            if gidx == "cpu":
                 return
+            idx = gidx
+            prefix = gprefix if kind is None else ("xpu" if kind == "xpu" else "")
         self.finds.append((host, idx, prefix, why, all_cards))
 
 
-def gpu_index(env: dict):
+def _patterns(items: list) -> list:
+    """[(regex, kind)] from strings (CUDA) or {"match": regex, "kind": "cuda" | "xpu"}."""
+    out = []
+    for it in items:
+        rx, kind = (it, "cuda") if isinstance(it, str) else (it.get("match", "^$"), it.get("kind", "cuda"))
+        out.append((re.compile(rx, re.I), kind))
+    return out
+
+
+def gpu_index(env: dict, kind=None):
     """(indices | None | "cpu", prefix) from CUDA_VISIBLE_DEVICES / ZE_AFFINITY_MASK in env. None = set to
-    something that is not a literal index (a variable): some card of the host. "cpu" = the CPU-only marker."""
-    for k in GPU_ENV:
+    something that is not a literal index (a variable): some card of the host. "cpu" = the CPU-only marker.
+    With a kind, only that kind's variable counts."""
+    keys = GPU_ENV if kind is None else (("ZE_AFFINITY_MASK",) if kind == "xpu" else ("CUDA_VISIBLE_DEVICES",))
+    for k in keys:
         if k in env:
             v = env[k].strip().strip("'\"")
             prefix = "xpu" if k == "ZE_AFFINITY_MASK" else ""
@@ -519,12 +536,15 @@ def _simple(sc: dict, st: _Scan, host, env: dict, shvars: dict, cwd: str, depth:
             _run_script(args[0], st, host, cenv, cwd, depth, written)
         return
     if prog in LAUNCHERS:
-        _launcher(prog, args, st, host, cenv)
-        if prog == "safe_run.sh":      # --protected: the capped command may still name the card
+        if prog == "safe_run.sh" and not any(a in ("-h", "--help", "--version") for a in args[:3]):
             rest = [a for a in args if a not in ("--protected", "--")]
-            if len(rest) > 1:
+            n0 = len(st.finds)
+            if len(rest) > 1:              # the capped command first: it may name the card and its kind
                 _simple({"words": rest[1:], "redirs": [], "heredocs": [], "bg": False}, st, host, cenv, shvars,
                         cwd, depth, written)
+            if len(st.finds) > n0:
+                return
+        _launcher(prog, args, st, host, cenv)
         return
     if PY.match(prog):
         _python(args, sc, st, host, cenv)
@@ -541,11 +561,26 @@ def _simple(sc: dict, st: _Scan, host, env: dict, shvars: dict, cwd: str, depth:
     is_script = "/" in words[0] or prog.endswith(".sh")
     if is_script and _run_script(words[0], st, host, cenv, cwd, depth, written):
         return                             # followed: its own commands decide, under this env
+    if is_script and _named_gpu_script(prog, args, st, host, cenv):
+        return
     if prog in READS:
         return
     explicit = any(k in cenv and env.get(k) != cenv[k] for k in GPU_ENV)
     if explicit or (is_script and _has_gpu_env(cenv)):
         st.find(host, cenv, _env_why(cenv))
+
+
+def _named_gpu_script(base: str, args: list, st: _Scan, host, env: dict) -> bool:
+    """fleet.json guard.gpu_scripts: a GEMS wrapper that launches a GPU child (chain45.sh, queue_*_seeds.sh), used
+    when its text cannot be read, e.g. run on gpu0 over ssh (morpheus-gems, 09-29)."""
+    for rx, kind in st.gpu_scripts:
+        if rx.search(base):
+            _launch_find(st, host, env, f"{base} (a GPU script)", args, kind)
+            return True
+    if _device_in(args)[0] in ("cuda", "xpu"):   # an unread script told which device to use
+        _launch_find(st, host, env, f"{base} --device {_device_in(args)[0]}", args)
+        return True
+    return False
 
 
 def _env_why(env: dict) -> str:
@@ -641,16 +676,67 @@ def _shell(args: list, sc: dict, st: _Scan, host, env: dict, cwd: str, depth: in
         if base in LAUNCHERS or base in WRAPPERS:   # `bash X args` is `X args`: its fixed semantics, not its source
             _simple({"words": args[j:], "redirs": [], "heredocs": sc["heredocs"], "bg": sc["bg"]}, st, host, env, {},
                     cwd, depth, written)
-        elif not _run_script(args[j], st, host, env, cwd, depth, written) and _has_gpu_env(env):
+        elif not _run_script(args[j], st, host, env, cwd, depth, written) and not _named_gpu_script(base, args[j + 1:], st, host, env) \
+                and _has_gpu_env(env):
             st.find(host, env, _env_why(env))
         return
     for body in sc["heredocs"]:
         _scan(body, st, host, env, cwd, depth, written)
 
 
+def _device_in(args: list):
+    """("cuda" | "xpu" | "cpu" | None, [idx] | None) from a --device argument anywhere on a launcher's or an unread
+    script's command line: drift's b60_bench.sh passes `--device xpu` through safe_run to run_exp_xpu.sh (09-29)."""
+    for k, r in enumerate(args):
+        v = r.split("=", 1)[1] if r.startswith("--device=") else (args[k + 1] if r == "--device" and k + 1 < len(args) else None)
+        if v is None:
+            continue
+        v = v.strip("'\"").lower()
+        m = re.match(r"(cuda|xpu)(?::(\d+))?$", v)
+        if m:
+            return m.group(1), ([int(m.group(2))] if m.group(2) else None)
+        if v.startswith("cpu"):
+            return "cpu", None
+    return None, None
+
+
+def _launch_find(st: "_Scan", host, env: dict, why: str, args: list, kind=None):
+    """A launch whose card comes from --device on its command line, else from the kind's variable."""
+    dkind, didx = _device_in(args)
+    if dkind == "cpu":
+        return
+    kind = dkind or kind
+    st.find(host, env, why, idx=didx, prefix="xpu" if kind == "xpu" else "", kind=kind)
+
+
+def _program_of(words: list) -> str | None:
+    """The program a wrapped command really runs, past NAME=value, `env` (its options and assignments) and the
+    wrappers: `env OMP_NUM_THREADS=1 nohup python x.py` -> "python". None when nothing is run (`env` alone)."""
+    words = list(words)
+    for _ in range(12):
+        while words and NAME_ASSIGN.match(words[0]):
+            words = words[1:]
+        if not words:
+            return None
+        b = os.path.basename(words[0])
+        if b == "env":
+            words = words[1:]
+            while words and words[0].startswith("-") and words[0] != "-":
+                words = words[2:] if words[0] in ("-u", "--unset", "-C", "--chdir") else words[1:]
+            continue
+        if b in WRAPPERS:
+            flags, vals, pos = WRAPPERS[b]
+            words = _skip_opts(words[1:], flags, vals, pos, {}, b)
+            continue
+        return b
+    return None
+
+
 def _wrapped_noop(cmd: list) -> bool:
-    """A launcher wrapping nothing, or a read: `safe_run.sh --protected 64M true` (drift's admission smoke test)."""
-    return not cmd or os.path.basename(cmd[0]) in READS
+    """A launcher wrapping nothing, or a read: `safe_run.sh --protected 64M true` (drift's admission smoke test).
+    Looks through env and the wrappers: `env X=1 bash run.sh` runs bash, not a read."""
+    prog = _program_of(cmd)
+    return prog is None or prog in READS
 
 
 def _launcher(prog: str, args: list, st: _Scan, host, env: dict):
@@ -676,14 +762,14 @@ def _launcher(prog: str, args: list, st: _Scan, host, env: dict):
                 break
         if "--" in args and _wrapped_noop(args[args.index("--") + 1:]):
             return True
-        st.find(host, env, "guest_run.sh (a GPU cap)")
+        _launch_find(st, host, env, "guest_run.sh (a GPU cap)", args)
     elif prog == "safe_run.sh":
         rest = [a for a in args if a not in ("--protected", "--")]
         if _wrapped_noop(rest[1:]):         # rest[0] is the cap
             return True
-        st.find(host, env, "safe_run.sh --protected (a training run)")
+        _launch_find(st, host, env, "safe_run.sh --protected (a training run)", args)
     else:
-        st.find(host, env, prog)
+        _launch_find(st, host, env, prog, args)
     return True
 
 
@@ -713,6 +799,8 @@ def _python(args: list, sc: dict, st: _Scan, host, env: dict):
         j += 1
         break
     rest = args[j:]
+    if script and any(rx.search(os.path.basename(script)) for rx in st.cpu_programs):
+        return                              # fleet.json guard.cpu_programs: CPU-only, whatever the environment says
     if not (script or module or inline):
         inline = bool(sc["heredocs"])
     if any(r in ("-h", "--help", "--version") for r in rest):
@@ -724,13 +812,16 @@ def _python(args: list, sc: dict, st: _Scan, host, env: dict):
             dev = v.strip("'\"").lower()
     if dev is not None and dev.startswith("cpu"):
         return
+    if dev is not None and (dev.startswith("cuda") or dev.startswith("xpu")):
+        kind = "xpu" if dev.startswith("xpu") else "cuda"
+        m = re.match(r"(cuda|xpu):(\d+)$", dev)
+        if m:
+            st.finds.append((host, [int(m.group(2))], "xpu" if kind == "xpu" else "", f"--device {dev}", False))
+        else:
+            st.find(host, env, f"--device {dev}", kind=kind)   # only that kind's variable may index it
+        return
     idx, prefix = gpu_index(env)
     if idx == "cpu":
-        return
-    if dev is not None and (dev.startswith("cuda") or dev.startswith("xpu")):
-        m = re.match(r"(cuda|xpu):(\d+)$", dev)
-        st.finds.append((host, [int(m.group(2))] if m else (idx if isinstance(idx, list) else None),
-                         "xpu" if dev.startswith("xpu") else "", f"--device {dev}", False))
         return
     if _has_gpu_env(env):
         st.find(host, env, _env_why(env) + (f" python {os.path.basename(script)}" if script else " python"))
@@ -738,8 +829,10 @@ def _python(args: list, sc: dict, st: _Scan, host, env: dict):
     if module and TORCH_MODULES.match(module):
         st.find(host, env, f"python -m {module}")
         return
-    if script and any(p.search(os.path.basename(script)) for p in st.gpu_programs):
-        st.find(host, env, f"python {os.path.basename(script)} (a GPU program)")
+    for rx, kind in st.gpu_programs:
+        if script and rx.search(os.path.basename(script)):
+            st.find(host, env, f"python {os.path.basename(script)} (a GPU program)", kind=kind)
+            return
 
 
 def _docker(args: list, st: _Scan, host, env: dict):
@@ -791,16 +884,18 @@ def detect(cmd: str, fleet: dict, local: str, cwd: str | None = None) -> dict:
         if host is None or host not in fleet["hosts"]:
             whys.append(f"{why} (host unresolved: fail open)")
             continue
+        kind = "xpu" if prefix == "xpu" else "cuda"
         host_cards = [cid for cid, c in fleet["cards"].items() if c["host"] == host]
-        usable = [c for c in host_cards if fleet["cards"][c].get("compute_ok", True)]
+        typed = [c for c in host_cards if fleet["cards"][c].get("caps", {}).get(kind)] or host_cards
+        usable = [c for c in typed if fleet["cards"][c].get("compute_ok", True)]
         if all_cards:
-            cards = usable or host_cards
+            cards = usable or typed
         elif idx is not None:
             cards = [f"{host}:{prefix}{i}" for i in idx]
         elif len(usable) == 1:
             cards = usable
-        elif len(host_cards) == 1:
-            cards = host_cards
+        elif len(typed) == 1:
+            cards = typed
         else:
             cards = []
             if host not in out["host_any"]:
