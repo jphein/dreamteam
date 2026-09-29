@@ -12,7 +12,7 @@
 #     cgroup does not reach it (morpheus-gems, rule 6). A container holding >= KILL_MIB of VRAM is KILLED, not
 #     paused, because a paused container keeps its VRAM and katana's desktop already takes ~2.6 of its 11 GiB
 #     (rule 6, refined 10:1x). A smaller one is paused and unpaused after the call.
-# At any time, call or not: if katana's free VRAM falls below MIN_FREE_MIB (512), the GPU container holding the
+# At any time, call or not: if katana's free VRAM falls below MIN_FREE_MIB (1024), the GPU container holding the
 # most VRAM is killed, one per tick. JP's desktop comes first; luna-refurb's docker_guard.sh fired this for real
 # twice on 09-29 while JP's Brave grew.
 # After CALM_S seconds (default 60) with no call, ONLY our own pause file is removed and ONLY the
@@ -24,7 +24,8 @@
 # Env (tests): CALLWATCH_DEVS (space-separated; default /dev/video9) CALLWATCH_PAUSE CALLWATCH_STATE
 #              CALLWATCH_LOG CALLWATCH_POLL_S CALLWATCH_CALM_S CALLWATCH_DOCKER CALLWATCH_NVIDIA_SMI
 #              CALLWATCH_CGROUP_ROOT (where <pid>/cgroup is read; default /proc)
-#              CALLWATCH_KILL_VRAM_MIB (1024) CALLWATCH_MIN_FREE_MIB (512)
+#              CALLWATCH_KILL_VRAM_MIB (1024) CALLWATCH_MIN_FREE_MIB (1024: morpheus-gems 09-29 14:0x, vesper's batched
+#              containers took free VRAM to 189 MiB before a 512 line fired, while JP's desktop swung 2.8-3.7 GB)
 set -u
 DEVS=${CALLWATCH_DEVS:-/dev/video9}
 PAUSE=${CALLWATCH_PAUSE:-$HOME/.gems-pause}
@@ -32,7 +33,7 @@ STATE=${CALLWATCH_STATE:-$HOME/.claude/state/dreamteam/gpu/callwatch.state}
 LOG=${CALLWATCH_LOG:-$HOME/.claude/state/dreamteam/gpu/callwatch.log}
 POLL=${CALLWATCH_POLL_S:-5}; CALM=${CALLWATCH_CALM_S:-60}
 DOCKER=${CALLWATCH_DOCKER:-docker}; SMI=${CALLWATCH_NVIDIA_SMI:-nvidia-smi}; CGR=${CALLWATCH_CGROUP_ROOT:-/proc}
-KILL_MIB=${CALLWATCH_KILL_VRAM_MIB:-1024}; MIN_FREE=${CALLWATCH_MIN_FREE_MIB:-512}
+KILL_MIB=${CALLWATCH_KILL_VRAM_MIB:-1024}; MIN_FREE=${CALLWATCH_MIN_FREE_MIB:-1024}
 mkdir -p "$(dirname "$STATE")" "$(dirname "$LOG")"
 say() { printf '%s [callwatch %s] %s\n' "$(date '+%F %T')" "$$" "$*" >> "$LOG"; }
 

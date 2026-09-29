@@ -150,7 +150,8 @@ is refused.
   scope, so freezing the launcher does not reach it. They are found by `DeviceRequests`, and by mapping nvidia-smi's
   compute pids to docker scopes. A container holding ≥ 1 GiB of VRAM is **killed**, because a paused one keeps its
   VRAM. A smaller one is paused and unpaused after the call (morpheus-gems rule 6, refined).
-- **At any time:** if katana's free VRAM falls below 512 MiB, the GPU container holding the most VRAM is killed, one per
+- **At any time:** if katana's free VRAM falls below 1 GiB (512 MiB until 09-29 14:1x: vesper's batched containers took it
+  to 189 MiB before that line fired, while JP's desktop swung 2.8–3.7 GB), the GPU container holding the most VRAM is killed, one per
   tick. JP's desktop comes first, as in luna-refurb's `docker_guard.sh`, whose low-VRAM kill fired twice on 09-29.
 - **After 60 s of calm:** it removes only its own pause file, and unpauses only the containers it paused.
 - **Controls:**

@@ -966,7 +966,7 @@ measured sizes and each host's admission rules in `gpu/fleet.json`. Spec:
 - **katana during calls:** OBS holds the virtual camera all day, so that is not a call. A live call is a non-OBS reader of
   `/dev/video9`. The call watcher (`dreamteam-gpu-callwatch` user service) writes `~/.gems-pause` for the call's
   length. It kills a GPU container holding ≥ 1 GiB of VRAM, because a paused one keeps its VRAM, and pauses a smaller
-  one. After 60 s of calm it removes only what it wrote. At any time, call or not, below 512 MiB of free VRAM it kills
+  one. After 60 s of calm it removes only what it wrote. At any time, call or not, below 1 GiB of free VRAM it kills
   the GPU container holding the most: JP's desktop comes first.
 
 ## Local-Model Lane (ollama) — mechanical bulk, summaries, embeddings
