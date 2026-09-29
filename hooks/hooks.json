@@ -39,6 +39,11 @@
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/no-poll-guard.sh\"",
             "timeout": 4
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/gpu-guard.sh\"",
+            "timeout": 4
           }
         ]
       },

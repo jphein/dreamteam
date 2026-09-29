@@ -1,0 +1,111 @@
+{
+  "_comment": "The GPU fleet: every host and card, with the host's admission rules. DATA, read by scripts/lib/gpu_fleet.py (claims, windows, admission, board, the guard) and by `dreamteam gpu run`. Spec: docs/superpowers/specs/2026-09-29-gpu-fleet-design.md. Sizes marked in `measured` were read with an instrument (nvidia-smi / free / /proc/swaps / df / lspci over ssh); change a size only from a new measurement, and say when. `dreamteam gpu inventory --check` re-measures and reports drift.",
+  "measured": "2026-09-29 09:1x PDT by cirrus-scry: nvidia-smi --query-gpu, free -m, /proc/swaps, df -BG /, nproc, lspci -vv (B60 BAR2)",
+  "defaults": {
+    "cap_margin": 1.2,
+    "grows_margin": 1.5,
+    "vram_margin_mib": 1024,
+    "refuse_exit": 75,
+    "_notes": {
+      "cap_margin": "cap = measured peak x 1.2 for fixed-shape jobs (FAMILIAR-RULES rule 3: 'measured peak plus 20%'; stage2_train's peaks are stable across runs).",
+      "grows_margin": "x 1.5 for any job whose memory grows with run length (caches, arenas, variable-length inputs). FAMILIAR-RULES amendment 2026-09-28 23:4x-23:5x after two OOM kills: Canary-1B's arena (a 2-clip 4.75 GB peak + 20% = 6 GB; the full run passed 6.26 GB) and the lidar build's GDAL block cache.",
+      "vram_margin_mib": "claimed VRAM on a card must leave 1 GiB (guest_run.sh: GPU free >= cap + 1 GB).",
+      "refuse_exit": "75 = EX_TEMPFAIL, retry later: the code all three GEMS launchers already use for an admission refusal."
+    }
+  },
+  "hosts": {
+    "katana": {
+      "ram_mb": 32003,
+      "swap": {"kind": "zram+file", "mb": 20993, "_note": "/swapfile 8 GB + /dev/zram0 12.5 GiB (8.2 GB used at 09:1x). zram is RAM, so its use is pressure, not spare capacity."},
+      "cores": 8,
+      "desktop": true,
+      "local": true,
+      "launch_form": "guest",
+      "budget": {"guest_ram_mb": 12288, "guest_gpu_mib": 9216, "headroom_mb": 4096},
+      "disk_floors": [],
+      "pause_file": "~/.gems-pause",
+      "notes": "JP's workstation; the 2080 Ti also drives the desktop. Budget and headroom are the lead's caps (2026-09-28 23:2x), bounding the SUM of all guest scopes: reverie stacked 6G + 8G + 4G at 23:53, each admitted alone. GPU stutter against the compositor is NOT detected; the remedy is the pause file on JP's word."
+    },
+    "familiar": {
+      "ram_mb": 31995,
+      "swap": {"kind": "zram", "mb": 15997, "_note": "zram only: swap use is memory pressure (FAMILIAR-RULES 'Know the box')."},
+      "cores": 24,
+      "desktop": false,
+      "local": false,
+      "launch_form": "familiar",
+      "budget": {"regenerable_headroom_mb": 2048, "protected_min_available_mb": 6144, "protected_max_swap_pct": 50, "max_heavy_jobs": 1, "heavy_rss_kb": 1048576, "heavy_paths": "fwork/gems|/archive/gems/"},
+      "disk_floors": [{"path": "/", "min_free_gb": 10, "_note": "rule 5: bulk data and run outputs never on the nvme root (95% full on 09-28); 10 GB is this spec's floor [proposed]"}],
+      "pause_file": null,
+      "notes": "Hosts the palace (postgres ~6 GB), the voice ASR and Ember (the 22.9 GB model on the B60). All GEMS work together budgets ~8 GB, one heavy job at a time (FAMILIAR-RULES rules 1-2). earlyoom stays; its kill order is set by oom_score_adj (+500 regenerable, -300 protected)."
+    },
+    "game": {
+      "ram_mb": 15978,
+      "swap": {"kind": "file", "mb": 8191},
+      "cores": 8,
+      "desktop": true,
+      "local": false,
+      "launch_form": "guest",
+      "budget": {"guest_ram_mb": 8192, "guest_gpu_mib": 3584, "headroom_mb": 2048},
+      "disk_floors": [{"path": "/", "min_free_gb": 8, "_note": "guest_run.sh: root free >= 8 GB + --disk-need; root had 11 G free at 09:1x"}],
+      "pause_file": "~/.gems-pause",
+      "notes": "An active graphical session (a shared desktop). Budgets from the lead's caps (23:2x). ~/Projects is NOT synced here, so `gpu run` installs its launcher over ssh (checksum-verified)."
+    },
+    "gpu0": {
+      "ram_mb": 11941,
+      "swap": {"kind": "none", "mb": 0},
+      "cores": 8,
+      "desktop": false,
+      "local": false,
+      "launch_form": "remote",
+      "sleeps": true,
+      "budget": {"os_reserve_mib": 1024, "overlap_mib": 512, "top_reserve_mib": 512},
+      "disk_floors": [{"path": "/var/tmp", "min_free_gb": 10}],
+      "pause_file": null,
+      "notes": "Asleep by default (Slumber Ward). The pair budget (sum of caps + 1 GiB OS + 0.5 GiB overlap <= RAM - 0.5 GiB) is gpu1's rule 7 applied to gpu0's own RAM: <= 11.16 GiB [proposed; drift-gems asked to confirm]."
+    },
+    "gpu1": {
+      "ram_mb": 10938,
+      "swap": {"kind": "none", "mb": 0},
+      "cores": 8,
+      "physical_cores": 4,
+      "desktop": false,
+      "local": false,
+      "launch_form": "remote",
+      "sleeps": true,
+      "budget": {"os_reserve_mib": 1024, "overlap_mib": 512, "top_reserve_mib": 512},
+      "disk_floors": [{"path": "/var/tmp", "min_free_gb": 10}],
+      "pause_file": null,
+      "notes": "i7-920, 4 cores / 8 threads. FAMILIAR-RULES rule 7: two runs only when 2 x measured peak + 1.5 GiB <= ~10.2 GiB. A 26-band pair at 5.23 GiB each was kernel-OOM-killed at 19:29:47 on 09-28; the pad-once loader's 2.81 GiB fits (7.1). Two concurrent runs want --threads 1 (measured 14.3 vs 10.1 s/epoch; GEMS's wrapper adds it). Asleep by default; runs hold a systemd-inhibit sleep lock."
+    }
+  },
+  "cards": {
+    "katana:0": {"host": "katana", "index": 0, "model": "NVIDIA GeForce RTX 2080 Ti", "vram_mib": 11264, "arch": "turing", "compute_cap": "7.5",
+                 "caps": {"cuda": true, "bf16": false, "fp16": "fast", "tensor_cores": true, "xpu": false, "vulkan": true},
+                 "compute_ok": true, "drives_display": true, "pci": "01:00.0"},
+    "familiar:0": {"host": "familiar", "index": 0, "model": "NVIDIA P102-100", "vram_mib": 10240, "arch": "pascal", "compute_cap": "6.1",
+                   "caps": {"cuda": true, "bf16": false, "fp16": "slow", "tensor_cores": false, "xpu": false, "vulkan": true},
+                   "compute_ok": true, "drives_display": false, "pci": "06:00.0",
+                   "residents": [
+                     {"name": "ollama-embed.service: nomic-embed-text v1.5 embeddings (port 11435)", "vram_mib": 380, "match": "llama-server"},
+                     {"name": "donkey-llm.service: Qwen3.5-4B for Balaam, the emberburrito donkey familiar (port 8092)", "vram_mib": 3026, "match": "llama-server"}
+                   ],
+                   "_residents_note": "standing services that hold VRAM on this card (nvidia-smi 09:34 PDT: pid 3513, 380 MiB, user ollama; pid 4078769, 3026 MiB, user jp). Claimable VRAM = vram - residents - margin. Update from a new measurement if the services change."},
+    "familiar:xpu0": {"host": "familiar", "index": 0, "model": "Intel Arc Pro B60", "vram_mib": 24576, "arch": "battlemage", "compute_cap": null,
+                      "caps": {"cuda": false, "bf16": true, "fp16": "fast", "tensor_cores": true, "xpu": true, "vulkan": true},
+                      "compute_ok": false,
+                      "blocked_by": "BIOS Resizable BAR is off: BAR2 is 16 GB against 24 GB of VRAM (lspci, 09:1x), and Intel's compute runtime exposes nothing ('Small BAR detected'; torch.xpu.device_count() == 0, Drift 2026-09-28). Vulkan works (Ember/llama.cpp). Enabling ReBAR is JP's hands at familiar's BIOS. Memory: familiar-b60-needs-rebar.",
+                      "drives_display": false, "pci": "09:00.0", "_vram_source": "documented (24 GB), not measured: xpu-smi is not installed"},
+    "game:0": {"host": "game", "index": 0, "model": "NVIDIA GeForce GTX 1650", "vram_mib": 4096, "arch": "turing", "compute_cap": "7.5",
+               "caps": {"cuda": true, "bf16": false, "fp16": "fast", "tensor_cores": false, "xpu": false, "vulkan": true},
+               "compute_ok": true, "drives_display": true, "pci": "01:00.0", "notes": "TU117: no tensor cores."},
+    "gpu0:0": {"host": "gpu0", "index": 0, "model": "NVIDIA GeForce GTX 1050 Ti", "vram_mib": 4096, "arch": "pascal", "compute_cap": "6.1",
+               "caps": {"cuda": true, "bf16": false, "fp16": "slow", "tensor_cores": false, "xpu": false, "vulkan": true},
+               "compute_ok": true, "drives_display": false, "pci": "01:00.0"},
+    "gpu1:0": {"host": "gpu1", "index": 0, "model": "NVIDIA P102-100", "vram_mib": 10240, "arch": "pascal", "compute_cap": "6.1",
+               "caps": {"cuda": true, "bf16": false, "fp16": "slow", "tensor_cores": false, "xpu": false, "vulkan": true},
+               "compute_ok": true, "drives_display": false, "pci": "03:00.0"},
+    "gpu1:1": {"host": "gpu1", "index": 1, "model": "NVIDIA P102-100", "vram_mib": 10240, "arch": "pascal", "compute_cap": "6.1",
+               "caps": {"cuda": true, "bf16": false, "fp16": "slow", "tensor_cores": false, "xpu": false, "vulkan": true},
+               "compute_ok": true, "drives_display": false, "pci": "04:00.0"}
+  }
+}

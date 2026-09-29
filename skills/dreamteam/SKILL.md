@@ -910,6 +910,40 @@ RAM). Compiles are the ballooning workload; they now run on **familiar**
   free) — it takes build bursts, not resident fleets. Check `ssh familiar free -m`
   before pointing a mutation sweep's whole loop at it.
 
+## GPU Fleet — claim a card, launch through one door (JP, 2026-09-29)
+
+JP: *"we need a gpu part for dreamteam plugin pls"*. The fleet is five hosts and seven cards: katana 2080 Ti,
+familiar P102-100 plus the Arc B60, game 1650, gpu0 1050 Ti, and gpu1 with two P102-100s. They are listed with
+measured sizes and each host's admission rules in `gpu/fleet.json`. Spec:
+`docs/superpowers/specs/2026-09-29-gpu-fleet-design.md`.
+
+- **See it:** `dreamteam gpu board`. It shows who holds each card and until when, the windows, live VRAM and
+  processes, and each host's RAM, swap and disk. It flags `IN USE, NO CLAIM`, and never wakes a sleeping host.
+  `dreamteam gpu inventory` lists capabilities: Pascal has no bf16; the B60 is compute-blocked until
+  Resizable BAR is on.
+- **Get a card:** a lane never claims for itself. SendMessage your lead (or Nyx) with the card, how long, and the
+  job's **measured** peaks: host RAM and VRAM. Add "grows" if memory grows with run length, and "protected" for
+  training. The granter runs `dreamteam gpu claim <card> --lane <you> --until 3h --peak-ram 2.9G --peak-vram 3500M`.
+  Admission refuses (exit 75) anything that breaks the host's rules:
+  - the cap is peak × 1.2, or × 1.5 when it grows;
+  - gpu0/gpu1 pair rule: Σ caps + 1.5 GiB ≤ RAM − 0.5 GiB;
+  - katana/game guest budgets are sums (katana 12 GB and 9 GiB; game 8 GB and 3.5 GiB);
+  - familiar: one heavy job;
+  - VRAM leaves 1 GiB beside the resident services.
+
+  An unmeasured peak needs `--estimate --solo`, meaning alone on its host until measured.
+- **Launch:** `dreamteam gpu run --card <card> -- CMD`. It is THE launcher: it checks your claim, the window, and
+  live VRAM, then runs the host's form:
+  - **familiar:** safe_run's capped scope, with −300 protection for training;
+  - **katana and game:** guest_run's summed budget, desktop-first freezer, and the `~/.gems-pause` pause file;
+  - **gpu0 and gpu1:** detached with a sleep lock, a MemoryMax system scope, and an nvidia-smi preflight.
+
+  `--dry-run` prints the exact launch.
+- **The guard:** `gpu-guard.sh` (PreToolUse Bash) sees GPU launches outside `gpu run`. That means
+  `CUDA_VISIBLE_DEVICES=…`, the GEMS launchers, and python over ssh to gpu0, gpu1 or game, on a card the lane does
+  not hold. It runs in **warn** mode until the current holdings are seeded, and logs to
+  `~/.claude/state/dreamteam/gpu/guard.log`. Then it moves to **enforce** (exit 2). Orchestrators always pass.
+
 ## Local-Model Lane (ollama) — mechanical bulk, summaries, embeddings
 
 An **optional** local lane offloads work that does **not** need frontier reasoning onto

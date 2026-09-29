@@ -1,0 +1,234 @@
+# The GPU fleet: inventory, claims, one launcher, a launch guard (design spec)
+
+- **Date:** 2026-09-29 (drafted 09:2x–09:4x PDT by cirrus-scry, a Morpheus lane)
+- **Status:** built in the same PR as this spec. The guard ships in `warn` mode (§5.3).
+- **Asked by:** JP, 08:5x, relayed by team-lead: *"we need a gpu part for dreamteam plugin pls"*.
+- **Domain sources:**
+  - `money/scratch/contests/gems/FAMILIAR-RULES.md` (the lead, Lucid, Drift and Morpheus-gems, 2026-09-28);
+  - `tools/safe_run.sh` (Lucid, promoted by morpheus-gems);
+  - `tools/guest_run.sh` with `tools/test_guest_run.sh` (morpheus-gems);
+  - `lanes/drift/gpu1_launch.sh` (drift-gems).
+- **Scope:** this repo. The GEMS copies of the three launchers are not touched. Switching them to the
+  plugin is morpheus-gems's call (§7).
+
+**Legend.**
+- **[measured]**: read with an instrument on 2026-09-29 09:1x: `nvidia-smi`, `free`, `swapon` and `df` over ssh.
+- **[rule]**: a GEMS rule, quoted from FAMILIAR-RULES.md or a launcher, with the incident it encodes.
+- **[proposed]**: a new default in this spec.
+
+## 0. Decisions at a glance
+
+| # | Decision |
+|---|---|
+| D1 | **Inventory is data:** `gpu/fleet.json`, which lists every host and card with measured sizes, capabilities and the host's admission rules. Code reads it; no host is hard-coded in a script again. |
+| D2 | **One claims ledger:** `~/.claude/state/dreamteam/gpu/claims.json`, written under `flock`. There is **one holder per card**. A claim records the lane, the purpose, the end time, and the job's **measured** peaks: host RAM, VRAM, and whether it grows with run length. |
+| D3 | **Only granters write claims and windows.** A granter is an orchestrator session, identified by having no `--agent-id` (the lead, or JP's own shells), or a name matching `gpu.granters` in config (default `nyx*` and `morpheus-gems`). A lane asks its lead by SendMessage. |
+| D4 | **One admission library** (`scripts/lib/gpu_fleet.py`), used by `claim`, `run` and `admit`. The cap is measured peak × 1.2, or × 1.5 when the job grows with run length. Host rules come from `fleet.json` (§3). |
+| D5 | **`dreamteam gpu run` is the single launcher.** It checks the caller holds the card, computes the cap, admits, and runs the host's form: familiar the `safe_run` form, katana and game the `guest_run` form, gpu0 and gpu1 the detached sleep-locked form. The three scripts are promoted into `scripts/gpu/` with their budgets read from `fleet.json`. |
+| D6 | **A PreToolUse Bash guard** (`gpu-guard.sh`) detects a GPU launch and checks the caller holds that card. It runs in `warn` mode first, then `enforce` once the current holdings are seeded (§5.3). It fails open on unknown identity, like every guard in this plugin. |
+| D7 | **`dreamteam gpu board`** shows, per card: the holder, the claim's end, the window, and live VRAM and processes. Per host: available RAM, swap use, root free space and the pause file. It reads over ssh, in parallel, with a 5 s timeout; a sleeping host shows as `asleep` and is **never woken** by the board. |
+| D8 | **Windows:** `gpu window <card> <HH:MM-HH:MM|always|never>` sets when a card may be used, for example katana's GPU while JP is away from the desk. A claim or run outside its card's window is refused. |
+
+## 1. The inventory (`gpu/fleet.json`)
+
+Measured 2026-09-29 09:1x PDT, all five hosts awake:
+
+| host | card(s) [measured] | arch, compute cap | host RAM, swap [measured] | root free [measured] | desktop |
+|---|---|---|---|---|---|
+| **katana** | `katana:0` RTX 2080 Ti, 11264 MiB | Turing, 7.5: tensor cores, fp16 fast, **no bf16** | 32003 MB, swap 20993 MB | 111 G of 938 G | **yes** (JP's workstation; the card drives the desktop) |
+| **familiar** | `familiar:0` P102-100, 10240 MiB; `familiar:xpu0` Arc Pro B60 (PCI 09:00.0, `e211`) | Pascal, 6.1: **no bf16**, fp16 slow, no tensor cores. The B60 is Battlemage (XPU) | 31995 MB, **zram** 15.6 G | 34 G of 234 G | no |
+| **game** | `game:0` GTX 1650, 4096 MiB | Turing TU117, 7.5: **no tensor cores**, no bf16 | 15978 MB, swapfile 8 G | 11 G of 234 G | **yes** (an active graphical session) |
+| **gpu0** | `gpu0:0` GTX 1050 Ti, 4096 MiB | Pascal, 6.1 | 11941 MB, **no swap** | 58 G of 108 G | no |
+| **gpu1** | `gpu1:0`, `gpu1:1` P102-100, 10240 MiB each | Pascal, 6.1 | 10938 MB, **no swap** | 73 G of 115 G | no |
+
+Per-card fields:
+- `vram_mib`, `arch`, `compute_cap`;
+- `caps`: `cuda`, `bf16`, `fp16` (`fast`, `slow` or `none`), `tensor_cores`, `xpu`, `vulkan`;
+- `compute_ok`, with a `blocked_by` note;
+- `notes`.
+
+The B60 is listed with **`compute_ok: false`**, blocked by BIOS Resizable BAR (memory
+`familiar-b60-needs-rebar`: torch xpu fails until ReBAR is on; Vulkan works). `run` and `claim` refuse a
+card whose `compute_ok` is false, unless given `--vulkan`.
+
+Per-host fields:
+- `ram_mb`, `swap` (`{kind: zram|file|none, mb}`), `cores`, `desktop`;
+- `disk_floors` (the path and the minimum free GB);
+- `pause_file`;
+- `launch_form` (`familiar`, `guest` or `remote`);
+- a `budget` block (§3).
+
+`dreamteam gpu inventory --check` re-measures a host and reports drift from `fleet.json`, the same idea
+as `realm vlans verify`.
+
+## 2. Claims and windows
+
+A **claim** is `{card, lane, purpose, since, until, peak_ram_mb, peak_vram_mib, grows, protected}`. Rules:
+- There is one holder per card. `claim` on a held card is refused, and names the holder and the end time.
+- **Peaks must be measured.** `--peak-ram` and `--peak-vram` are required. `--estimate` is accepted only
+  together with `--solo`, which makes the claim exclusive on its host until a measurement replaces the
+  estimate. That is the "46 bands: unmeasured; run it solo first" rule, in code [rule].
+- `until` is required, as a time or a duration. An expired claim reads as free on the board. Its record
+  stays, marked `expired`, so the history survives.
+- A claim is refused when the host's budget (§3) would not hold it beside the claims already on that host.
+
+A **window** is `{card, spec: "HH:MM-HH:MM" | "always" | "never", note}`, set by a granter. The default is
+**`always` on every card**, katana included. On katana the protection is the guest form's desktop-first
+freezer and the pause file, and the lead's caps (23:2x) already allow guest jobs there. GPU stutter against
+the compositor is not detected (guest_run's own note), so JP or the lead can narrow katana with a window
+at any time [proposed]. A window that crosses midnight is allowed (`01:00-07:00`, `22:00-06:00`).
+
+## 3. Admission math (one library; every number has an incident)
+
+**The cap.** `cap = peak × 1.2` for fixed-shape jobs, and `peak × 1.5` when `grows` is set. The ×1.5 comes
+from two OOM kills on 2026-09-28 [rule]:
+- Canary-1B: a 2-clip sample, 4.75 GB + 20% = 6 GB, grew past 6.26 GB on the full run;
+- the lidar build: GDAL's per-worker cache grew across blocks.
+
+Every job prints its measured peak, and the claim is updated from it.
+
+**familiar** [rule 1–3], `launch_form: familiar`:
+- **Regenerable** (the default): admit when `MemAvailable ≥ cap + 2 GB`. Runs under `MemorySwapMax=0`,
+  `oom_score_adj +500`, `nice 19`.
+- **Protected** (`--protected`, for training): admit when `MemAvailable ≥ 6 GB` **and** swap (zram) is under
+  50%. Every PID in the scope gets `oom_score_adj −300`, twice, to close the fork race.
+- **One heavy job at a time** on familiar: refuse if another GEMS python process over 1 GB is resident. This
+  is safe_run's guard, kept.
+- The zram is RAM, which is why `MemorySwapMax=0` makes the cap real.
+
+**gpu0 and gpu1**, `launch_form: remote`, no swap:
+- The pair rule, generalized: `Σ caps of the jobs on the host + 1.0 GiB (OS) + 0.5 GiB (scoring overlap) ≤ ram − 0.5 GiB`.
+- For gpu1 (10938 MB = 10.68 GiB) that is ≤ 10.18 GiB, the "~10.2 GiB" of rule 7 [rule].
+- For gpu0 (11941 MB = 11.66 GiB) it is ≤ 11.16 GiB [proposed, same derivation; Drift asked to confirm].
+- The evidence: a 26-band pair on gpu1 was kernel-OOM-killed at 19:29:47 on 09-28 at 5.23 GiB each. The
+  pad-once loader's 2.81 GiB made pairs fit (2 × 2.81 + 1.5 = 7.1).
+
+**katana and game**, `launch_form: guest` [guest_run.sh, the lead's caps 23:2x]:
+- The host budget bounds the **sum** of all running guest caps: katana 12 GB RAM and 9 GiB GPU; game 8 GB and
+  3.5 GiB. The incident: reverie stacked 6 G + 8 G + 4 G on katana at 23:53, each admitted alone.
+- Admission: `MemAvailable ≥ cap + headroom` (katana 4 GB, game 2 GB), and GPU free ≥ GPU cap + 1 GiB.
+- On game, root free ≥ 8 GB + `--disk-need`.
+- No pause file (`~/.gems-pause`).
+- **Desktop first:** the job's scope is **frozen** while the desktop session's CPU PSI avg10 is over 10 or its
+  memory PSI avg10 is over 5, or while the pause file exists, or on game when root free falls under 8 GB.
+  It thaws after 60 s calm, with hysteresis. It is never left frozen: the launcher's TERM handler thaws it.
+- The GPU watchdog TERMs, then KILLs after 30 s, a job whose processes hold more VRAM than their cap.
+
+**Every card.** `Σ claimed VRAM on the card ≤ vram − 1 GiB`. A card whose `compute_ok` is false is refused.
+
+**Every host.** Each `disk_floors` entry holds: familiar's run outputs never on the nvme root [rule 5],
+enforced as root free ≥ 10 GB [proposed]. A refusal exits **75** (EX_TEMPFAIL, retry later), the
+code all three launchers already use.
+
+## 4. The launcher: `dreamteam gpu run`
+
+```
+dreamteam gpu run --card <host:idx> [--protected] [--grows] [--peak-ram MB] [--gpu-mem GB]
+                  [--disk-need GB] [--log PATH] [--name NAME] -- CMD...
+```
+
+1. **Identity and claim.** The caller must hold the claim on `--card` (lane = `dt_agent_id` without its
+   `@team`). An orchestrator may run on a card it has claimed for itself. Otherwise the exit is 77 (EX_NOPERM).
+2. **Window.** The card's window must be open now. Otherwise the exit is 75.
+3. **Cap.** Taken from the claim's peaks unless `--peak-ram` overrides them. An override above the claim's
+   peak re-runs the host budget check first.
+4. **Form.** The host's `launch_form` decides:
+   - **familiar:** `scripts/gpu/safe_run.sh [--protected] CAP CMD`, run on familiar over ssh.
+     `~/Projects/dreamteam` is Syncthing-mirrored there, so the same file runs. Detached with
+     `setsid nohup` and a log, because a training run outlives an ssh session.
+   - **katana, game:** `scripts/gpu/guest_run.sh --mem CAP --gpu-mem G --disk-need D -- CMD`. katana runs it
+     locally. On game it is **installed** first to `~/.local/lib/dreamteam-gpu/`, checksum-verified, because game
+     does not sync `~/Projects`, then run detached.
+   - **gpu0, gpu1:** `scripts/gpu/remote_run.sh`, drift's gpu1_launch made generic:
+     - `CUDA_VISIBLE_DEVICES=<idx>` and a `systemd-inhibit --what=sleep` lock for the life of the run, so a stray
+       `realm wol sleep` is refused [rule];
+     - `setsid nohup`, and the log under the run directory;
+     - an `nvidia-smi -i <idx>` preflight (the lib/module mismatch trap; exit 5) and a run-exists check (exit 17);
+     - `MemoryMax=CAP`, `MemorySwapMax=0` in a user scope, which gpu1_launch lacked; the pair rule used to be a
+       comment and is now admitted in code.
+
+     GEMS's `--threads 1` injection and the `g0-`/`g1-` name prefixes are GEMS conventions, so they stay in
+     GEMS's own wrapper.
+5. **Report.** Print the host, card, unit or pid, log path and cap. The claim gains a `jobs[]` entry. `release`
+   refuses while a job of that claim is still running, unless given `--force`.
+
+`dreamteam gpu admit --card … --peak-ram …` runs steps 1–3 as a dry run and prints the arithmetic.
+
+## 5. The launch guard (`scripts/gpu-guard.sh`, PreToolUse Bash)
+
+### 5.1 What counts as a GPU launch
+A Bash command is a launch on card C when it:
+- runs `dreamteam gpu run --card C` or `scripts/gpu.sh run --card C`. Those are checked inside `run` itself, so
+  the guard passes them;
+- invokes a known launcher: `safe_run.sh`, `guest_run.sh`, `gpu1_launch.sh`, `run_exp.sh`, or
+  `scripts/gpu/*.sh` directly. The card comes from its arguments and `HOST=`/ssh target;
+- sets `CUDA_VISIBLE_DEVICES=<n>` or `ZE_AFFINITY_MASK=<n>` on a command, or passes `--device cuda:<n>`. The host
+  is the command's ssh target, else katana;
+- is `ssh <gpu host> …` running `python`, `torchrun`, `accelerate` or `ollama run`.
+
+Reads never count: `nvidia-smi`, `xpu-smi`, `tail`/`cat` of logs, `dreamteam gpu board`. That is the negative
+control list.
+
+### 5.2 The decision
+- Identity: `dt_agent_id` from `lib/agent-id.sh`. Empty identity is an orchestrator or JP, and is allowed
+  (fail open, the plugin's rule).
+- It is allowed if the lane holds an unexpired claim on C, or the command goes through `gpu run`.
+- Otherwise: in `enforce` mode, exit 2 with the holder, the end time and the way to ask ("SendMessage your
+  lead: `dreamteam gpu claim C --lane <you> …`"). In `warn` mode, allow, and write one line to
+  `~/.claude/state/dreamteam/gpu/guard.log` plus stderr.
+
+### 5.3 Rollout (warn → seed → enforce)
+The guard fires on every lane's Bash calls, and the GEMS lanes launch jobs today with no claims on record, so
+enforcing on day one would stop GEMS mid-run. Hence:
+1. Ship in `warn`. The log is a live positive control: the would-block lines must name real GEMS launches and
+   nothing else.
+2. morpheus-gems, the window-granter in FAMILIAR-RULES, supplies the current holdings. They are seeded as
+   claims.
+3. Flip `gpu.guard` to `enforce` in `config.json`, a one-line reversible change, once a day of warn lines shows
+   no false positives.
+
+## 6. `dreamteam gpu board`
+
+It prints one line per card:
+- the holder, the claim's end, and the window (open or closed now);
+- VRAM used over total, and the compute processes (pid, VRAM, and command where the host allows);
+- the host's available RAM, swap used %, root free, the pause file (on or off), and `asleep` for an
+  unreachable host.
+
+It reads over ssh, in parallel, `ConnectTimeout=5` and a 12 s wall clock. **The board never wakes a host.**
+`--json` has the same content. `claim`, `release`, `window` and `admit` print the board line they changed.
+
+## 7. What is not changing, and the migration
+- The GEMS copies (`tools/safe_run.sh`, `tools/guest_run.sh`, `lanes/drift/gpu1_launch.sh`) stay exactly as
+  they are. GEMS is mid-competition, and those copies are what its lanes and records cite.
+- Replacing them with shims that exec `dreamteam gpu run` is morpheus-gems's call, after claims are seeded.
+  Until then, the guard's warn log is the only effect on GEMS.
+- `earlyoom`, zram and the palace are untouched. The zram decision (jp-ab, 20:47) stands.
+
+## 8. Tests (`tests/test-gpu.sh`, in `tests/run.sh`)
+- **Admission library** (pure, no hosts):
+  - the ×1.2 and ×1.5 caps;
+  - the gpu1 pair rule: a 2.81 GiB pair is admitted and a 5.23 GiB pair refused, the 09-28 incident's
+    numbers;
+  - the katana budget sum: 6 + 8 + 4 G is refused at the third job, reverie's stack;
+  - familiar's protected and regenerable forms;
+  - VRAM Σ;
+  - the B60 refused and allowed with `--vulkan`;
+  - windows across midnight;
+  - an estimate needs `--solo`.
+- **Ledger:** one holder per card; granters only (a lane is refused, an orchestrator and `nyx-*` allowed); expiry;
+  `release` refuses while a job runs.
+- **Guard:** positive controls (each launcher, the `CUDA_VISIBLE_DEVICES` form, `ssh gpu1 python …`) and negative
+  controls (`nvidia-smi`, a log tail, `board`, an unrelated `python`). Warn allows and logs; enforce blocks.
+  Orchestrator identity passes. A missing config still defaults to `warn`, never off.
+- **Launchers:** `safe_run.sh` refuses (75) on stubbed `/proc/meminfo` values. `remote_run.sh` builds the
+  exact ssh command (a stubbed `ssh` records it). `guest_run.sh` keeps its own on-host controls
+  (`scripts/gpu/test_guest_run.sh`, run on katana).
+- **Perturbation for the PR:** disabling the pair rule turns the suite red.
+
+## 9. Open (asked by message, not blocking)
+- morpheus-gems: the current holdings (to seed claims), rule changes since 23:5x, and where the measured
+  peaks live.
+- drift-gems: confirm the gpu0 budget derivation, and any launcher trap to turn into a test.
+- JP's floor: nothing here spends money, signs or needs his hands. katana's GPU window is `always`, protected by
+  the desktop-first freezer and the pause file; JP or the lead can narrow it with one `gpu window` call.

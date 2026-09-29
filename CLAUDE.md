@@ -6,8 +6,13 @@ Claude Code plugin for memory-gated parallel agent orchestration. Spawns named d
 
 - `plugin.json` — manifest (name, version, description)
 - `config.json` — tunables (perAgentMB, balloonReserveMB, hostReserveMB, maxAgents)
-- `hooks/hooks.json` — PreToolUse gates (reuse → mem-gate chain; `Bash|Monitor` → no-poll-guard), PostToolUse accounting, TeammateIdle/SubagentStop roster injection + `idle-assign.sh` (the freed agent's held context — recorded from its spawn prompt / last SendMessage by PostToolUse[Agent|SendMessage] — and the best-fit open item from `scratch/dreamteam/backlog.md` or `~/.claude/state/dreamteam-backlog.md`; `idle-assign.sh backlog add|list|done`), Pre/PostCompact HANDOFF guard, sync WorktreeCreate provision adapter (returns the worktree path, #26) + async Task*/WorktreeRemove event log, SessionStart/End lifecycle
+- `hooks/hooks.json` — PreToolUse gates (reuse → mem-gate chain; `Bash|Monitor` → no-poll-guard, then gpu-guard), PostToolUse accounting, TeammateIdle/SubagentStop roster injection + `idle-assign.sh` (the freed agent's held context — recorded from its spawn prompt / last SendMessage by PostToolUse[Agent|SendMessage] — and the best-fit open item from `scratch/dreamteam/backlog.md` or `~/.claude/state/dreamteam-backlog.md`; `idle-assign.sh backlog add|list|done`), Pre/PostCompact HANDOFF guard, sync WorktreeCreate provision adapter (returns the worktree path, #26) + async Task*/WorktreeRemove event log, SessionStart/End lifecycle
 - `scripts/` — gate scripts, budget calculator, scope-attach (automatic cgroup containment), dashboard data generator, statusline (wired via user settings `statusLine`), local-model lane seam (optional ollama, `local-model.sh`), shared lib (`lib.sh`; `lib/pane-resolve.sh` = the canonical agent→pane resolver poke/pane-peek/fleet source, #53; `lib/agent-id.sh` = the canonical "which teammate am I?" /proc walk, shared by worktree-guard + no-poll-guard), PR tooling (`pr-gate.sh` / `pr-merge.sh` / `cascade.sh` — REST-only, no polling)
+- **GPU fleet** (spec `docs/superpowers/specs/2026-09-29-gpu-fleet-design.md`):
+  - `gpu/fleet.json`: every host and card with measured sizes, capabilities and the host's admission rules.
+  - `bin/dreamteam` → `scripts/gpu.sh` → `scripts/lib/gpu_fleet.py`: `dreamteam gpu board|inventory|claim|release|window|admit|run`. The claims ledger is at `~/.claude/state/dreamteam/gpu/claims.json` (flock).
+  - `scripts/gpu/`: the three launch forms promoted from GEMS, `safe_run.sh` (familiar), `guest_run.sh` (katana, game) and `remote_run.sh` (gpu0, gpu1; a system scope, because those hosts do not linger). `test_guest_run.sh` is the on-host control for guest_run.
+  - `scripts/gpu-guard.sh`: PreToolUse Bash; a lane cannot launch on a card it does not hold. `config.json gpu.guard`: warn (the rollout default), enforce, or off.
 - `scripts/org-lookup.sh` + `scripts/lib/org_lookup.py` — optional org map: agent name → department / human owner / escalation chain, read from lexicon `catalog/agents.yaml` (`config.json .org`). Read-only; no catalog = no-op
 - `skills/dreamteam/SKILL.md` — full orchestration skill (~900 lines)
 - `agents/` — custom agent type definitions (luna, morpheus, lucid, nebula)
@@ -61,6 +66,14 @@ bash tests/run.sh          # runs every suite, exits non-zero on any failure
   rather than read as "up to date"; `--allow-no-ci <note>` covers the absence of checks and never
   a failing one; and `--gated-sha` re-gates when the head moved (the force-push race).
 - `tests/test-org-map.sh` — the OPTIONAL org map (`scripts/lib/org_lookup.py`, `scripts/org-lookup.sh`): resolution order (exact id / current_name / lane glob / dream prefix), escalation chain to the human + channel (three-channel for `.org.threeChannelOwners`), silent no-ops (missing / `off` / malformed catalog, unknown name, entry without org fields), and **backward compatibility** — `roster-live.sh` / `idle-agents.sh` output is byte-identical with no catalog, and org keys are purely additive when one resolves.
+- `tests/test-gpu.sh` — the GPU fleet, tested against the real `gpu/fleet.json` with a temp ledger and a stub ssh that serves canned probes:
+  - **admission, on the 2026-09-28 incident numbers:** the ×1.2/×1.5 caps; gpu1's pair rule (a 2.81 GiB pair admitted, a 5.23 GiB pair refused); katana's summed guest budget; familiar's one heavy job; VRAM beside resident services; the B60 compute block; estimate needs `--solo`; midnight-crossing windows;
+  - **the ledger:** granters only; one holder per card; expiry; the holder releases;
+  - **the guard's `detect`:** positive controls for each launcher, the `CUDA_VISIBLE_DEVICES` form and python over ssh; negative controls for reads and CPU jobs; an unresolved ssh host fails open;
+  - **the guard's modes:** warn, enforce and off; a missing config is warn;
+  - **the wrapper's exit codes;**
+  - **`run --dry-run`** for all three forms, plus the live-VRAM refusal;
+  - **safe_run and remote_run** with PATH stubs (meminfo refusals; the exact scope, sleep lock and card of a remote launch).
 - `tests/test-worktree-create.sh` — the #26 WorktreeCreate hook adapter (`worktree-create-hook.sh`): asserts **stdout is exactly the worktree path** (the command-hook contract that was missing), cwd-independence, branch-off-HEAD, opt-in git-ignored-input copy (`.claude/worktree-copy`), name sanitization, and a clean **non-zero exit on failure** (no phantom "succeeded but no path").
 
 Quick static checks:
