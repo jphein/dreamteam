@@ -12,6 +12,7 @@ DREAMTEAM_GPU_NOW (epoch seconds), DREAMTEAM_GPU_SSH (the ssh binary), DREAMTEAM
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import contextlib
 import fcntl
 import fnmatch
@@ -603,13 +604,93 @@ def resident_vram(card: dict) -> int:
     return sum(int(r.get("vram_mib", 0)) for r in card.get("residents", []))
 
 
-def board_data(fleet: dict) -> dict:
+# ── the guard's status (the board's guard section; spec §5.3) ──────────────────────────────────────
+
+def hook_arrival(root: str = ROOT, needle: str = "gpu-guard") -> float | None:
+    """When this plugin checkout's hooks/hooks.json first registered the guard: the first reflog entry that moved
+    HEAD to a commit containing the commit that added it. Plugin hooks load at session start, so a session started
+    before this never runs the guard. Seam: DREAMTEAM_GPU_HOOK_SINCE (epoch seconds, or "none")."""
+    seam = os.environ.get("DREAMTEAM_GPU_HOOK_SINCE")
+    if seam:
+        return None if seam == "none" else float(seam)
+
+    def git(*args):
+        r = subprocess.run(["git", "-C", root, *args], capture_output=True, text=True, timeout=5)
+        return r.stdout if r.returncode == 0 else ""
+    try:
+        first = git("log", "-S" + needle, "--reverse", "--format=%H", "--", "hooks/hooks.json").split()
+        if not first:
+            return None
+        for line in reversed(git("reflog", "--date=unix", "--format=%H %gd").splitlines()):   # oldest first
+            sha, _, gd = line.partition(" ")
+            m = re.search(r"@\{(\d+)\}", gd)
+            if m and subprocess.run(["git", "-C", root, "merge-base", "--is-ancestor", first[0], sha],
+                                    capture_output=True, timeout=5).returncode == 0:
+                return float(m.group(1))
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+def claude_sessions() -> list:
+    """Live Claude Code sessions on this machine: [{"pid", "agent", "start"}]. agent is the --agent-id (a lane,
+    name@team) or "" (a main or orchestrator session); one row per agent, its earliest process.
+    Seam: DREAMTEAM_GPU_SESSIONS (a JSON list of such rows)."""
+    seam = os.environ.get("DREAMTEAM_GPU_SESSIONS")
+    if seam:
+        return json.loads(seam)
+    try:
+        boot = next(int(ln.split()[1]) for ln in open("/proc/stat") if ln.startswith("btime"))
+        hz = os.sysconf("SC_CLK_TCK")
+    except (OSError, StopIteration, ValueError):
+        return []
+    rows = {}
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            argv = [x.decode(errors="replace") for x in open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0") if x]
+            stat = open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()
+        except OSError:
+            continue
+        if not argv or not (re.search(r"/claude/versions/[^/]+$", argv[0]) or os.path.basename(argv[0]) == "claude"):
+            continue
+        agent = next((argv[i + 1] for i, x in enumerate(argv[:-1]) if x == "--agent-id"), "")
+        start = boot + int(stat[19]) / hz
+        key = agent or f"pid:{pid}"
+        if key not in rows or start < rows[key]["start"]:
+            rows[key] = {"pid": int(pid), "agent": agent, "start": start}
+    return sorted(rows.values(), key=lambda r: r["start"])
+
+
+def guard_status(fleet: dict, cfg: dict) -> dict:
+    """Mode, the lane sessions the hook cannot reach yet, and today's replay (incremental; gpu_replay.cached)."""
+    since = hook_arrival()
+    lanes = [r for r in claude_sessions() if "@" in (r.get("agent") or "")]
+    unguarded = [r for r in lanes if since is None or r["start"] < since]
+    out = {"mode": guard_mode(cfg), "hook_since": since, "lane_sessions": len(lanes),
+           "unguarded": [{"agent": r["agent"], "start": r["start"], "pid": r["pid"]} for r in unguarded]}
+    t0 = time.mktime(time.localtime(now())[:3] + (0, 0, 0, 0, 0, -1))     # local midnight today
+    try:
+        import gpu_replay
+        st = gpu_replay.cached(ROOT, fleet, decide, t0, os.environ.get("DREAMTEAM_GPU_PROJECTS")
+                               or os.path.expanduser("~/.claude/projects"), state_dir())
+        out["replay"] = {"since": t0, "calls": st["calls"], "blocks": st["launches"], "misses": st["misses"],
+                         "by_lane": dict(Counter(x["lane"] for x in st["launches"]).most_common())}
+    except Exception as e:                              # the board must never fail on its guard section
+        out["replay"] = {"error": f"{type(e).__name__}: {e}"}
+    return out
+
+
+def board_data(fleet: dict, cfg: dict | None = None) -> dict:
     t = now()
     with Ledger() as L:
         live, upcoming, windows = L.live(t), L.upcoming(t), dict(L.data["windows"])
     from concurrent.futures import ThreadPoolExecutor  # lazy: the guard path never pays ~14 ms for it
-    with ThreadPoolExecutor(max_workers=len(fleet["hosts"])) as ex:
+    with ThreadPoolExecutor(max_workers=len(fleet["hosts"]) + 1) as ex:
+        guard = ex.submit(guard_status, fleet, cfg if cfg is not None else load_config())   # beside the probes
         probes = dict(zip(fleet["hosts"], ex.map(lambda h: probe(fleet, h), fleet["hosts"])))
+        guard = guard.result()
     cards = []
     for cid, c in fleet["cards"].items():
         p = probes.get(c["host"], {})
@@ -630,10 +711,10 @@ def board_data(fleet: dict) -> dict:
             "resident_mib": resident_vram(c)})
     hosts = {h: {k: v for k, v in p.items() if k in ("reachable", "avail_mb", "swap_pct", "disk", "pause")}
              for h, p in probes.items()}
-    return {"ts": t, "cards": cards, "hosts": hosts}
+    return {"ts": t, "cards": cards, "hosts": hosts, "guard": guard}
 
 def cmd_board(a, fleet, cfg) -> int:
-    d = board_data(fleet)
+    d = board_data(fleet, cfg)
     if a.json:
         print(json.dumps(d, indent=1, sort_keys=True))
         return 0
@@ -660,7 +741,38 @@ def cmd_board(a, fleet, cfg) -> int:
         disk = " ".join(f"{p} {g}G" for p, g in s.get("disk", {}).items())
         print(f"  {h:<9} RAM available {s.get('avail_mb', '?')} MB · swap {s.get('swap_pct', '?')}% · {disk}"
               f"{' · PAUSED' if s.get('pause') else ''}")
+    print_guard(d["guard"], every=getattr(a, "guard", False))
     return 0
+
+
+def print_guard(gd: dict, every: bool = False, recent: int = 10) -> None:
+    since = gd.get("hook_since")
+    un = gd.get("unguarded", [])
+    head = (f"hook in this checkout since {time.strftime('%m-%d %H:%M', time.localtime(since))}" if since
+            else "hook arrival unknown (not a git checkout?): every lane counted as unguarded")
+    print(f"  guard     {gd.get('mode')} · {head} · {len(un)} of {gd.get('lane_sessions', 0)} lane sessions unguarded"
+          + (" (started before it; guarded once respawned):" if un else ""))
+    if un:
+        names = [f"{r['agent'].split('@')[0]} {time.strftime('%m-%d %H:%M', time.localtime(r['start']))}" for r in un]
+        for k in range(0, len(names), 5):
+            print("            " + ", ".join(names[k:k + 5]))
+    rp = gd.get("replay") or {}
+    if "error" in rp:
+        print(f"            replay unavailable: {rp['error']}")
+        return
+    blocks = rp.get("blocks", [])
+    lanes = ", ".join(f"{k} {v}" for k, v in (rp.get("by_lane") or {}).items())
+    print(f"            would-blocks since {time.strftime('%H:%M', time.localtime(rp.get('since', 0)))} "
+          f"(replay of {rp.get('calls', 0)} lane calls, claims at the time): {len(blocks)}" + (f" · {lanes}" if lanes else ""))
+    shown = blocks if every else blocks[-recent:]
+    for x in shown:
+        tgt = ",".join(x["cards"] + [f"{h}:*" for h in x["host_any"]])
+        print(f"              {time.strftime('%H:%M:%S', time.localtime(x['ts']))} {x['lane']:<18} {tgt:<12} "
+              f"{x['why'][:48]:<48} {x['cmd'][:70]}")
+    if len(blocks) > len(shown):
+        print(f"              … {len(blocks) - len(shown)} earlier: `dreamteam gpu board --guard` lists all")
+    for x in rp.get("misses", []):
+        print(f"              PRE-FILTER MISS {time.strftime('%H:%M:%S', time.localtime(x['ts']))} {x['lane']} {x['why'][:60]}")
 
 def cmd_inventory(a, fleet, cfg) -> int:
     if a.check:
@@ -869,6 +981,7 @@ def main(argv=None) -> int:
     sub = ap.add_subparsers(dest="verb", required=True)
     p = sub.add_parser("board", help="who holds which card, windows, live VRAM and host memory")
     p.add_argument("--json", action="store_true")
+    p.add_argument("--guard", action="store_true", help="list every would-block since midnight, not the last 10")
     p.set_defaults(fn=cmd_board)
     p = sub.add_parser("inventory", help="the cards and their capabilities (--check HOST re-measures)")
     p.add_argument("--json", action="store_true")
