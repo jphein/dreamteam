@@ -310,6 +310,17 @@ pipeline a training run under `--protected` (`python build_stacks.py && mv a b &
 - **By design (the Oracle, f705aba):** a `--device cpu` anywhere on a protected command line is trusted even when an
   unread script ignores it. Only a deliberate decoy defeats it.
 
+**The Oracle's #114 delta (FIX-BEFORE-ENFORCE: M1), fixed in #118.**
+- The problem: `uv` was on the non-GPU list and a runner matched only `run` as its first word. So global options
+  before the verb (`uv --directory /w run python train.py`, `uv -q run …`) made uv a no-op. That hid a protected
+  run too.
+- Each python project runner (uv, uvx, poetry, pdm, hatch, pipx, conda, mamba, micromamba) now has its global
+  options, its `run` options, and its verbs that run nothing:
+  - `run`, `uv tool run` and `uvx` unwrap to the command;
+  - a known non-run verb (`uv pip`, `uv sync`, `conda install`, …) is a read;
+  - **any other verb fails closed**: it is an opaque run, so the `--protected` fallback still fires and an explicit
+    GPU variable still counts.
+
 **Not launches:** every argument and every quoted string, heredoc data (`cat > f`, `git commit -F -`, `jq`),
 reads, `bash -n`, `--help`, python without GPU evidence (CPU jobs), and the CPU markers:
 `CUDA_VISIBLE_DEVICES=` (empty), `-1`, and `--device cpu`. drift's 09:09 `dino_features.py --device cpu` smoke is
