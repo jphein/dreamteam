@@ -32,7 +32,7 @@ PY = re.compile(r"^python[0-9.]*$")
 GPU_ENV = ("CUDA_VISIBLE_DEVICES", "ZE_AFFINITY_MASK")
 # programs a GPU variable in front of does not make a launch (reads, no-ops)
 READS = {"echo", "printf", "true", "false", ":", "test", "[", "nvidia-smi", "export", "cat", "ls", "grep", "head",
-         "tail", "env", "printenv", "which", "type", "command", "sleep", "date", "wc", "jq",
+         "tail", "env", "printenv", "which", "type", "sleep", "date", "wc", "jq",
          # the Oracle's 09-29 false positives (`CUDA_VISIBLE_DEVICES=1 git status`), and their kin
          "git", "less", "more", "rg", "stat", "ps", "systemctl", "journalctl", "du", "df", "free", "uptime", "id",
          "whoami", "hostname", "file", "readlink", "realpath", "basename", "dirname", "diff", "cmp", "sha256sum",
@@ -311,6 +311,7 @@ class _Scan:
         self.finds = []          # (host, [idx] | None, prefix, why, all_cards)
         self.via_run = False
         self.copied = {}         # host -> {basename: text}: local scripts this command scp'd there
+        self.cpu_verdicts = 0    # commands judged CPU-only (a CPU program, a CPU marker, --device cpu)
 
     def find(self, host, env: dict, why: str, idx=None, prefix="", all_cards=False, kind=None):
         """kind None: the environment names the device (CUDA_VISIBLE_DEVICES or ZE_AFFINITY_MASK). kind "cuda" or
@@ -318,6 +319,7 @@ class _Scan:
         if idx is None:
             gidx, gprefix = gpu_index(env, kind)
             if gidx == "cpu":
+                self.cpu_verdicts += 1
                 return
             idx = gidx
             prefix = gprefix if kind is None else ("xpu" if kind == "xpu" else "")
@@ -338,16 +340,18 @@ def gpu_index(env: dict, kind=None):
     something that is not a literal index (a variable): some card of the host. "cpu" = the CPU-only marker.
     With a kind, only that kind's variable counts."""
     keys = GPU_ENV if kind is None else (("ZE_AFFINITY_MASK",) if kind == "xpu" else ("CUDA_VISIBLE_DEVICES",))
-    for k in keys:
+    cpu = None
+    for k in keys:                           # a variable naming a device beats another's CPU marker (the Oracle, 09-29)
         if k in env:
             v = env[k].strip().strip("'\"")
             prefix = "xpu" if k == "ZE_AFFINITY_MASK" else ""
             if v in ("", "-1"):
-                return "cpu", prefix
+                cpu = cpu or ("cpu", prefix)
+                continue
             if re.fullmatch(r"[0-9]+(,[0-9]+)*", v):
                 return [int(x) for x in v.split(",")], prefix
             return None, prefix
-    return None, ""
+    return cpu or (None, "")
 
 
 def _has_gpu_env(env: dict) -> bool:
@@ -514,6 +518,13 @@ def _simple(sc: dict, st: _Scan, host, env: dict, shvars: dict, cwd: str, depth:
                 _scan(args[1], st, host, cenv, cwd, depth, written)
                 return
             words = args
+        elif prog == "command":            # `command X` runs X; `command -v X` only looks it up
+            args = words[1:]
+            if args and args[0].startswith("-") and any(ch in "vV" for ch in args[0][1:]):
+                return
+            while args and args[0].startswith("-") and args[0] != "-":
+                args = args[1:]
+            words = args
         elif prog == "taskset":
             args = words[1:]
             if args[:1] in (["-p"], ["--pid"]):
@@ -614,12 +625,12 @@ def _simple(sc: dict, st: _Scan, host, env: dict, shvars: dict, cwd: str, depth:
     if prog in LAUNCHERS:
         if prog == "safe_run.sh" and not any(a in ("-h", "--help", "--version") for a in args[:3]):
             rest = [a for a in args if a not in ("--protected", "--")]
-            n0 = len(st.finds)
+            n0, c0 = len(st.finds), st.cpu_verdicts
             if len(rest) > 1:              # the capped command first: it may name the card and its kind
                 _simple({"words": rest[1:], "redirs": [], "heredocs": [], "bg": False}, st, host, cenv, shvars,
                         cwd, depth, written)
-            if len(st.finds) > n0:
-                return
+            if len(st.finds) > n0 or st.cpu_verdicts > c0:
+                return                     # it named its card, or it was judged CPU (the Oracle's FIX-BEFORE-ENFORCE)
         _launcher(prog, args, st, host, cenv)
         return
     if PY.match(prog):
@@ -660,9 +671,10 @@ def _named_gpu_script(base: str, args: list, st: _Scan, host, env: dict) -> bool
 
 
 def _env_why(env: dict) -> str:
-    for k in GPU_ENV:
-        if k in env:
-            return f"{k}={env[k]}"
+    """The variable that names the device (an index beats another variable's CPU marker), for the why line."""
+    named = [k for k in GPU_ENV if k in env and env[k].strip().strip("'\"") not in ("", "-1")]
+    for k in named or [k for k in GPU_ENV if k in env]:
+        return f"{k}={env[k]}"
     return "a GPU variable"
 
 
@@ -876,6 +888,11 @@ def _program_of(words: list) -> str | None:
             while words and words[0].startswith("-") and words[0] != "-":
                 words = words[2:] if words[0] in ("-u", "--unset", "-C", "--chdir") else words[1:]
             continue
+        if b == "command":
+            if words[1:2] and words[1].startswith("-") and any(ch in "vV" for ch in words[1][1:]):
+                return None                  # command -v X: a lookup
+            words = [w for w in words[1:2] if not w.startswith("-")] + words[2:] if words[1:2] and words[1].startswith("-") else words[1:]
+            continue
         if b in WRAPPERS:
             flags, vals, pos = WRAPPERS[b]
             words = _skip_opts(words[1:], flags, vals, pos, {}, b)
@@ -951,8 +968,7 @@ def _python(args: list, sc: dict, st: _Scan, host, env: dict):
         j += 1
         break
     rest = args[j:]
-    if script and any(rx.search(os.path.basename(script)) for rx in st.cpu_programs):
-        return                              # fleet.json guard.cpu_programs: CPU-only, whatever the environment says
+    cpu_named = bool(script and any(rx.search(os.path.basename(script)) for rx in st.cpu_programs))
     if not (script or module or inline):
         inline = bool(sc["heredocs"])
     if any(r in ("-h", "--help", "--version") for r in rest):
@@ -963,8 +979,9 @@ def _python(args: list, sc: dict, st: _Scan, host, env: dict):
         if v is not None:
             dev = v.strip("'\"").lower()
     if dev is not None and dev.startswith("cpu"):
+        st.cpu_verdicts += 1
         return
-    if dev is not None and (dev.startswith("cuda") or dev.startswith("xpu")):
+    if dev is not None and (dev.startswith("cuda") or dev.startswith("xpu")):  # asked for a device: beats any name
         kind = "xpu" if dev.startswith("xpu") else "cuda"
         m = re.match(r"(cuda|xpu):(\d+)$", dev)
         if m:
@@ -972,8 +989,12 @@ def _python(args: list, sc: dict, st: _Scan, host, env: dict):
         else:
             st.find(host, env, f"--device {dev}", kind=kind)   # only that kind's variable may index it
         return
+    if cpu_named:                            # fleet.json guard.cpu_programs: an index in the environment is no evidence
+        st.cpu_verdicts += 1
+        return
     idx, prefix = gpu_index(env)
     if idx == "cpu":
+        st.cpu_verdicts += 1
         return
     if _has_gpu_env(env):
         st.find(host, env, _env_why(env) + (f" python {os.path.basename(script)}" if script else " python"))
@@ -1038,7 +1059,10 @@ def detect(cmd: str, fleet: dict, local: str, cwd: str | None = None) -> dict:
             continue
         kind = "xpu" if prefix == "xpu" else "cuda"
         host_cards = [cid for cid, c in fleet["cards"].items() if c["host"] == host]
-        typed = [c for c in host_cards if fleet["cards"][c].get("caps", {}).get(kind)] or host_cards
+        typed = [c for c in host_cards if ("xpu" if fleet["cards"][c].get("caps", {}).get("xpu") else "cuda") == kind]
+        if not typed:                       # no card of that kind here: the job cannot use this host's GPUs
+            whys.append(f"{why} (no {kind} card on {host}: not a launch)")
+            continue
         usable = [c for c in typed if fleet["cards"][c].get("compute_ok", True)]
         if all_cards:
             cards = usable or typed

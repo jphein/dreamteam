@@ -283,6 +283,15 @@ for c in 'CUDA_VISIBLE_DEVICES=1 git status' 'CUDA_VISIBLE_DEVICES=1 tmux ls' 'C
 done
 check "$(cards 'ssh gpu1 "CUDA_VISIBLE_DEVICES=1 python train.py"')" "gpu1:1" "oracle: the clamp keeps a card the host has"
 check "$(cards "ssh gpu1 'CUDA_VISIBLE_DEVICES=1 git status'")" "" "oracle: git is a read even where the card exists (READS, not the clamp)"
+# the Oracle's delta review of #110 (6740ce7): FIX-BEFORE-ENFORCE, and its Low findings
+check "$(cards "ssh familiar '/work/tools/safe_run.sh --protected 20G python build_stacks.py'")" "" "delta: --protected over a CPU program is no training run (the wrapped command was judged CPU)"
+check "$(cards "ssh familiar '/work/tools/safe_run.sh --protected 6G env CUDA_VISIBLE_DEVICES= make -j8'")" "" "delta: --protected over a CPU-marked command is no training run"
+check "$(cards 'ssh gpu1 bash /var/tmp/b60_bench.sh')" "" "delta: an XPU script on a host with no XPU fails open (no fallback to its CUDA cards)"
+check "$(cards 'python score_sweep.py --device cuda:0')" "katana:0" "delta: an explicit --device beats a CPU program's name"
+check "$(cards 'CUDA_VISIBLE_DEVICES=0 command python train.py')" "katana:0" "delta: command runs its argument"
+check "$(cards 'command -v python')" "" "delta: command -v is a lookup"
+check "$(cards "ssh familiar '/work/tools/safe_run.sh --protected 6G command bash /work/unread.sh'")" "familiar:0" "delta: command cannot hide a protected run"
+check "$(cards "ssh familiar 'CUDA_VISIBLE_DEVICES= ZE_AFFINITY_MASK=0 python bench.py'")" "familiar:xpu0" "delta: an XPU index beats the CUDA CPU marker in env-only evidence"
 # a local chain script followed two levels: chain.sh -> gpu_run.sh -> ssh gpu1 (vesper's chain-nh.sh, 09-29)
 mkdir -p "$TMP/chain"
 printf '#!/usr/bin/env bash\nset -u\n./gpu_run.sh 1 nh-C\n' > "$TMP/chain/chain.sh"

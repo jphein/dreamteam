@@ -277,6 +277,19 @@ parsed the same way, on their host. An ssh to an unresolvable host (`ssh "$H"`) 
   `CUDA_VISIBLE_DEVICES=1` on katana, or `--gpus device=1` there, is not a launch.
 - **Reads:** git, less, rg, stat, ps, systemctl and their kin are reads.
 
+**The Oracle's delta review of #110 (6740ce7): FIX-BEFORE-ENFORCE (1). Fixed in #112:**
+- **The blocker:** the `safe_run --protected` fallback treated a capped CPU command as a training run
+  (`--protected 20G python build_stacks.py`, `--protected 6G env CUDA_VISIBLE_DEVICES= make`). The scan now counts
+  CPU verdicts (a CPU program, a CPU marker, `--device cpu`), and the fallback applies only when the capped command
+  was neither judged CPU nor named a card.
+- **An XPU job on a host with no XPU,** or a CUDA job with no CUDA card, fails open. It never falls back to the other
+  kind's cards: `b60_bench.sh` run on gpu1 is not a gpu1 launch.
+- **An explicit `--device cuda|xpu` beats a CPU program's name.** An index in the environment does not: morpheus-gems's
+  classes say "whatever the environment says". A renamed GPU job still shows on the board.
+- **`command X` runs X** (a wrapper); `command -v X` is a lookup.
+- **In env-only evidence, a variable naming a device beats another variable's CPU marker:**
+  `CUDA_VISIBLE_DEVICES= ZE_AFFINITY_MASK=0` is an XPU job.
+
 **Not launches:** every argument and every quoted string, heredoc data (`cat > f`, `git commit -F -`, `jq`),
 reads, `bash -n`, `--help`, python without GPU evidence (CPU jobs), and the CPU markers:
 `CUDA_VISIBLE_DEVICES=` (empty), `-1`, and `--device cpu`. drift's 09:09 `dino_features.py --device cpu` smoke is
