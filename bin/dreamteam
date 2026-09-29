@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# dreamteam — the plugin's CLI front door. Today: `dreamteam gpu …` (scripts/gpu.sh; spec
+# docs/superpowers/specs/2026-09-29-gpu-fleet-design.md). Put it on PATH with
+#   ln -sfn <plugin>/bin/dreamteam ~/.local/bin/dreamteam
+set -uo pipefail
+ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+case "${1:-}" in
+  gpu) shift; exec bash "$ROOT/scripts/gpu.sh" "$@" ;;
+  ""|-h|--help|help) echo "usage: dreamteam gpu <board|inventory|claim|release|window|admit|run> …   (dreamteam gpu --help)"; exit 0 ;;
+  *) echo "dreamteam: unknown command '$1' (try: dreamteam gpu --help)" >&2; exit 2 ;;
+esac
