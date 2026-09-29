@@ -77,6 +77,11 @@ bash tests/run.sh          # runs every suite, exits non-zero on any failure
     - A pinned known limit: an unreadable remote script with no GPU evidence is not a launch.
     - Every detect check is replayed through the real `gpu-guard.sh`, so the pre-filter must stay a superset.
     - Each new rule has its own red perturbation.
+  - **device kinds and the fleet.json guard classes:**
+    - `--device xpu` is the B60, and a CUDA index or CPU marker does not move an XPU job;
+    - named GPU wrappers count when unreadable (chain45.sh, b60_bench.sh as XPU), and CPU programs never count;
+    - `--device` on a launcher or an unread script names the card; `safe_run --protected` defers to its wrapped command;
+    - a no-op is found past `env` and the wrappers;
   - **the board's guard section:**
     - unguarded = a lane session started before the hook's reflog arrival; an orchestrator is no lane, and an unknown arrival counts every lane unguarded;
     - the incremental replay cache: a new line is read once, a line still being written waits, the offset stops at the last complete line, and a replaced transcript rebuilds;

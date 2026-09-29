@@ -952,9 +952,12 @@ measured sizes and each host's admission rules in `gpu/fleet.json`. Spec:
   - **v1.3 counts a launch only where a shell runs it.** Reading, copying, grepping or editing a launcher is never
     a launch, and neither is a heredoc written to a file. It follows the scripts a command writes, scp's or runs
     locally.
-  - **python on a GPU host is a CPU job** unless it has GPU evidence: an index, `--device cuda`, or a GPU program
-    from `fleet.json guard.gpu_programs`. Mark CPU work explicitly with `CUDA_VISIBLE_DEVICES=` (empty) or
+  - **python on a GPU host is a CPU job** unless it has GPU evidence: an index, `--device cuda|xpu`, or a GPU
+    program from `fleet.json guard.gpu_programs`. Mark CPU work explicitly with `CUDA_VISIBLE_DEVICES=` (empty) or
     `--device cpu`.
+  - **fleet.json `guard` holds the GEMS classes:** `gpu_programs`, `gpu_scripts` (wrappers such as chain45.sh, which
+    count by name when unreadable) and `cpu_programs` (which never count). An XPU job, `--device xpu` or
+    `ZE_AFFINITY_MASK`, is attributed to the B60. A new GPU program or wrapper goes into that block.
   - **Hooks load at session start,** so a lane is guarded only once it is respawned. An empty `guard.log` proves
     nothing. The board's guard section lists the lane sessions still unguarded and today's would-blocks (the last
     10; `dreamteam gpu board --guard` lists all). Review warn mode with `dreamteam gpu replay --since '<date> 00:00'`,

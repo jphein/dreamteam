@@ -231,6 +231,23 @@ check "$(cards "ssh familiar \"CUDA_VISIBLE_DEVICES=0 PYTHONUNBUFFERED=1 setsid 
 check "$(cards "ssh gpu0 'OMP_NUM_THREADS=4 /work/tools/safe_run.sh 3G .venv/bin/python dino_features.py --out smoke.tif'")" "gpu0:0" "v1.3 launch: a GPU program (dino_features.py) under an unprotected cap"
 check "$(cards "ssh gpu1 bash -s <<'EOF'${NL}export CUDA_VISIBLE_DEVICES=0${NL}python stage2_train.py${NL}EOF")" "gpu1:0" "v1.3 launch: a heredoc fed to a remote shell, with an exported index"
 check "$(cards 'P=.venv/bin/python; ssh gpu1 "CUDA_VISIBLE_DEVICES=1 $P train.py"')" "gpu1:1" "v1.3 launch: the index in front of a variable program"
+# device kinds and the GEMS classes in fleet.json guard (morpheus-gems 12:1x): a CUDA job gets a CUDA card, an XPU
+# job the B60; named GPU wrappers count when unreadable; CPU programs never count; --device on a launcher names the card
+check "$(cards 'ssh familiar "python bench.py --device xpu"')" "familiar:xpu0" "kinds: --device xpu with no index is the B60, not familiar's CUDA card"
+check "$(cards 'ssh familiar "CUDA_VISIBLE_DEVICES=1 python bench.py --device xpu"')" "familiar:xpu0" "kinds: a CUDA index does not move an XPU job"
+check "$(cards 'ssh familiar bash /work/lanes/xpu/b60_bench.sh')" "familiar:xpu0" "gpu_scripts: b60_bench.sh (unreadable, run on familiar) is an XPU launch"
+check "$(cards 'ssh gpu0 bash /work/lanes/whacky/chain45.sh')" "gpu0:0" "gpu_scripts: chain45.sh run on gpu0 is a GPU launch by name"
+check "$(cards 'ssh gpu1 "CUDA_VISIBLE_DEVICES=1 bash tools/queue_stack_seeds.sh a b"')" "gpu1:1" "gpu_scripts: a named wrapper takes its CUDA index"
+check "$(cards "ssh familiar 'S=/work/tools/safe_run.sh; \"\$S\" --protected 10G /usr/bin/time -v -o t.time bash /work/run_exp_xpu.sh A m --device xpu --epochs 1'")" "familiar:xpu0" "safe_run --protected defers to its command: --device xpu through an unread script is the B60 (drift's b60_bench.sh)"
+check "$(cards 'ssh gpu1 bash /work/unknown.sh --device cuda:1')" "gpu1:1" "an unread script told --device cuda:1 is a launch on that card"
+check "$(cards "ssh familiar '/work/tools/safe_run.sh --protected 6G env ZE_AFFINITY_MASK=0 python bench.py'")" "familiar:xpu0" "safe_run --protected: the wrapped command's own card wins (no extra CUDA default)"
+check "$(cards "ssh familiar '/work/tools/safe_run.sh --protected 6G env OMP_NUM_THREADS=1 bash /work/unread.sh'")" "familiar:0" "safe_run --protected with env and an unread script is still a training run (env is a wrapper, not a read)"
+check "$(cards "ssh familiar '/work/tools/safe_run.sh --protected 64M env X=1 true'")" "" "safe_run --protected wrapping env … true is a smoke test"
+check "$(cards 'ssh gpu0 python3 /work/lanes/reverie/tools/stage2_train_rv.py')" "gpu0:0" "gpu_programs: stage2_train_rv.py matches the stage2_train prefix"
+for c in 'CUDA_VISIBLE_DEVICES=0 python ens_eval.py' "ssh gpu0 'CUDA_VISIBLE_DEVICES=0 python build_stacks.py --out x.tif'" \
+         'ssh gpu1 bash /work/unknown.sh --epochs 3' 'grep -n -- "--device cuda" tools/run_exp.sh'; do
+  check "$(cards "$c")" "" "kinds/classes not a launch: $c"
+done
 # a local chain script followed two levels: chain.sh -> gpu_run.sh -> ssh gpu1 (vesper's chain-nh.sh, 09-29)
 mkdir -p "$TMP/chain"
 printf '#!/usr/bin/env bash\nset -u\n./gpu_run.sh 1 nh-C\n' > "$TMP/chain/chain.sh"

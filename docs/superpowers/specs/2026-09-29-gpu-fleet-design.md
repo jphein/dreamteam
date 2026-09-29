@@ -239,6 +239,24 @@ chrt, taskset, flock, sudo, time, watch, systemd-run (its `-E` sets the environm
 The ssh remote command, a heredoc fed to a remote shell (`ssh gpu1 bash -s <<EOF`), and `bash -c STRING` are
 parsed the same way, on their host. An ssh to an unresolvable host (`ssh "$H"`) fails open.
 
+**Device kinds and the GEMS classes (#110, morpheus-gems 12:1x).**
+- A CUDA job gets a CUDA card and an XPU job an XPU card (`caps.cuda` / `caps.xpu` in fleet.json).
+  - `--device xpu` with no index on familiar is the B60, `familiar:xpu0`, never the P102.
+  - Only a kind's own variable indexes it, so a CUDA index or the CUDA CPU marker does not move an XPU job.
+- `fleet.json guard` holds three classes:
+  - `gpu_programs`: python scripts, a string for CUDA or `{"match", "kind"}`.
+  - `gpu_scripts`: GEMS wrappers whose child is stage2_train (chain45.sh, queue_dem3_seeds.sh,
+    queue_stack_seeds.sh, pipeline_1m.sh) and drift's b60_bench.sh (kind xpu). They count by name when their text
+    cannot be read, for example when run on gpu0 over ssh.
+  - `cpu_programs`: ens_eval.py, score_sweep.py, make_candidate.py, build_stacks.py, build_dem_features.py and
+    tip1e.py. These are never a launch, whatever the environment says.
+- `--device cuda|xpu[:N]` on a launcher's or an unread script's command line names the kind and the card.
+  drift's b60_bench.sh passes `--device xpu` through `safe_run --protected` to run_exp_xpu.sh.
+- `safe_run --protected` defers to its capped command. The protected run is the evidence only when that command
+  reveals nothing, and a no-op is found past `env` and the wrappers.
+- On the morning window this gives 36 would-blocks, all real. That's 34 plus nebula's two `queue_after.sh … bash
+  chain45.sh` chains on gpu0 and gpu1, which v1.3 missed. drift's B60 bench moves to `familiar:xpu0`.
+
 **Not launches:** every argument and every quoted string, heredoc data (`cat > f`, `git commit -F -`, `jq`),
 reads, `bash -n`, `--help`, python without GPU evidence (CPU jobs), and the CPU markers:
 `CUDA_VISIBLE_DEVICES=` (empty), `-1`, and `--device cpu`. drift's 09:09 `dino_features.py --device cpu` smoke is
