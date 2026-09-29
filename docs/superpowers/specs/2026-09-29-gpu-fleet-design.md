@@ -292,6 +292,20 @@ It prints one line per card:
 It reads over ssh, in parallel, `ConnectTimeout=5` and a 12 s wall clock. **The board never wakes a host.**
 `--json` has the same content. `claim`, `release`, `window` and `admit` print the board line they changed.
 
+**The guard section** (the lead, 12:1x 09-29) comes last:
+- the mode, and when the hook reached this checkout (`hook_arrival`: the first reflog entry whose HEAD contains
+  the commit that added `gpu-guard` to hooks.json; 09:40:47 on katana);
+- the live lane sessions still unguarded, meaning Claude processes with `--agent-id` that started before then.
+  An unknown arrival counts every lane as unguarded, never as all guarded. Orchestrators always pass;
+- the would-blocks since local midnight, from the replay against the claims live at each command's time. It shows
+  the last 10; `--guard` shows all. Pre-filter misses are printed too.
+
+The replay behind it is incremental. `replay-cache.json` in the state dir keeps each transcript's offset, the
+rows found so far, and the ids already seen. It reads only complete lines, so a line being written waits. The
+cache is rebuilt when the day, the detection code, fleet.json, the pre-filter or the claims change, or when a
+transcript is replaced or shrinks. Cold, it takes 4.7 s over 83 transcripts (800 MB) and runs beside the host
+probes; warm, 0.3 s. The ids already seen make a re-read harmless.
+
 ## 7. What is not changing, and the migration
 - The GEMS copies (`tools/safe_run.sh`, `tools/guest_run.sh`, `lanes/drift/gpu1_launch.sh`) stay exactly as
   they are. GEMS is mid-competition, and those copies are what its lanes and records cite.

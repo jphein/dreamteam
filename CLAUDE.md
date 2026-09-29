@@ -77,6 +77,10 @@ bash tests/run.sh          # runs every suite, exits non-zero on any failure
     - A pinned known limit: an unreadable remote script with no GPU evidence is not a launch.
     - Every detect check is replayed through the real `gpu-guard.sh`, so the pre-filter must stay a superset.
     - Each new rule has its own red perturbation.
+  - **the board's guard section:**
+    - unguarded = a lane session started before the hook's reflog arrival; an orchestrator is no lane, and an unknown arrival counts every lane unguarded;
+    - the incremental replay cache: a new line is read once, a line still being written waits, the offset stops at the last complete line, and a replaced transcript rebuilds;
+    - `hook_arrival` is tested on a real temp git reflog;
   - **the call watcher:** a stand-in camera. OBS alone is not a call; the stand-in OBS is ONE process with comm `obs` via prctl, because a copy of multi-call `sleep` named `obs` exits at once, which made this negative vacuous. A second reader pauses; only the GPU container is docker-paused; the calm period holds; after it only our pause file is removed and only our containers are unpaused; a foreign pause file is never touched;
   - **the ledger:** granters only; one holder per card; expiry; the holder releases;
   - **the guard's `detect`:** positive controls for each launcher, the `CUDA_VISIBLE_DEVICES` form and python over ssh; negative controls for reads and CPU jobs; an unresolved ssh host fails open;

@@ -267,6 +267,45 @@ case "$out" in *"[gpu1:1] (CUDA_VISIBLE_DEVICES=1"*) pass "replay: names the lan
 case "$(DREAMTEAM_AGENT_ID=x python3 "$LIB" replay --projects "$TMP/proj" --since '2026-09-29 00:00' --until '2026-09-30 00:00' 2>&1)" in
   *"would-block with no claims seeded): **1**"*) pass "replay: reachable as \`dreamteam gpu replay\`" ;; *) fail "replay subcommand" ;; esac
 
+# ── 6d. the board's guard section: which lanes the hook cannot reach, and the incremental replay ───────
+fresh
+P2="$TMP/proj2/-work-lane"; mkdir -p "$P2"; T="$P2/s.jsonl"
+{ line lane-a "ssh gpu1 'CUDA_VISIBLE_DEVICES=1 nohup python train.py > t.log 2>&1 &'" b1
+  line lane-a 'cat tools/gpu1_launch.sh' b2; } > "$T"
+gs() { (cd "$ROOT/scripts/lib" && DREAMTEAM_GPU_PROJECTS="$TMP/proj2" DREAMTEAM_AGENT_ID=x \
+        python3 -c 'import json, gpu_fleet as g; print(json.dumps(g.guard_status(g.load_fleet(), g.load_config())))'); }
+SESS='[{"pid":11,"agent":"old-lane@t","start":1000},{"pid":12,"agent":"new-lane@t","start":3000},{"pid":13,"agent":"","start":500}]'
+out=$(DREAMTEAM_GPU_SESSIONS="$SESS" DREAMTEAM_GPU_HOOK_SINCE=2000 gs)
+check "$(echo "$out" | jq -r '[.unguarded[].agent] | join(",")')" "old-lane@t" "guard: a lane started before the hook is unguarded, one after is guarded, an orchestrator is no lane"
+check "$(echo "$out" | jq -r '.lane_sessions')" "2" "guard: two lane sessions (the orchestrator is not one)"
+check "$(DREAMTEAM_GPU_SESSIONS="$SESS" DREAMTEAM_GPU_HOOK_SINCE=none gs | jq -r '.unguarded | length')" "2" "guard: an unknown hook arrival counts every lane unguarded (never a false 'all guarded')"
+check "$(echo "$out" | jq -r '"\(.replay.calls) \(.replay.blocks | length)"')" "2 1" "guard: the board's replay finds the one launch in two lane calls"
+# incremental: one new complete line, and one still being written
+line lane-b "CUDA_VISIBLE_DEVICES=0 python train.py" b3 >> "$T"
+line lane-b 'tools/guest_run.sh --mem 4G -- q.sh' b4 | tr -d '\n' >> "$T"          # no newline yet: mid-write
+out=$(DREAMTEAM_GPU_SESSIONS='[]' DREAMTEAM_GPU_HOOK_SINCE=2000 gs)
+check "$(echo "$out" | jq -r '"\(.replay.calls) \(.replay.blocks | length)"')" "3 2" "replay cache: the new complete line is read, the partial one waits"
+part=$(line lane-b 'tools/guest_run.sh --mem 4G -- q.sh' b4 | tr -d '\n' | wc -c)
+check "$(jq -r --arg f "$T" '.offsets[$f][1]' "$TMP/state/replay-cache.json")" "$(( $(stat -c %s "$T") - part ))" "replay cache: the offset stops at the end of the last complete line"
+echo >> "$T"
+out=$(DREAMTEAM_GPU_SESSIONS='[]' DREAMTEAM_GPU_HOOK_SINCE=2000 gs)
+check "$(echo "$out" | jq -r '"\(.replay.calls) \(.replay.blocks | length)"')" "4 3" "replay cache: the finished line is read once"
+check "$(jq -r --arg f "$T" '.offsets[$f][1]' "$TMP/state/replay-cache.json")" "$(stat -c %s "$T")" "replay cache: the offset reaches the end of the file"
+line lane-a 'cat tools/gpu1_launch.sh' b2 > "$T.new" && mv "$T.new" "$T"            # rewritten, shorter
+out=$(DREAMTEAM_GPU_SESSIONS='[]' DREAMTEAM_GPU_HOOK_SINCE=2000 gs)
+check "$(echo "$out" | jq -r '"\(.replay.calls) \(.replay.blocks | length)"')" "1 0" "replay cache: a replaced transcript rebuilds the cache (no stale rows)"
+# the board prints it
+b=$(DREAMTEAM_GPU_PROJECTS="$TMP/proj2" DREAMTEAM_GPU_SESSIONS="$SESS" DREAMTEAM_GPU_HOOK_SINCE=2000 G x board 2>&1)
+case "$b" in *"1 of 2 lane sessions unguarded"*"old-lane"*"would-blocks since"*) pass "board: the guard section lists the unguarded lane and the would-blocks" ;; *) fail "board guard section: $(echo "$b" | grep -A3 ' guard ')" ;; esac
+# hook arrival from a real reflog
+R="$TMP/hookrepo"; mkdir -p "$R/hooks"; gc() { git -C "$R" -c user.email=t@example.invalid -c user.name=t commit -q "$@"; }
+git -C "$R" init -q && gc --allow-empty -m init && echo '{"hooks":{}}' > "$R/hooks/hooks.json" && git -C "$R" add hooks/hooks.json && gc -m "no guard"
+ha() { (cd "$ROOT/scripts/lib" && env -u DREAMTEAM_GPU_HOOK_SINCE python3 -c 'import sys, gpu_fleet as g; print(g.hook_arrival(sys.argv[1]))' "$1"); }
+check "$(ha "$R")" "None" "hook arrival: a checkout whose hooks.json never named the guard -> None"
+tb=$(date +%s); echo '{"hooks":{"x":"bash gpu-guard.sh"}}' > "$R/hooks/hooks.json"; gc -am "add the guard"; ta=$(date +%s)
+v=$(ha "$R"); v=${v%.*}
+[ "$v" -ge "$tb" ] 2>/dev/null && [ "$v" -le "$ta" ] && pass "hook arrival: the reflog time HEAD first held the guard" || fail "hook arrival: got '$v', want $tb..$ta"
+
 # ── 7. the bash wrapper (exit codes a hook runner sees) ──────────────────────────────────────────
 W="$ROOT/scripts/gpu-guard.sh"
 payload() { jq -nc --arg c "$1" '{tool_name:"Bash", tool_input:{command:$c}}'; }
