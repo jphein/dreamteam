@@ -89,7 +89,7 @@ check "$(claim katana:0 --lane reverie-gems --until 2h --peak-ram 11000 --peak-v
 check "$(claim katana:0 --lane reverie-gems --until 2h --peak-ram 5000 --peak-vram 5000)" 0 "katana guest budget: a 6 GB cap and 5 GiB VRAM fit beside the desktop's 2700 MiB"
 fresh
 check "$(claim katana:0 --lane luna-refurb --until 1h --peak-ram 5000 --peak-vram 8000)" 75 "katana: an 8 GB docker audit breaks the margin beside the desktop (8000 + 1024 > 11264 - 2700)"
-check "$(claim katana:0 --lane luna-refurb --until 1h --peak-ram 5000 --peak-vram 8000 --override 'lead: the call watcher kills it under 512 MiB free')" 0 "katana: the lead may override the margin (8000 <= 8564 physically)"
+check "$(claim katana:0 --lane luna-refurb --until 1h --peak-ram 5000 --peak-vram 8000 --override 'lead: the call watcher kills it under 1 GiB free')" 0 "katana: the lead may override the margin (8000 <= 8564 physically)"
 fresh
 check "$(claim familiar:0 --lane morpheus-gems --until 2h --peak-ram 3000 --peak-vram 3000 --protected)" 0 "familiar: one heavy job"
 check "$(claim familiar:xpu0 --lane tapstone --until 2h --peak-ram 2000 --peak-vram 8000 --vulkan)" 75 "familiar: a second heavy job is refused (rule 2)"
@@ -536,7 +536,11 @@ sleep 60 3<"$C/video9" & CALLP=$!; sleep 0.3; cw; kill $CALLP; wait $CALLP 2>/de
 [ "$(cat "$C/pause")" = "manual pause by the lead" ] && pass "callwatch: a pause file it did not write is never touched or removed" || fail "foreign pause file changed"
 kill $OBSP; wait $OBSP 2>/dev/null
 : > "$DREC"; rm -f "$C/state" "$C/state.containers" "$C/pause"; echo 300 > "$DS/free"
-cw; grep -qx "kill runtime-box" "$DREC" && pass "callwatch: with no call, free VRAM 300 < 512 MiB kills the biggest GPU container (JP's desktop first)" || fail "low-VRAM kill: $(cat "$DREC")"
+cw; grep -qx "kill runtime-box" "$DREC" && pass "callwatch: with no call, free VRAM 300 < 1024 MiB kills the biggest GPU container (JP's desktop first)" || fail "low-VRAM kill: $(cat "$DREC")"
+: > "$DREC"; echo 800 > "$DS/free"
+cw; grep -qx "kill runtime-box" "$DREC" && pass "callwatch: 800 MiB free is below the 1 GiB line (morpheus 09-29: a 512 line fired only at 189 MiB)" || fail "800 MiB not killed: $(cat "$DREC")"
+: > "$DREC"; echo 1100 > "$DS/free"
+cw; [ ! -s "$DREC" ] && pass "callwatch: 1100 MiB free is above the line: nothing is killed" || fail "killed above the line: $(cat "$DREC")"
 : > "$DREC"; echo 4000 > "$DS/free"
 cw; [ ! -s "$DREC" ] && pass "callwatch: ample free VRAM and no call touch nothing (negative control)" || fail "acted with no call: $(cat "$DREC")"
 
