@@ -290,6 +290,17 @@ parsed the same way, on their host. An ssh to an unresolvable host (`ssh "$H"`) 
 - **In env-only evidence, a variable naming a device beats another variable's CPU marker:**
   `CUDA_VISIBLE_DEVICES= ZE_AFFINITY_MASK=0` is an XPU job.
 
+**The Oracle's final review (4d789ef), and a decoy found in #112 before it was reported (#113):**
+- **The decoy:** #112 skipped the `--protected` fallback after ANY CPU verdict, so
+  `--protected 20G bash -c "python build_stacks.py; python unknown.py"` hid the unknown job behind the CPU one. The
+  scan now counts the leaf programs a command runs (python, an unread script, a binary). The fallback is skipped
+  only when every one of them was judged CPU.
+- **Also closed:**
+  - a dot-source of a bare name (`. gpujob`) now reaches python, because the pre-filter passes `. `;
+  - tmux `if-shell` and `pipe-pane` are scanned;
+  - `screen -X stuff TEXT` is scanned;
+  - variables set by `export`, `declare`, `typeset`, `local` or `readonly` are tracked like `c=…`.
+
 **Not launches:** every argument and every quoted string, heredoc data (`cat > f`, `git commit -F -`, `jq`),
 reads, `bash -n`, `--help`, python without GPU evidence (CPU jobs), and the CPU markers:
 `CUDA_VISIBLE_DEVICES=` (empty), `-1`, and `--device cpu`. drift's 09:09 `dino_features.py --device cpu` smoke is
