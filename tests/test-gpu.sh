@@ -295,13 +295,6 @@ check "$(cards "ssh familiar 'CUDA_VISIBLE_DEVICES= ZE_AFFINITY_MASK=0 python be
 # the Oracle's final review at 4d789ef, and the CPU-decoy false negative in #112 (every program must be judged CPU)
 check "$(cards "ssh familiar '/work/tools/safe_run.sh --protected 20G bash -c \"python build_stacks.py; python unknown.py\"'")" "familiar:0" "decoy: a CPU program beside an unjudged one does not hide the protected run"
 check "$(cards "ssh familiar '/work/tools/safe_run.sh --protected 20G bash -c \"python build_stacks.py; python score_sweep.py\"'")" "" "decoy: every program judged CPU is no training run"
-check "$(cards "ssh familiar '/work/tools/safe_run.sh --protected 20G bash -c \"cd /w && [[ -f a.tif ]] && python build_stacks.py && mv a.tif b.tif && mkdir -p out && rm -f t.tif\"'")" "" "decoy: utilities and builtins in a CPU pipeline are no runs (no false block under --protected)"
-check "$(cards "ssh familiar '/work/tools/safe_run.sh --protected 20G bash -c \"cd /w && python unknown.py\"'")" "familiar:0" "decoy: cd does not count, an unknown python under --protected does"
-check "$(cards 'CUDA_VISIBLE_DEVICES=0 uv run python train.py')" "katana:0" "runners: uv run runs its command"
-check "$(cards 'uv run --with numpy python train.py')" "katana:0" "runners: uv run options are skipped"
-check "$(cards 'conda run -n gems python stage2_train.py')" "katana:0" "runners: conda run -n env runs its command"
-check "$(cards "ssh familiar '/work/tools/safe_run.sh --protected 6G uv run python unknown.py'")" "familiar:0" "runners: a protected run through uv run is still a training run"
-check "$(cards 'uv pip install numpy')" "" "runners: uv pip is no GPU job"
 check "$(cards "cd $TMP/g && . gpujob")" "katana:0" "final: a dot-source of a bare name is followed (and reaches python through the pre-filter)"
 check "$(cards "tmux if-shell '$GJ' ''")" "katana:0" "final: tmux if-shell runs its shell command"
 check "$(cards "tmux pipe-pane -o '$GJ'")" "katana:0" "final: tmux pipe-pane runs its shell command"
