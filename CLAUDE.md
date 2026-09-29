@@ -89,6 +89,12 @@ bash tests/run.sh          # runs every suite, exits non-zero on any failure
     - printf-written scripts, a symlinked launcher, and a 4-deep chain;
     - indices the host does not have, and reads (`git status`) are not launches;
     - the replay's copy of the pre-filter honours bash quoting;
+  - **the Oracle's delta review (#112):**
+    - `--protected` over a CPU program or a CPU-marked command is no training run;
+    - an XPU script on a CUDA-only host fails open;
+    - an explicit `--device` beats a CPU name;
+    - `command` runs its argument (`-v` is a lookup);
+    - an XPU index beats the CUDA CPU marker;
   - **the board's guard section:**
     - unguarded = a lane session started before the hook's reflog arrival; an orchestrator is no lane, and an unknown arrival counts every lane unguarded;
     - the incremental replay cache: a new line is read once, a line still being written waits, the offset stops at the last complete line, and a replaced transcript rebuilds;
