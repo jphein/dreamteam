@@ -248,6 +248,41 @@ for c in 'CUDA_VISIBLE_DEVICES=0 python ens_eval.py' "ssh gpu0 'CUDA_VISIBLE_DEV
          'ssh gpu1 bash /work/unknown.sh --epochs 3' 'grep -n -- "--device cuda" tools/run_exp.sh'; do
   check "$(cards "$c")" "" "kinds/classes not a launch: $c"
 done
+# the Oracle's review of 09-29 (a1d17af, SHIP-AS-IS): a positive control for each rule no test could turn red, and
+# its findings: extensionless scripts, tmux/screen/su/xargs/eval, printf-written scripts, symlinked launchers, a
+# 4-deep chain, and indices the host does not have
+GJ='CUDA_VISIBLE_DEVICES=0 python train.py'
+check "$(cards "bash -c '$GJ'")" "katana:0" "oracle: bash -c STRING is scanned"
+check "$(cards "echo \$($GJ)")" "katana:0" "oracle: \$( ) is scanned"
+check "$(cards "diff <($GJ) x")" "katana:0" "oracle: <( ) is scanned"
+check "$(cards "bash -s <<'EOF'${NL}${GJ}${NL}EOF")" "katana:0" "oracle: a heredoc fed to a local shell is scanned"
+check "$(cards "bash <<< '$GJ'")" "katana:0" "oracle: a here-string fed to a shell is scanned"
+check "$(cards "cd $TMP && tee run2.sh >/dev/null <<'EOF'${NL}${GJ}${NL}EOF${NL}bash run2.sh")" "katana:0" "oracle: a tee-written script run by the same command is followed"
+check "$(cards "env -S '$GJ'")" "katana:0" "oracle: env -S splits its string"
+check "$(cards "flock /work/x.lock -c '$GJ'")" "katana:0" "oracle: flock -c is scanned"
+deep3k=$(python3 -c 'print("echo " + "$(echo " * 3000 + "x" + ")" * 3000)')
+check "$(DREAMTEAM_AGENT_ID=x python3 "$LIB" detect "$deep3k" | jq -r '"\(.launch) \(.why)"')" "false parse error, fail open (RecursionError)" "oracle: 3000 nested \$( ) hit the fail-open net (not a crash)"
+mkdir -p "$TMP/g"; printf '%s\n' "$GJ" > "$TMP/g/gpujob"; printf 'guest_run stand-in\n' > "$TMP/g/guest_run.sh"; ln -sf "$TMP/g/guest_run.sh" "$TMP/g/capped"
+for c in "cd $TMP/g && ./gpujob" "cd $TMP/g && bash gpujob" "cd $TMP/g && . ./gpujob" "cd $TMP/g && source gpujob"; do
+  check "$(cards "$c")" "katana:0" "oracle: an extensionless local script is followed: $c"
+done
+check "$(cards "tmux new-session -d -s job '$GJ'")" "katana:0" "oracle: tmux new-session runs its command"
+check "$(cards "tmux send-keys -t job '$GJ' Enter")" "katana:0" "oracle: tmux send-keys types a command"
+check "$(cards "screen -dmS job bash -c '$GJ'")" "katana:0" "oracle: screen -dmS runs its command"
+check "$(cards "su jp -c '$GJ'")" "katana:0" "oracle: su -c runs its command"
+check "$(cards "echo x | xargs env $GJ")" "katana:0" "oracle: xargs runs its command"
+check "$(cards "c='$GJ'; eval \"\$c\"")" "katana:0" "oracle: eval of a variable this command set"
+check "$(cards "c='$GJ'; bash -c \"\$c\"")" "katana:0" "oracle: bash -c of a variable this command set"
+check "$(cards "cd $TMP && printf '$GJ\\n' > run3.sh && bash run3.sh")" "katana:0" "oracle: a printf-written script run by the same command is followed"
+check "$(cards "cd $TMP/g && ./capped --mem 4G -- q.sh")" "katana:0" "oracle: a launcher symlinked under another name is still a launcher"
+mkdir -p "$TMP/d4"; printf 'bash b.sh\n' > "$TMP/d4/a.sh"; printf 'bash c.sh\n' > "$TMP/d4/b.sh"; printf 'bash d.sh\n' > "$TMP/d4/c.sh"; printf '%s\n' "$GJ" > "$TMP/d4/d.sh"
+check "$(cards "cd $TMP/d4 && bash a.sh")" "katana:0" "oracle: a 4-deep local chain is followed (MAX_DEPTH 4)"
+for c in 'CUDA_VISIBLE_DEVICES=1 git status' 'CUDA_VISIBLE_DEVICES=1 tmux ls' 'CUDA_VISIBLE_DEVICES=1 python train.py' \
+         "docker run -it --gpus '\"device=1\"' img" 'tmux ls' 'tmux capture-pane -p -t job'; do
+  check "$(cards "$c")" "" "oracle: not a launch (a read, or a card katana does not have): $c"
+done
+check "$(cards 'ssh gpu1 "CUDA_VISIBLE_DEVICES=1 python train.py"')" "gpu1:1" "oracle: the clamp keeps a card the host has"
+check "$(cards "ssh gpu1 'CUDA_VISIBLE_DEVICES=1 git status'")" "" "oracle: git is a read even where the card exists (READS, not the clamp)"
 # a local chain script followed two levels: chain.sh -> gpu_run.sh -> ssh gpu1 (vesper's chain-nh.sh, 09-29)
 mkdir -p "$TMP/chain"
 printf '#!/usr/bin/env bash\nset -u\n./gpu_run.sh 1 nh-C\n' > "$TMP/chain/chain.sh"
@@ -281,6 +316,12 @@ out=$(python3 "$ROOT/scripts/lib/gpu_replay.py" --projects "$TMP/proj" --since '
 case "$out" in *"calls in the window: **2**"*) pass "replay: counts the lane's 2 calls once each, skips the orchestrator" ;; *) fail "replay calls: $(echo "$out" | sed -n 3p)" ;; esac
 case "$out" in *"would-block with no claims seeded): **1**"*) pass "replay: the one launch is a would-block, the read is not" ;; *) fail "replay launches: $(echo "$out" | sed -n 5p)" ;; esac
 case "$out" in *"[gpu1:1] (CUDA_VISIBLE_DEVICES=1"*) pass "replay: names the lane's card" ;; *) fail "replay card: $out" ;; esac
+# the replay's copy of the pre-filter honours bash quoting (*"source "*): a launch only that line lets through is no miss
+mkdir -p "$TMP/g2" "$TMP/proj3/-w"; printf '%s\n' 'CUDA_VISIBLE_DEVICES=0 python train.py' > "$TMP/g2/gpujob"
+jq -nc --arg c "source gpujob" --arg cwd "$TMP/g2" '{type:"assistant", agentName:"fixture-lane", teamName:"t", cwd:$cwd,
+  timestamp:"2026-09-29T12:00:00Z", message:{content:[{type:"tool_use", id:"q1", name:"Bash", input:{command:$c}}]}}' > "$TMP/proj3/-w/s.jsonl"
+out=$(python3 "$ROOT/scripts/lib/gpu_replay.py" --projects "$TMP/proj3" --since '2026-09-29 00:00' --until '2026-09-30 00:00' --plugin "$ROOT" 2>&1)
+case "$out" in *"would-block with no claims seeded): **1**"*"LET THROUGH unchecked (guard misses): **0**"*) pass "replay: its pre-filter copy honours bash quoting (source gpujob is no miss)" ;; *) fail "replay pre-filter copy: $(echo "$out" | sed -n 5,6p)" ;; esac
 case "$(DREAMTEAM_AGENT_ID=x python3 "$LIB" replay --projects "$TMP/proj" --since '2026-09-29 00:00' --until '2026-09-30 00:00' 2>&1)" in
   *"would-block with no claims seeded): **1**"*) pass "replay: reachable as \`dreamteam gpu replay\`" ;; *) fail "replay subcommand" ;; esac
 

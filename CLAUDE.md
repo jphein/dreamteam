@@ -82,6 +82,13 @@ bash tests/run.sh          # runs every suite, exits non-zero on any failure
     - named GPU wrappers count when unreadable (chain45.sh, b60_bench.sh as XPU), and CPU programs never count;
     - `--device` on a launcher or an unread script names the card; `safe_run --protected` defers to its wrapped command;
     - a no-op is found past `env` and the wrappers;
+  - **the Oracle's 09-29 findings:**
+    - a positive control for each rule it could not turn red: the fail-open net at 3000 nested `$( )`, `bash -c`, `$( )`/`<( )`, a heredoc or here-string to a shell, a tee-written script, `env -S`, `flock -c`;
+    - extensionless local scripts (`./gpujob`, `source gpujob`), through the real wrapper's pre-filter too;
+    - tmux new-session/send-keys, screen, `su -c`, xargs, eval, and `bash -c "$c"`;
+    - printf-written scripts, a symlinked launcher, and a 4-deep chain;
+    - indices the host does not have, and reads (`git status`) are not launches;
+    - the replay's copy of the pre-filter honours bash quoting;
   - **the board's guard section:**
     - unguarded = a lane session started before the hook's reflog arrival; an orchestrator is no lane, and an unknown arrival counts every lane unguarded;
     - the incremental replay cache: a new line is read once, a line still being written waits, the offset stops at the last complete line, and a replaced transcript rebuilds;
