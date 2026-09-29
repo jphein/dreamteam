@@ -22,7 +22,7 @@
       {"match": "^b60_bench\\.sh$", "kind": "xpu"}
     ],
     "cpu_programs": ["^ens_eval\\.py$", "^score_sweep\\.py$", "^make_candidate\\.py$", "^build_stacks\\.py$", "^build_dem_features\\.py$", "^tip1e\\.py$"],
-    "_classes": "morpheus-gems 12:1x 09-29: gpu_scripts are GEMS wrappers whose child is stage2_train.py (judged as GPU by the parent; used when the script cannot be read, e.g. run on gpu0 over ssh); b60_bench.sh is drift's torch.xpu bench on the Arc B60 (kind xpu: familiar:xpu0, claimable once compute_ok is set after the ReBAR reboot); cpu_programs are CPU-only and never a launch, whatever the environment says.",
+    "_classes": "morpheus-gems 12:1x 09-29: gpu_scripts are GEMS wrappers whose child is stage2_train.py (judged as GPU by the parent; used when the script cannot be read, e.g. run on gpu0 over ssh); b60_bench.sh is drift's torch.xpu bench on the Arc B60 (kind xpu: familiar:xpu0, claimable once compute_ok is set after the ReBAR reboot); cpu_programs are CPU-only and never a launch, whatever the environment says (an explicit --device cuda|xpu still wins). Naming discipline: a GPU script renamed to a cpu_programs name, with only an environment index, goes unseen by the guard; the board still shows it as IN USE, NO CLAIM (the Oracle, 09-29).",
     "_sources": {"stage2_train": "GEMS's trainer (run_exp.sh runs it)", "dino_features": "drift-gems's DINO feature extraction on gpu0 (09-29)", "train.py": "vesper-mozilla's omni-3b fine-tune (gpu1:1 and familiar, 09-29)"}
   },
   "hosts": {
