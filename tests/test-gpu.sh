@@ -268,13 +268,17 @@ cat > "$DS/docker" <<STUB
 #!/usr/bin/env bash
 case "\$1" in
   ps) printf 'gpu-box\nweb-box\n' ;;
-  inspect) [ "\${@: -1}" = gpu-box ] && echo '[{"Driver":"nvidia","Count":-1}]' || echo null ;;
+  inspect) case "\$*" in *"{{.Name}}"*) echo "/runtime-box" ;; *) [ "\${@: -1}" = gpu-box ] && echo '[{"Driver":"nvidia","Count":-1}]' || echo null ;; esac ;;
   pause|unpause) echo "\$1 \$2" >> "$DREC" ;;
 esac
 STUB
 chmod +x "$DS/docker"
+# a GPU compute pid (4711) whose cgroup is a docker scope: a container started with --runtime=nvidia (no DeviceRequests)
+mkdir -p "$C/proc/4711"; echo "0::/system.slice/docker-$(printf 'ab%.0s' {1..32}).scope" > "$C/proc/4711/cgroup"
+printf '#!/bin/sh\necho 4711\n' > "$DS/nvidia-smi"; chmod +x "$DS/nvidia-smi"
 cw() { CALLWATCH_DEVS="$C/video9" CALLWATCH_PAUSE="$C/pause" CALLWATCH_STATE="$C/state" CALLWATCH_LOG="$C/log" \
-       CALLWATCH_CALM_S=0 CALLWATCH_DOCKER="$DS/docker" bash "$CW" --once; }
+       CALLWATCH_CALM_S=0 CALLWATCH_DOCKER="$DS/docker" CALLWATCH_NVIDIA_SMI="$DS/nvidia-smi" CALLWATCH_CGROUP_ROOT="$C/proc" \
+       bash "$CW" --once; }
 # the stand-in OBS: ONE process whose comm is "obs" holding the device (prctl PR_SET_NAME). A copy of
 # sleep named obs does not work here: sleep is a multi-call coreutils binary, and `obs` exits at once
 # with "unknown program" -- which made this negative control vacuous until it was perturbed (2026-09-29).
@@ -285,6 +289,7 @@ cw; [ ! -e "$C/pause" ] && pass "callwatch: OBS alone holding the camera is NOT 
 sleep 60 3<"$C/video9" & CALLP=$!; sleep 0.3
 cw; head -c 9 "$C/pause" 2>/dev/null | grep -qx callwatch && pass "callwatch: a second, non-OBS reader is a call: the pause file appears (ours)" || fail "no pause on a call"
 grep -qx "pause gpu-box" "$DREC" && ! grep -q "web-box" "$DREC" && pass "callwatch: only the GPU container is docker-paused" || fail "docker pause: $(cat "$DREC")"
+grep -qx "pause runtime-box" "$DREC" && pass "callwatch: a container holding GPU memory WITHOUT DeviceRequests is paused too (pid -> docker scope)" || fail "pid-mapped container not paused: $(cat "$DREC")"
 kill $CALLP; wait $CALLP 2>/dev/null
 cw; [ -e "$C/pause" ] && pass "callwatch: the call ended, but the pause holds for the calm period" || fail "cleared with no calm"
 cw; [ ! -e "$C/pause" ] && pass "callwatch: after the calm period our pause file is removed" || fail "pause not cleared"
