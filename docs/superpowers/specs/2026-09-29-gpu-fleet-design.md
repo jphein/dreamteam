@@ -257,6 +257,26 @@ parsed the same way, on their host. An ssh to an unresolvable host (`ssh "$H"`) 
 - On the morning window this gives 36 would-blocks, all real. That's 34 plus nebula's two `queue_after.sh … bash
   chain45.sh` chains on gpu0 and gpu1, which v1.3 missed. drift's B60 bench moves to `familiar:xpu0`.
 
+**The Oracle's review (a1d17af, 09-29 12:3x): SHIP-AS-IS, 0 must-fix.** Its findings are fixed in #111:
+- **Pre-filter:** an extensionless local script (`./gpujob`, `bash gpujob`, `. ./gpujob`, `source gpujob`) was a
+  launch to detect, but the pre-filter let it through unchecked. The pre-filter now also passes `./`, `sh `,
+  `source `, `. /`, `. ~`, tmux, screen, xargs, `eval ` and `su `. That lifts the replay's pass rate from 58% to
+  72%, about 64 ms added per lane call on average.
+- **Tests:** seven rules had no test that could go red. Each now has a positive control and a red perturbation:
+  - the fail-open net (3000 nested `$( )` → "parse error, fail open (RecursionError)");
+  - `bash -c`, `$( )`/`<( )`, a heredoc or here-string fed to a shell, a tee-written script, `env -S` and
+    `flock -c`.
+- **Forms it now scans** (they were never claimed):
+  - `tmux new-session` and the other runner subcommands, and `tmux send-keys`: tmux is the fleet's own runner;
+  - `screen -dmS`, `su -c`, `xargs`, and `eval`;
+  - `bash -c "$c"` and `eval "$c"` of a variable the command set;
+  - printf- and echo-written scripts;
+  - a launcher symlinked under another name (judged by its realpath);
+  - a 4-deep local chain (MAX_DEPTH 4).
+- **Cards that don't exist:** an index the host does not have is dropped, because the process sees no GPU. So
+  `CUDA_VISIBLE_DEVICES=1` on katana, or `--gpus device=1` there, is not a launch.
+- **Reads:** git, less, rg, stat, ps, systemctl and their kin are reads.
+
 **Not launches:** every argument and every quoted string, heredoc data (`cat > f`, `git commit -F -`, `jq`),
 reads, `bash -n`, `--help`, python without GPU evidence (CPU jobs), and the CPU markers:
 `CUDA_VISIBLE_DEVICES=` (empty), `-1`, and `--device cpu`. drift's 09:09 `dino_features.py --device cpu` smoke is

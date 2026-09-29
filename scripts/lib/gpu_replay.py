@@ -45,9 +45,10 @@ def prefilter_of(plugin: str) -> list:
     block = src.split('case "$INPUT" in', 1)[1].split("esac", 1)[0]
     pats = []
     for line in block.splitlines():
-        line = line.strip()
+        line = re.sub(r"\)\s*;;\s*(#.*)?$", ") ;;", line.strip())    # a trailing comment is not a pattern
         if line.endswith(") ;;") and not line.startswith("*)"):
-            pats += [p for p in line[:-len(") ;;")].split("|") if p]
+            # bash case quoting: *"sh "* and *bash\ * mean the literal text, so drop the quotes and escapes
+            pats += [p.replace('"', "").replace("\\ ", " ") for p in line[:-len(") ;;")].split("|") if p]
     return pats
 
 

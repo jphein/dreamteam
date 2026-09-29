@@ -24,7 +24,7 @@ Pure apart from reading small local scripts: no network, no subprocess. The hook
 import os
 import re
 
-MAX_DEPTH = 3                 # local scripts followed: chain.sh -> gpu1_run.sh -> a third level
+MAX_DEPTH = 4                 # local scripts followed: chain.sh -> gpu1_run.sh -> … (the Oracle's 4-deep chain, 09-29)
 MAX_SCRIPT_BYTES = 64 * 1024
 LAUNCHERS = {"gpu1_launch.sh", "run_exp.sh", "remote_run.sh", "guest_run.sh", "safe_run.sh"}
 SHELLS = {"bash", "sh", "dash", "zsh", "ksh"}
@@ -32,7 +32,18 @@ PY = re.compile(r"^python[0-9.]*$")
 GPU_ENV = ("CUDA_VISIBLE_DEVICES", "ZE_AFFINITY_MASK")
 # programs a GPU variable in front of does not make a launch (reads, no-ops)
 READS = {"echo", "printf", "true", "false", ":", "test", "[", "nvidia-smi", "export", "cat", "ls", "grep", "head",
-         "tail", "env", "printenv", "which", "type", "command", "sleep", "date", "wc", "jq"}
+         "tail", "env", "printenv", "which", "type", "command", "sleep", "date", "wc", "jq",
+         # the Oracle's 09-29 false positives (`CUDA_VISIBLE_DEVICES=1 git status`), and their kin
+         "git", "less", "more", "rg", "stat", "ps", "systemctl", "journalctl", "du", "df", "free", "uptime", "id",
+         "whoami", "hostname", "file", "readlink", "realpath", "basename", "dirname", "diff", "cmp", "sha256sum",
+         "md5sum", "sort", "uniq", "cut", "tr", "sed", "awk", "pgrep", "lsof"}
+# tmux subcommands that run a shell command, and the flags that take a value in each
+TMUX_RUNNERS = {"new-session": "cefFnstxy", "new": "cefFnstxy", "new-window": "ceFnt", "neww": "ceFnt",
+                "split-window": "ceFlpt", "splitw": "ceFlpt", "respawn-pane": "cet", "respawnp": "cet",
+                "respawn-window": "cet", "respawnw": "cet", "run-shell": "dt", "run": "dt",
+                "display-popup": "bcdehsStTwxy", "popup": "bcdehsStTwxy"}
+TMUX_KEYS = {"Enter", "C-m", "C-j", "KPEnter", "Escape", "C-c", "C-d", "C-u", "C-l", "Tab", "BSpace", "Space", "Up",
+             "Down", "Left", "Right"}
 TORCH_MODULES = re.compile(r"^(torch\.distributed\.(run|launch)|accelerate\.commands\.launch|deepspeed(\.launcher\.runner)?)$")
 DEFAULT_GPU_PROGRAMS = [r"^stage2_train.*\.py$", r"^dino_features.*\.py$", r"^train\.py$", r"^(finetune|fine_tune).*\.py$"]
 SSH_OPTS_WITH_ARG = set("-B -b -c -D -E -e -F -I -i -J -L -l -m -O -o -p -Q -R -S -W -w".split())
@@ -376,6 +387,27 @@ def _skip_opts(args: list, flags: set, vals: set, positional: int, env: dict, na
     return args[positional:]
 
 
+def _expand_var(w: str, shvars: dict) -> str:
+    """A word that is exactly $var or ${var} becomes the value this command gave var (c='…'; bash -c "$c")."""
+    m = re.fullmatch(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", w)
+    return shvars[m.group(1)] if m and m.group(1) in shvars else w
+
+
+def _unescape(t: str) -> str:
+    return t.replace("\\n", "\n").replace("\\t", "\t").replace("\\'", "'").replace('\\"', '"').replace("\\\\", "\\")
+
+
+def _local_real(path_word: str, cwd: str):
+    """The real path of a local file a command names (a symlinked or renamed launcher), or None."""
+    if SUB in path_word or "$" in path_word:
+        return None
+    p = os.path.normpath(os.path.join(cwd, os.path.expanduser(path_word)))
+    try:
+        return os.path.realpath(p) if os.path.isfile(p) else None
+    except OSError:
+        return None
+
+
 def _expand_head(w: str, shvars: dict) -> str:
     m = re.fullmatch(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", w) or re.match(r"^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?(/.*)$", w)
     if m and m.group(1) in shvars:
@@ -509,6 +541,50 @@ def _simple(sc: dict, st: _Scan, host, env: dict, shvars: dict, cwd: str, depth:
         return
     prog = os.path.basename(words[0])
     args = words[1:]
+    # printf/echo writing a script, remembered like a heredoc (the Oracle: printf '…' > run.sh && bash run.sh)
+    if prog in ("printf", "echo") and any(op in (">", ">>", ">|") for op, _ in sc["redirs"]):
+        if prog == "echo":
+            text = " ".join(a for a in args if a not in ("-e", "-n", "-E"))
+            text = _unescape(text) if "-e" in args else text
+        else:
+            rest = list(args[1:])
+            text = re.sub(r"%[sb]", lambda m: rest.pop(0) if rest else "", _unescape(args[0] if args else ""))
+        for op, target in sc["redirs"]:
+            if op in (">", ">>", ">|"):
+                b = os.path.basename(target)
+                written[b] = (written.get(b, "") + "\n" if op == ">>" else "") + text
+    # a launcher under another name: a symlink, or a copy made executable (judged by what it points to)
+    if prog not in LAUNCHERS and host == st.local and "/" in words[0]:
+        rp = _local_real(words[0], cwd)
+        if rp and os.path.basename(rp) in LAUNCHERS:
+            prog = os.path.basename(rp)
+
+    if prog == "tmux":
+        _tmux(args, st, host, cenv, shvars, cwd, depth, written)
+        return
+    if prog == "screen":
+        _screen(args, st, host, cenv, shvars, cwd, depth, written)
+        return
+    if prog == "su":
+        for k, a in enumerate(args):
+            code = a.split("=", 1)[1] if a.startswith("--command=") else (args[k + 1] if a in ("-c", "--command") and k + 1 < len(args) else None)
+            if code is not None:
+                _scan(_expand_var(code, shvars), st, host, cenv, cwd, depth, written)
+                break
+        return
+    if prog == "xargs":
+        rest = _skip_opts(args, {"-0", "-o", "-p", "-r", "-t", "-x", "--null", "--interactive", "--no-run-if-empty",
+                                 "--verbose", "--exit", "--open-tty"},
+                          {"-a", "-d", "-E", "-I", "-L", "-n", "-P", "-s", "--arg-file", "--delimiter", "--eof",
+                           "--replace", "--max-lines", "--max-args", "--max-procs", "--max-chars",
+                           "--process-slot-var"}, 0, cenv, prog)
+        if rest:
+            _simple({"words": rest, "redirs": [], "heredocs": [], "bg": sc["bg"]}, st, host, cenv, shvars, cwd,
+                    depth, written)
+        return
+    if prog == "eval":
+        _scan(" ".join(_expand_var(a, shvars) for a in args), st, host, cenv, cwd, depth, written)
+        return
 
     if prog == "export":
         for a in args:
@@ -529,7 +605,7 @@ def _simple(sc: dict, st: _Scan, host, env: dict, shvars: dict, cwd: str, depth:
         _copied(args, st, cwd, written)    # a script copied to a host, then run there, is followed (drift, 09-29)
         return
     if prog in SHELLS:
-        _shell(args, sc, st, host, cenv, cwd, depth, written)
+        _shell(args, sc, st, host, cenv, cwd, depth, written, shvars)
         return
     if prog in ("source", "."):
         if args:
@@ -649,7 +725,7 @@ def _ssh(args: list, sc: dict, st: _Scan, host, env: dict, cwd: str, depth: int,
     st.via_run = st.via_run or sub.via_run
 
 
-def _shell(args: list, sc: dict, st: _Scan, host, env: dict, cwd: str, depth: int, written: dict):
+def _shell(args: list, sc: dict, st: _Scan, host, env: dict, cwd: str, depth: int, written: dict, shvars=None):
     """bash/sh: -c STRING, a script, or commands on stdin (-s or a heredoc). -n only checks syntax."""
     cmode, j = False, 0
     while j < len(args) and (args[j].startswith("-") or args[j].startswith("+")) and args[j] not in ("-", "--"):
@@ -669,19 +745,95 @@ def _shell(args: list, sc: dict, st: _Scan, host, env: dict, cwd: str, depth: in
         j += 1
     if cmode:
         if j < len(args):
-            _scan(args[j], st, host, env, cwd, depth, written)
+            _scan(_expand_var(args[j], shvars or {}), st, host, env, cwd, depth, written)
         return
     if j < len(args) and args[j] != "-":
         base = os.path.basename(args[j])
+        if host == st.local and base not in LAUNCHERS:
+            rp = _local_real(args[j], cwd)
+            base = os.path.basename(rp) if rp and os.path.basename(rp) in LAUNCHERS else base
         if base in LAUNCHERS or base in WRAPPERS:   # `bash X args` is `X args`: its fixed semantics, not its source
-            _simple({"words": args[j:], "redirs": [], "heredocs": sc["heredocs"], "bg": sc["bg"]}, st, host, env, {},
-                    cwd, depth, written)
+            _simple({"words": [base] + args[j + 1:], "redirs": [], "heredocs": sc["heredocs"], "bg": sc["bg"]}, st,
+                    host, env, {}, cwd, depth, written)
         elif not _run_script(args[j], st, host, env, cwd, depth, written) and not _named_gpu_script(base, args[j + 1:], st, host, env) \
                 and _has_gpu_env(env):
             st.find(host, env, _env_why(env))
         return
     for body in sc["heredocs"]:
         _scan(body, st, host, env, cwd, depth, written)
+
+
+def _tmux(args: list, st: _Scan, host, env: dict, shvars: dict, cwd: str, depth: int, written: dict):
+    """tmux runs shell commands: new-session/new-window/split-window/respawn/run-shell/popup take one as their last
+    words, and send-keys types one (the fleet's own runner; the Oracle, 09-29). Other subcommands are reads."""
+    j = 0
+    while j < len(args) and args[j].startswith("-"):                 # tmux's own options: -L -S -f -c -T take a value
+        a = args[j]
+        if a == "-c" and j + 1 < len(args):                            # `tmux -c CMD` runs CMD in the default shell
+            _scan(_expand_var(args[j + 1], shvars), st, host, env, cwd, depth, written)
+            return
+        j += 2 if a in ("-L", "-S", "-f", "-T") else 1
+    if j >= len(args):
+        return
+    sub, rest = args[j], args[j + 1:]
+    tenv = dict(env)
+    if sub in TMUX_RUNNERS:
+        vals, k = TMUX_RUNNERS[sub], 0
+        while k < len(rest) and rest[k].startswith("-") and rest[k] != "-":
+            a = rest[k]
+            if a == "--":
+                k += 1
+                break
+            for i, ch in enumerate(a[1:]):
+                if ch in vals:
+                    val = a[i + 2:] if i + 2 < len(a) else (rest[k + 1] if k + 1 < len(rest) else "")
+                    if ch == "e":
+                        m = NAME_ASSIGN.match(val)
+                        if m:
+                            tenv[m.group(1)] = m.group(2)
+                    k += 0 if i + 2 < len(a) else 1
+                    break
+            k += 1
+        cmd = " ".join(_expand_var(a, shvars) for a in rest[k:])
+        if cmd.strip():
+            _scan(cmd, st, host, tenv, cwd, depth, written)
+    elif sub in ("send-keys", "send"):
+        k, literal = 0, False
+        while k < len(rest) and rest[k].startswith("-") and rest[k] != "-":
+            a = rest[k]
+            literal = literal or "l" in a[1:]
+            k += 2 if (a[-1:] in ("t", "N") and len(a) == 2) else 1
+        typed = []
+        for a in rest[k:]:
+            if not literal and a in TMUX_KEYS:
+                if a in ("Enter", "C-m", "C-j", "KPEnter"):
+                    typed.append("\n")
+                continue
+            typed.append(_expand_var(a, shvars))
+        text = "".join(typed)
+        if text.strip():
+            _scan(text, st, host, tenv, cwd, depth, written)
+
+
+def _screen(args: list, st: _Scan, host, env: dict, shvars: dict, cwd: str, depth: int, written: dict):
+    """`screen -dmS name CMD…` runs CMD; `screen -X …` sends a screen command to a session (not a shell's)."""
+    k = 0
+    while k < len(args) and args[k].startswith("-"):
+        a = args[k]
+        if a in ("-Logfile", "-logfile"):
+            k += 2
+            continue
+        if "X" in a[1:] and not a.startswith("--"):
+            return
+        took = False
+        for i, ch in enumerate(a[1:]):
+            if ch in "cehpStT":
+                took = i + 2 >= len(a)                                 # the value is the next word
+                break
+        k += 2 if took else 1
+    if k < len(args):
+        _simple({"words": args[k:], "redirs": [], "heredocs": [], "bg": True}, st, host, env, shvars, cwd, depth,
+                written)
 
 
 def _device_in(args: list):
@@ -891,7 +1043,11 @@ def detect(cmd: str, fleet: dict, local: str, cwd: str | None = None) -> dict:
         if all_cards:
             cards = usable or typed
         elif idx is not None:
-            cards = [f"{host}:{prefix}{i}" for i in idx]
+            want = [f"{host}:{prefix}{i}" for i in idx]
+            cards = [c for c in want if c in fleet["cards"]]
+            if not cards:                   # an index the host does not have: the process sees no GPU at all
+                whys.append(f"{why} (no {', '.join(want)}: not a launch)")
+                continue
         elif len(usable) == 1:
             cards = usable
         elif len(typed) == 1:
