@@ -58,10 +58,10 @@
       "local": false,
       "launch_form": "remote",
       "sleeps": true,
-      "budget": {"os_reserve_mib": 1024, "overlap_mib": 512, "top_reserve_mib": 512},
+      "budget": {"pair_limit_mib": 9500, "pair_margin_mib": 1536, "_source": "drift-gems 09-29: key the pair rule to the host's measured IDLE MemAvailable, not its total; gpu0 has 11941 MB but services hold ~2.4 GB, so idle MemAvailable is ~9.5 GB (08:55). DEM3 26-band runs peak ~3.2 GB: 2 x 3.2 + 1.5 = 7.9 fits; a 38-band stack is unmeasured (run it solo first)"},
       "disk_floors": [{"path": "/var/tmp", "min_free_gb": 10}],
       "pause_file": null,
-      "notes": "Asleep by default (Slumber Ward). The pair budget (sum of caps + 1 GiB OS + 0.5 GiB overlap <= RAM - 0.5 GiB) is gpu1's rule 7 applied to gpu0's own RAM: <= 11.16 GiB [proposed; drift-gems asked to confirm]."
+      "notes": "Asleep by default (Slumber Ward). One card, so a pair also shares its 4 GB VRAM (a DEM3 run holds ~1.3-1.5 GB each). Pairs are two lanes on the SAME card here (e.g. Nebula neg6 + Drift inference)."
     },
     "gpu1": {
       "ram_mb": 10938,
@@ -72,7 +72,7 @@
       "local": false,
       "launch_form": "remote",
       "sleeps": true,
-      "budget": {"os_reserve_mib": 1024, "overlap_mib": 512, "top_reserve_mib": 512},
+      "budget": {"pair_limit_mib": 10444, "pair_margin_mib": 1536, "_source": "FAMILIAR-RULES rule 7 and STAGE3.md 00:27 (drift-gems, morpheus-gems): 2 x measured full-run peak + 1.5 GiB <= ~10.2 GiB (10.2 GiB = 10444 MiB), raw peaks, no x1.2 margin. Measured full-run VmHWM: 26 bands 3.2 GiB, 32 bands 3.43, 34 bands 3.53, 46 bands 4.22 (2 x 4.22 + 1.5 = 9.94 fits)"},
       "disk_floors": [{"path": "/var/tmp", "min_free_gb": 10}],
       "pause_file": null,
       "notes": "i7-920, 4 cores / 8 threads. FAMILIAR-RULES rule 7: two runs only when 2 x measured peak + 1.5 GiB <= ~10.2 GiB. A 26-band pair at 5.23 GiB each was kernel-OOM-killed at 19:29:47 on 09-28; the pad-once loader's 2.81 GiB fits (7.1). Two concurrent runs want --threads 1 (measured 14.3 vs 10.1 s/epoch; GEMS's wrapper adds it). Asleep by default; runs hold a systemd-inhibit sleep lock."

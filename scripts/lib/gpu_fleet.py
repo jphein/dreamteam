@@ -148,7 +148,11 @@ def is_granter(agent_id: str, cfg: dict) -> bool:
 # ── the ledger ────────────────────────────────────────────────────────────────────────────────────
 
 class Ledger:
-    """claims.json under an exclusive flock; written atomically (tmp + rename)."""
+    """claims.json under an exclusive flock; written atomically (tmp + rename).
+
+    claims: {claim_id: claim}, claim_id = "<card>#<lane>#<from>". Several claims may share a card (GEMS runs
+    two lanes' jobs on gpu0's one card) and a claim may start later (--from: the schedule's handoffs). A v1.0
+    ledger keyed by card is migrated on read."""
 
     def __init__(self, write: bool = False):
         self.dir, self.write = state_dir(), write
@@ -166,6 +170,13 @@ class Ledger:
         self.data.setdefault("claims", {})
         self.data.setdefault("windows", {})
         self.data.setdefault("history", [])
+        cl = self.data["claims"]
+        if cl and all("#" not in k for k in cl):  # v1.0: {card: claim}
+            self.data["claims"] = {}
+            for v in cl.values():
+                if isinstance(v, dict) and v.get("card"):
+                    v.setdefault("from", v.get("since", 0))
+                    self.data["claims"][claim_key(v)] = v
         return self
 
     def __exit__(self, exc_type, *_):
@@ -180,12 +191,30 @@ class Ledger:
             self._lock.close()
         return False
 
-    def live_claims(self, t: float) -> dict:
-        return {c: v for c, v in self.data["claims"].items() if v.get("until", 0) > t}
+    def live(self, t: float) -> dict:
+        return {k: v for k, v in self.data["claims"].items() if _start(v) <= t < v.get("until", 0)}
+
+    def overlapping(self, t0: float, t1: float) -> dict:
+        return {k: v for k, v in self.data["claims"].items() if _start(v) < t1 and v.get("until", 0) > t0}
+
+    def upcoming(self, t: float) -> dict:
+        return {k: v for k, v in self.data["claims"].items() if _start(v) > t}
 
     def log(self, event: str, **kw):
         self.data["history"].append({"ts": now(), "event": event, **kw})
         self.data["history"] = self.data["history"][-500:]
+
+
+def _start(c: dict) -> float:
+    return c.get("from", c.get("since", 0))
+
+
+def claim_key(c: dict) -> str:
+    return f"{c['card']}#{c['lane']}#{int(_start(c))}"
+
+
+def fmt_span(c: dict) -> str:
+    return (f"from {fmt_t(_start(c))} " if _start(c) > now() else "") + f"until {fmt_t(c.get('until'))}"
 
 
 # ── admission ─────────────────────────────────────────────────────────────────────────────────────
@@ -205,75 +234,103 @@ def card_of(fleet: dict, card: str) -> dict:
     return c
 
 
-def host_budget(fleet: dict, host: str, claims: dict, add: dict | None = None) -> list:
-    """The host-level arithmetic, as lines. Raises Refused when the budget does not hold.
+def eff_peak(c: dict, fleet: dict) -> int:
+    """The peak the pair rule sums: the measured full-run peak, x1.5 when it grows with run length (rule 3
+    amendment). Raw, not the x1.2 cap: 'apply drift's rule to its full-run peak (2 x peak + 1.5 <= 10.2,
+    no margin needed)' (STAGE3.md, 00:27)."""
+    return int(math.ceil(c["peak_ram_mb"] * (fleet.get("defaults", {}).get("grows_margin", 1.5) if c.get("grows") else 1)))
 
-    claims: live claims {card: claim}; add: a new claim being checked (its caps counted in)."""
+
+def host_budget(fleet: dict, host: str, claims: list, add: dict | None = None) -> list:
+    """The host-level arithmetic over claims that overlap in time, as lines. Raises Refused when it fails."""
     h = fleet["hosts"][host]
     b = h.get("budget", {})
-    on_host = [(c, v) for c, v in claims.items() if fleet["cards"].get(c, {}).get("host") == host]
-    if add is not None:
-        on_host.append((add["card"], add))
-    caps = [(c, cap_mb(v["peak_ram_mb"], v.get("grows", False), fleet)) for c, v in on_host]
+    on_host = list(claims) + ([add] if add is not None else [])
     lines = []
+    solo = [c for c in on_host if c.get("solo")]
+    if solo and len(on_host) > 1:
+        raise Refused(f"{host}: {solo[0]['lane']} holds a SOLO claim on {solo[0]['card']} (an unmeasured peak runs "
+                      f"alone on its host until measured)")
     form = h.get("launch_form")
-    if any(v.get("solo") for _, v in on_host) and len(on_host) > 1:
-        solo = [c for c, v in on_host if v.get("solo")]
-        raise Refused(f"{host}: {', '.join(solo)} holds a SOLO claim (an unmeasured peak runs alone until measured)")
     if form == "remote":
-        ram_mib = h["ram_mb"]
-        lim = ram_mib - b.get("top_reserve_mib", 512)
-        need = sum(m for _, m in caps) + b.get("os_reserve_mib", 1024) + b.get("overlap_mib", 512)
-        lines.append(f"{host} pair rule: caps {' + '.join(f'{m} ({c})' for c, m in caps) or '0'}"
-                     f" + {b.get('os_reserve_mib', 1024)} OS + {b.get('overlap_mib', 512)} overlap = {need} MB"
-                     f" <= {ram_mib} - {b.get('top_reserve_mib', 512)} = {lim} MB")
+        lim = b.get("pair_limit_mib", h["ram_mb"] - 512)
+        margin = b.get("pair_margin_mib", 1536)
+        peaks = [(c["lane"], eff_peak(c, fleet)) for c in on_host]
+        need = sum(p for _, p in peaks) + margin
+        lines.append(f"{host} pair rule: peaks {' + '.join(f'{p} ({l})' for l, p in peaks) or '0'} + {margin} margin"
+                     f" = {need} MB <= limit {lim} MB")
         if need > lim:
-            raise Refused(lines[-1].replace("<=", ">") + " (FAMILIAR-RULES rule 7)")
+            raise Refused(lines[-1].replace("<=", ">") + " (FAMILIAR-RULES rule 7, keyed to the host's idle MemAvailable)")
     elif form == "guest":
-        tot = sum(m for _, m in caps)
-        gtot = sum(v.get("peak_vram_mib", 0) for _, v in on_host)
-        lines.append(f"{host} guest budget: RAM caps {tot} MB <= {b['guest_ram_mb']} MB; "
+        caps = [cap_mb(c["peak_ram_mb"], c.get("grows", False), fleet) for c in on_host]
+        gtot = sum(c.get("peak_vram_mib", 0) for c in on_host)
+        lines.append(f"{host} guest budget: RAM caps {sum(caps)} MB <= {b['guest_ram_mb']} MB; "
                      f"GPU {gtot} MiB <= {b['guest_gpu_mib']} MiB")
-        if tot > b["guest_ram_mb"]:
-            raise Refused(f"{host} guest budget: RAM caps {tot} MB > {b['guest_ram_mb']} MB (the sum of every guest "
+        if sum(caps) > b["guest_ram_mb"]:
+            raise Refused(f"{host} guest budget: RAM caps {sum(caps)} MB > {b['guest_ram_mb']} MB (the sum of every guest "
                           f"scope, not each job alone: reverie's 6G + 8G + 4G stack, 2026-09-28 23:53)")
         if gtot > b["guest_gpu_mib"]:
             raise Refused(f"{host} guest budget: GPU {gtot} MiB > {b['guest_gpu_mib']} MiB")
     elif form == "familiar":
-        heavy = [c for c, m in caps if m >= 1024]
+        heavy = [c for c in on_host if cap_mb(c["peak_ram_mb"], c.get("grows", False), fleet) >= 1024]
         mx = b.get("max_heavy_jobs", 1)
         lines.append(f"{host}: heavy jobs {len(heavy)} <= {mx} (rule 2: one heavy job at a time)")
         if len(heavy) > mx:
-            raise Refused(f"{host}: {len(heavy)} heavy claims > {mx} ({', '.join(heavy)}): one heavy job at a time (rule 2)")
+            raise Refused(f"{host}: {len(heavy)} heavy claims > {mx} ({', '.join(c['lane'] for c in heavy)}): one heavy "
+                          f"job at a time (rule 2)")
     return lines
 
 
-def check_claim(fleet: dict, claims: dict, new: dict, windows: dict, t: float, vulkan: bool = False) -> list:
-    """Every static check a new claim must pass; returns the arithmetic lines, or raises Refused."""
+def check_claim(fleet: dict, claims: dict, new: dict, windows: dict, vulkan: bool = False,
+                override: str | None = None) -> list:
+    """Every check a new claim must pass against the claims overlapping it in time. Returns the arithmetic lines,
+    or raises Refused. A granter's --override REASON passes a window, exclusivity, solo or host-budget refusal
+    (and says so in the lines); nothing overrides the physics: a compute-blocked card, or VRAM."""
     c = card_of(fleet, new["card"])
     lines = []
+
+    def soft(msg: str):
+        if not override:
+            raise Refused(msg)
+        lines.append(f"OVERRIDDEN ({override}): {msg}")
+
     if not c.get("compute_ok", True) and not vulkan:
         raise Refused(f"{new['card']} ({c['model']}) cannot run compute: {c.get('blocked_by', 'compute_ok is false')}."
                       f" Pass --vulkan for a Vulkan-only job.")
-    held = claims.get(new["card"])
-    if held and held.get("lane") != new["lane"]:
-        raise Refused(f"{new['card']} is held by {held['lane']} until {fmt_t(held['until'])} ({held.get('purpose', '')})")
     if new.get("estimate") and not new.get("solo"):
         raise Refused("an estimated peak needs --solo: an unmeasured job runs alone on its host until measured "
                       "(FAMILIAR-RULES rule 7: '46 bands: unmeasured; run it solo first')", USAGE)
+    if new["until"] <= new["from"]:
+        raise Refused("--until must be after --from", USAGE)
     spec = windows.get(new["card"], {}).get("spec", "always")
-    if not window_open(spec, t):
-        raise Refused(f"{new['card']}'s window is {spec!r} and it is closed now")
+    if not window_open(spec, new["from"]):
+        soft(f"{new['card']}'s window is {spec!r} and it is closed at {fmt_t(new['from'])}")
+    over = [v for v in claims.values() if _start(v) < new["until"] and v.get("until", 0) > new["from"]
+            and not (v["card"] == new["card"] and v["lane"] == new["lane"])]  # the lane's own claim is replaced
+    on_card = [v for v in over if v["card"] == new["card"]]
+    excl = [v for v in on_card if v.get("exclusive")]
+    if excl:
+        soft(f"{new['card']} is held exclusively by {excl[0]['lane']} {fmt_span(excl[0])} ({excl[0].get('purpose', '')})")
+    elif new.get("exclusive") and on_card:
+        soft(f"--exclusive, but {new['card']} is shared by {', '.join(v['lane'] for v in on_card)} in that time")
     margin = fleet.get("defaults", {}).get("vram_margin_mib", 1024)
-    vr = new.get("peak_vram_mib", 0)
     res = resident_vram(c)
-    room = c["vram_mib"] - margin - res
-    lines.append(f"{new['card']} VRAM: {vr} MiB <= {c['vram_mib']} - {margin} margin"
-                 + (f" - {res} resident services" if res else "") + f" = {room} MiB")
-    if vr > room:
-        raise Refused(lines[-1].replace("<=", ">"))
-    others = {k: v for k, v in claims.items() if k != new["card"]}
-    lines += host_budget(fleet, c["host"], others, add=new)
+    physical = c["vram_mib"] - res
+    room = physical - margin
+    used = sum(v.get("peak_vram_mib", 0) for v in on_card) + new.get("peak_vram_mib", 0)
+    shared = f" (sharing with {', '.join(v['lane'] for v in on_card)})" if on_card else ""
+    lines.append(f"{new['card']} VRAM: {' + '.join(str(v.get('peak_vram_mib', 0)) for v in on_card + [new])} = {used} MiB"
+                 f" <= {c['vram_mib']}" + (f" - {res} resident services" if res else "") + f" - {margin} margin = {room} MiB")
+    if used > physical:   # the physics: never overridden
+        raise Refused(f"{new['card']} VRAM: {used} MiB > {c['vram_mib']}" + (f" - {res} resident services" if res else "")
+                      + f" = {physical} MiB: it does not fit on the card at all{shared}")
+    if used > room:       # the 1 GiB margin is policy (guest_run's 'free >= cap + 1 GB'): a granter may override it
+        soft(lines[-1].replace("<=", ">") + shared)
+    on_host = [v for v in over if fleet["cards"].get(v["card"], {}).get("host") == c["host"]]
+    try:
+        lines += host_budget(fleet, c["host"], on_host, add=new)
+    except Refused as e:
+        soft(str(e))
     return lines
 
 
@@ -285,22 +342,30 @@ def cmd_claim(a, fleet, cfg) -> int:
         raise Refused(f"only a granter (the orchestrator, or {', '.join(granters(cfg))}) claims cards; "
                       f"ask your lead: SendMessage \"please claim {a.card} for {lane_of(me)} ...\"", NOPERM)
     t = now()
-    new = {"card": a.card, "lane": a.lane, "purpose": a.purpose or "", "since": t, "until": parse_until(a.until, t),
-           "peak_ram_mb": parse_mb(a.peak_ram), "peak_vram_mib": parse_mb(a.peak_vram), "grows": a.grows,
-           "protected": a.protected, "estimate": a.estimate, "solo": a.solo, "by": lane_of(me) or "orchestrator",
-           "jobs": []}
+    start = parse_until(a.from_, t) if a.from_ else t
+    new = {"card": a.card, "lane": a.lane, "purpose": a.purpose or "", "since": t, "from": start,
+           "until": parse_until(a.until, start), "peak_ram_mb": parse_mb(a.peak_ram), "peak_vram_mib": parse_mb(a.peak_vram),
+           "grows": a.grows, "protected": a.protected, "estimate": a.estimate, "solo": a.solo, "exclusive": a.exclusive,
+           "override": a.override or None, "by": lane_of(me) or "orchestrator", "jobs": []}
     with Ledger(write=not a.dry_run) as L:
-        lines = check_claim(fleet, L.live_claims(t), new, L.data["windows"], t, vulkan=a.vulkan)
+        lines = check_claim(fleet, L.data["claims"], new, L.data["windows"], vulkan=a.vulkan, override=a.override)
         new["cap_mb"] = cap_mb(new["peak_ram_mb"], new["grows"], fleet)
         for ln in lines:
             print("  " + ln)
+        span = fmt_span(new)
         if a.dry_run:
-            print(f"DRY-RUN: would claim {a.card} for {a.lane} until {fmt_t(new['until'])}, cap {new['cap_mb']} MB")
+            print(f"DRY-RUN: would claim {a.card} for {a.lane} {span}, cap {new['cap_mb']} MB")
             return 0
-        L.data["claims"][a.card] = new
-        L.log("claim", card=a.card, lane=a.lane, by=new["by"], until=new["until"])
-    print(f"claimed {a.card} for {a.lane} until {fmt_t(new['until'])}: peak {new['peak_ram_mb']} MB RAM "
-          f"(cap {new['cap_mb']} MB{', grows x1.5' if a.grows else ''}), {new['peak_vram_mib']} MiB VRAM")
+        replaced = [k for k, v in L.data["claims"].items() if v["card"] == a.card and v["lane"] == a.lane
+                    and _start(v) < new["until"] and v.get("until", 0) > new["from"]]
+        for k in replaced:
+            del L.data["claims"][k]
+        L.data["claims"][claim_key(new)] = new
+        L.log("claim", card=a.card, lane=a.lane, by=new["by"], start=new["from"], until=new["until"],
+              override=new["override"], replaced=len(replaced))
+    print(f"claimed {a.card} for {a.lane} {span}: peak {new['peak_ram_mb']} MB RAM (cap {new['cap_mb']} MB"
+          f"{', grows x1.5' if a.grows else ''}), {new['peak_vram_mib']} MiB VRAM"
+          f"{', exclusive' if a.exclusive else ''}{', OVERRIDE: ' + a.override if a.override else ''}")
     return 0
 
 
@@ -320,23 +385,31 @@ def cmd_release(a, fleet, cfg) -> int:
     me = caller()
     t = now()
     with Ledger(write=not a.dry_run) as L:
-        cl = L.data["claims"].get(a.card)
-        if not cl:
-            print(f"{a.card} holds no claim")
-            return 0
-        if not is_granter(me, cfg) and lane_of(me) != cl.get("lane"):
-            raise Refused(f"only a granter or the holder ({cl['lane']}) releases {a.card}", NOPERM)
-        live = [j for j in cl.get("jobs", []) if _job_alive(j)]
+        mine = {k: v for k, v in L.data["claims"].items() if v["card"] == a.card and v.get("until", 0) > t}
+        if not is_granter(me, cfg):
+            if a.lane and a.lane != lane_of(me):
+                raise Refused(f"only a granter releases another lane's claim ({a.lane})", NOPERM)
+            want = lane_of(me)
+        else:
+            lanes = sorted({v["lane"] for v in mine.values()})
+            want = a.lane or (lanes[0] if len(lanes) == 1 else None)
+            if want is None and lanes:
+                raise Refused(f"{a.card} has claims by {', '.join(lanes)}: name one with --lane", USAGE)
+        mine = {k: v for k, v in mine.items() if v["lane"] == want}
+        if not mine:
+            print(f"{a.card}: no live or upcoming claim for {want or 'anyone'}")
+            return 0 if is_granter(me, cfg) else NOPERM
+        live = [j for v in mine.values() for j in v.get("jobs", []) if _job_alive(j)]
         if live and not a.force:
-            raise Refused(f"{a.card}: {len(live)} job(s) of this claim still run ({', '.join(str(j.get('pid')) for j in live)});"
-                          f" stop them or pass --force")
+            raise Refused(f"{a.card}: {len(live)} job(s) of {want}'s claim still run "
+                          f"({', '.join(str(j.get('pid')) for j in live)}); stop them or pass --force")
         if a.dry_run:
-            print(f"DRY-RUN: would release {a.card} ({cl['lane']})")
+            print(f"DRY-RUN: would release {a.card} for {want} ({len(mine)} claim(s))")
             return 0
-        cl["released"] = t
-        L.log("release", card=a.card, lane=cl["lane"], by=lane_of(me) or "orchestrator", forced=bool(a.force and live))
-        del L.data["claims"][a.card]
-    print(f"released {a.card} ({cl['lane']})")
+        for k in mine:
+            del L.data["claims"][k]
+        L.log("release", card=a.card, lane=want, by=lane_of(me) or "orchestrator", forced=bool(a.force and live))
+    print(f"released {a.card} for {want} ({len(mine)} claim(s))")
     return 0
 
 
@@ -365,16 +438,34 @@ def _peaks_for_run(a, claim: dict, fleet: dict) -> tuple:
 
 def _authorize_run(a, fleet, cfg, L, t) -> dict:
     me = caller()
-    claim = L.live_claims(t).get(a.card)
-    if not claim:
+    on_card = [v for v in L.live(t).values() if v["card"] == a.card]
+    if not on_card:
         raise Refused(f"{a.card} holds no live claim: a granter claims it first "
                       f"(dreamteam gpu claim {a.card} --lane <lane> --until … --peak-ram … --peak-vram …)", NOPERM)
-    if me and lane_of(me) != claim["lane"]:
-        raise Refused(f"{a.card} is held by {claim['lane']}, not {lane_of(me)}", NOPERM)
+    if me:
+        mine = [v for v in on_card if v["lane"] == lane_of(me)]
+        if not mine:
+            raise Refused(f"{a.card} is held by {', '.join(v['lane'] for v in on_card)}, not {lane_of(me)}", NOPERM)
+        claim = mine[0]
+    else:
+        pick = [v for v in on_card if v["lane"] == a.lane] if a.lane else on_card
+        if len(pick) != 1:
+            raise Refused(f"{a.card} has claims by {', '.join(v['lane'] for v in on_card)}: name one with --lane", USAGE)
+        claim = pick[0]
     spec = L.data["windows"].get(a.card, {}).get("spec", "always")
     if not window_open(spec, t):
         raise Refused(f"{a.card}'s window is {spec!r} and it is closed now")
     return claim
+
+
+def _recheck_peak(a, fleet, L, t, claim, peak, grows):
+    """A run's peak above its claim's re-runs the host budget beside the other claims live now."""
+    if peak <= claim["peak_ram_mb"] and grows == bool(claim.get("grows")):
+        return []
+    host = fleet["cards"][a.card]["host"]
+    others = [v for v in L.live(t).values() if claim_key(v) != claim_key(claim)
+              and fleet["cards"].get(v["card"], {}).get("host") == host]
+    return host_budget(fleet, host, others, add={**claim, "peak_ram_mb": peak, "grows": grows})
 
 
 def live_vram_check(fleet: dict, card: str, peak_vram_mib: int) -> str:
@@ -405,14 +496,10 @@ def cmd_admit(a, fleet, cfg) -> int:
         peak, grows, cap = _peaks_for_run(a, claim, fleet)
         print(f"  cap: peak {peak} MB x {'1.5 (grows)' if grows else '1.2'} = {cap} MB")
         print("  " + live_vram_check(fleet, a.card, claim.get("peak_vram_mib", 0)))
-        if a.peak_ram and peak > claim["peak_ram_mb"]:
-            others = {k: v for k, v in L.live_claims(t).items() if k != a.card}
-            for ln in host_budget(fleet, fleet["cards"][a.card]["host"], others,
-                                  add={**claim, "peak_ram_mb": peak, "grows": grows}):
-                print("  " + ln)
+        for ln in _recheck_peak(a, fleet, L, t, claim, peak, grows):
+            print("  " + ln)
     print(f"ADMITTED (static): {a.card} for {claim['lane']}, cap {cap} MB. The launcher re-checks live memory on the host.")
     return 0
-
 
 # ── the board ─────────────────────────────────────────────────────────────────────────────────────
 
@@ -494,30 +581,30 @@ def resident_vram(card: dict) -> int:
 def board_data(fleet: dict) -> dict:
     t = now()
     with Ledger() as L:
-        claims, windows = L.live_claims(t), dict(L.data["windows"])
+        live, upcoming, windows = L.live(t), L.upcoming(t), dict(L.data["windows"])
     with ThreadPoolExecutor(max_workers=len(fleet["hosts"])) as ex:
         probes = dict(zip(fleet["hosts"], ex.map(lambda h: probe(fleet, h), fleet["hosts"])))
     cards = []
     for cid, c in fleet["cards"].items():
         p = probes.get(c["host"], {})
-        live = p.get("gpus", {}).get(c["index"]) if c.get("caps", {}).get("cuda") else None
-        cl = claims.get(cid)
+        g = p.get("gpus", {}).get(c["index"]) if c.get("caps", {}).get("cuda") else None
+        holders = sorted((v for v in live.values() if v["card"] == cid), key=lambda v: v["until"])
+        nxt = sorted((v for v in upcoming.values() if v["card"] == cid), key=_start)
         spec = windows.get(cid, {}).get("spec", "always")
+        apps = [x for x in p.get("apps", []) if x.get("index") == c["index"]] if g else []
         cards.append({
             "card": cid, "model": c["model"], "vram_mib": c["vram_mib"], "compute_ok": c.get("compute_ok", True),
-            "holder": cl["lane"] if cl else None, "until": cl["until"] if cl else None,
-            "purpose": cl.get("purpose") if cl else None,
-            "cap_mb": cap_mb(cl["peak_ram_mb"], cl.get("grows", False), fleet) if cl else None,
+            "holders": [{"lane": v["lane"], "until": v["until"], "purpose": v.get("purpose"), "exclusive": bool(v.get("exclusive")),
+                         "cap_mb": cap_mb(v["peak_ram_mb"], v.get("grows", False), fleet),
+                         "peak_vram_mib": v.get("peak_vram_mib", 0), "override": v.get("override")} for v in holders],
+            "next": [{"lane": v["lane"], "from": _start(v), "until": v["until"]} for v in nxt[:3]],
             "window": spec, "window_open": window_open(spec, t),
-            "used_mib": live["used_mib"] if live else None,
-            "apps": [x for x in p.get("apps", []) if x.get("index") == c["index"]] if live else [],
-            "host_reachable": p.get("reachable", False)})
-        cards[-1]["unclaimed_use"] = [] if cl else unclaimed_use(cards[-1]["apps"], c.get("residents"))
-        cards[-1]["resident_mib"] = resident_vram(c)
+            "used_mib": g["used_mib"] if g else None, "apps": apps, "host_reachable": p.get("reachable", False),
+            "unclaimed_use": [] if holders else unclaimed_use(apps, c.get("residents")),
+            "resident_mib": resident_vram(c)})
     hosts = {h: {k: v for k, v in p.items() if k in ("reachable", "avail_mb", "swap_pct", "disk", "pause")}
              for h, p in probes.items()}
     return {"ts": t, "cards": cards, "hosts": hosts}
-
 
 def cmd_board(a, fleet, cfg) -> int:
     d = board_data(fleet)
@@ -528,14 +615,18 @@ def cmd_board(a, fleet, cfg) -> int:
     for c in d["cards"]:
         state = "asleep" if not c["host_reachable"] else (f"{c['used_mib']}/{c['vram_mib']} MiB" if c["used_mib"] is not None
                                                            else ("compute blocked" if not c["compute_ok"] else "-"))
-        who = (f"{c['holder']} until {fmt_t(c['until'])} (cap {c['cap_mb']} MB)" if c["holder"]
-               else ("IN USE, NO CLAIM" if c.get("unclaimed_use") else "free"))
+        if c["holders"]:
+            who = " + ".join(f"{h['lane']}{' (excl)' if h['exclusive'] else ''} until {fmt_t(h['until'])}"
+                             f" cap {h['cap_mb']} MB" for h in c["holders"])
+        else:
+            who = "IN USE, NO CLAIM" if c.get("unclaimed_use") else "free"
+        nxt = "; next " + ", ".join(f"{n['lane']} {fmt_t(n['from'])}" for n in c["next"]) if c["next"] else ""
         win = "" if c["window"] == "always" else f"  window {c['window']} ({'open' if c['window_open'] else 'closed'})"
         apps = sorted(c["apps"], key=lambda x: -int(x["used_mib"]) if str(x["used_mib"]).isdigit() else 0)
         jobs = "; ".join(f"{x['pid']} {x['used_mib']}MiB {os.path.basename(x['name'])}" for x in apps[:3])
         if len(apps) > 3:
             jobs += f"; +{len(apps) - 3} more"
-        print(f"  {c['card']:<14} {c['model'][:26]:<26} {state:<18} {who}{win}" + (f"  [{jobs}]" if jobs else ""))
+        print(f"  {c['card']:<14} {c['model'][:26]:<26} {state:<18} {who}{nxt}{win}" + (f"  [{jobs}]" if jobs else ""))
     for h, s in d["hosts"].items():
         if not s.get("reachable"):
             print(f"  {h:<9} asleep or unreachable (the board never wakes a host)")
@@ -544,7 +635,6 @@ def cmd_board(a, fleet, cfg) -> int:
         print(f"  {h:<9} RAM available {s.get('avail_mb', '?')} MB · swap {s.get('swap_pct', '?')}% · {disk}"
               f"{' · PAUSED' if s.get('pause') else ''}")
     return 0
-
 
 def cmd_inventory(a, fleet, cfg) -> int:
     if a.check:
@@ -645,9 +735,7 @@ def cmd_run(a, fleet, cfg) -> int:
         if not fleet["cards"][a.card].get("compute_ok", True) and not a.vulkan:
             raise Refused(f"{a.card} cannot run compute: {fleet['cards'][a.card].get('blocked_by')}")
         peak, grows, cap = _peaks_for_run(a, claim, fleet)
-        if peak > claim["peak_ram_mb"]:
-            others = {k: v for k, v in L.live_claims(t).items() if k != a.card}
-            host_budget(fleet, fleet["cards"][a.card]["host"], others, add={**claim, "peak_ram_mb": peak, "grows": grows})
+        _recheck_peak(a, fleet, L, t, claim, peak, grows)
     vram_line = live_vram_check(fleet, a.card, claim.get("peak_vram_mib", 0))
     host, launcher, env, args, log, cap = build_launch(a, fleet, claim)
     detach = host != local_host() or a.detach
@@ -678,7 +766,7 @@ def cmd_run(a, fleet, cfg) -> int:
         return r.returncode
     pid = (re.findall(r"\b(\d+)\s*$", r.stdout.strip()) or [None])[-1]
     with Ledger(write=True) as L:
-        cl = L.data["claims"].get(a.card)
+        cl = L.data["claims"].get(claim_key(claim))
         if cl:
             cl.setdefault("jobs", []).append({"host": host, "pid": pid, "log": log, "cap_mb": cap, "started": now(),
                                               "cmd": " ".join(a.cmd)[:300]})
@@ -798,15 +886,19 @@ def decide(cmd: str, fleet: dict, cfg: dict, agent_id: str, t: float) -> dict:
         return res  # not a launch, checked inside run, or an orchestrator/unknown identity (fail open)
     lane = lane_of(agent_id)
     with Ledger() as L:
-        live = L.live_claims(t)
-    held = {c for c, v in live.items() if v.get("lane") == lane}
+        live = L.live(t)
+    held = {v["card"] for v in live.values() if v.get("lane") == lane}
+    holders = {}
+    for v in live.values():
+        holders.setdefault(v["card"], []).append(v)
     missing = [c for c in d["cards"] if c not in held]
     for host in d["host_any"]:
         if not any(fleet["cards"].get(c, {}).get("host") == host for c in held):
             missing.append(f"{host}:<any card>")
     if not missing:
         return res
-    who = "; ".join(f"{c} held by {live[c]['lane']} until {fmt_t(live[c]['until'])}" for c in missing if c in live)
+    who = "; ".join(f"{c} held by {', '.join(v['lane'] + ' until ' + fmt_t(v['until']) for v in holders[c])}"
+                    for c in missing if c in holders)
     msg = (f"GPU launch without a claim: {lane} does not hold {', '.join(missing)} ({d['why']})."
            + (f" {who}." if who else "")
            + f" Ask your lead (SendMessage): 'please claim {missing[0]} for {lane} --until … --peak-ram <measured MB>"
@@ -863,10 +955,15 @@ def main(argv=None) -> int:
     p.add_argument("--estimate", action="store_true", help="the peak is not measured yet (needs --solo)")
     p.add_argument("--solo", action="store_true", help="alone on its host until measured")
     p.add_argument("--vulkan", action="store_true", help="a Vulkan-only job on a compute-blocked card")
+    p.add_argument("--from", dest="from_", metavar="T", help="start later (10:15, 30m, 2026-09-29T10:15): a handoff")
+    p.add_argument("--exclusive", action="store_true", help="no co-tenant on the card (a bench); default: share while VRAM fits")
+    p.add_argument("--override", metavar="REASON", help="(granters) pass a window/exclusive/solo/host-budget refusal, recorded; "
+                                                       "never VRAM or a compute block")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=cmd_claim)
     p = sub.add_parser("release", help="(granters or the holder) free a card")
     p.add_argument("card")
+    p.add_argument("--lane", help="(granters) whose claim, when several lanes hold the card")
     p.add_argument("--force", action="store_true")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=cmd_release)
@@ -880,6 +977,7 @@ def main(argv=None) -> int:
                           ("run", cmd_run, "the single launcher: run CMD on a card you hold")):
         p = sub.add_parser(verb, help=hlp)
         p.add_argument("--card", required=True)
+        p.add_argument("--lane", help="(orchestrators) whose claim to run under, when several lanes hold the card")
         p.add_argument("--peak-ram")
         p.add_argument("--grows", action="store_true")
         p.add_argument("--protected", action="store_true")

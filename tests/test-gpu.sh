@@ -65,15 +65,23 @@ case "$out" in *"cap 3458 MB"*) pass "cap = measured peak x 1.2 (2881 -> 3458 MB
 out=$(G "$ORCH" claim gpu1:0 --lane drift-gems --until 2h --peak-ram 4750 --peak-vram 3000 --grows --dry-run 2>&1)
 case "$out" in *"cap 7125 MB"*) pass "a job that grows with run length caps at x1.5 (Canary's 4750 -> 7125 MB)" ;; *) fail "cap x1.5: $out" ;; esac
 
-# ── 2. gpu1's pair rule, with the 2026-09-28 numbers ─────────────────────────────────────────────
+# ── 2. the pair rule on RAW measured peaks (STAGE3 00:27: "2 x peak + 1.5 <= 10.2, no margin needed") ──
 fresh
 check "$(claim gpu1:0 --lane drift-gems --until 2h --peak-ram 2878 --peak-vram 3000)" 0 "pair rule: the first 2.81 GiB run is admitted"
-check "$(claim gpu1:1 --lane morpheus-gems --until 2h --peak-ram 2878 --peak-vram 3000)" 0 "pair rule: a second 2.81 GiB run fits (2 x 3454 + 1536 <= 10426 MB)"
+check "$(claim gpu1:1 --lane morpheus-gems --until 2h --peak-ram 2878 --peak-vram 3000)" 0 "pair rule: a second 2.81 GiB run fits (2 x 2878 + 1536 <= 10444)"
+fresh
+check "$(claim gpu1:0 --lane drift-gems --until 2h --peak-ram 4322 --peak-vram 3000)" 0 "pair rule: a 46-band 4.22 GiB run is admitted"
+check "$(claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 4322 --peak-vram 3000)" 0 "pair rule: the 46-band PAIR fits on raw peaks (2 x 4322 + 1536 = 10180 <= 10444, as STAGE3 decided)"
 fresh
 check "$(claim gpu1:0 --lane drift-gems --until 2h --peak-ram 5356 --peak-vram 3000)" 0 "pair rule: one 5.23 GiB run alone is admitted"
 check "$(claim gpu1:1 --lane morpheus-gems --until 2h --peak-ram 5356 --peak-vram 3000)" 75 "pair rule: a 5.23 GiB pair is REFUSED (the 19:29:47 OOM kill)"
 out=$(G "$ORCH" claim gpu1:1 --lane morpheus-gems --until 2h --peak-ram 5356 --peak-vram 3000 2>&1)
 case "$out" in *"rule 7"*) pass "the pair refusal cites FAMILIAR-RULES rule 7" ;; *) fail "pair refusal text: $out" ;; esac
+fresh
+check "$(claim gpu0:0 --lane nebula-gems --until 2h --peak-ram 3277 --peak-vram 1400)" 0 "gpu0: a DEM3 run (3.2 GB, 1.4 GiB VRAM)"
+check "$(claim gpu0:0 --lane drift-gems --until 2h --peak-ram 3277 --peak-vram 1400)" 0 "gpu0: a DEM3 pair SHARES its one card (RAM 8090 <= idle MemAvailable 9500; VRAM 2800 <= 3072)"
+check "$(claim gpu0:0 --lane reverie-gems --until 2h --peak-ram 3277 --peak-vram 200)" 75 "gpu0: a third run is refused on RAM, keyed to idle MemAvailable (drift, 09-29)"
+check "$(claim gpu0:0 --lane reverie-gems --until 2h --peak-ram 500 --peak-vram 400)" 75 "gpu0: VRAM is summed across the card's claims (2800 + 400 > 3072)"
 
 # ── 3. the other host rules ──────────────────────────────────────────────────────────────────────
 fresh
@@ -98,17 +106,44 @@ check "$(claim katana:0 --lane reverie-gems --until 1h --peak-ram 3000 --peak-vr
 check "$(DREAMTEAM_GPU_NOW=1790650800 claim katana:0 --lane reverie-gems --until 1h --peak-ram 3000 --peak-vram 3000)" 0 "the same claim at 03:00 is admitted (inside a midnight-crossing window)"
 check "$(rc G "$ORCH" window katana:0 25:00-26:00)" 2 "a malformed window is a usage error"
 
-# ── 5. the ledger and who may write it ───────────────────────────────────────────────────────────
+# ── 5. the ledger, who may write it, sharing, exclusivity, schedules and overrides ───────────────
 fresh
 check "$(rc G luna-refurb@jp claim gpu0:0 --lane luna-refurb --until 1h --peak-ram 1000 --peak-vram 1000)" 77 "a lane cannot claim for itself (77: ask the lead)"
 check "$(rc G nyx-res@jp claim gpu0:0 --lane luna-refurb --until 1h --peak-ram 1000 --peak-vram 1000)" 0 "a Nyx-class agent may grant"
 check "$(rc G morpheus-gems@jp claim gpu1:0 --lane drift-gems --until 1h --peak-ram 1000 --peak-vram 1000)" 0 "morpheus-gems may grant (the GEMS window-granter)"
-check "$(claim gpu0:0 --lane drift-gems --until 1h --peak-ram 1000 --peak-vram 1000)" 75 "one holder per card: a second lane is refused"
-out=$(G "$ORCH" claim gpu0:0 --lane drift-gems --until 1h --peak-ram 1000 --peak-vram 1000 2>&1)
-case "$out" in *"held by luna-refurb"*) pass "the refusal names the holder" ;; *) fail "holder not named: $out" ;; esac
-check "$(DREAMTEAM_GPU_NOW=1790690400 claim gpu0:0 --lane drift-gems --until 1h --peak-ram 1000 --peak-vram 1000)" 0 "an expired claim reads as free (2 h later)"
-check "$(rc G drift-gems@jp release gpu1:0)" 0 "the holder releases its own card"
-check "$(rc G luna-refurb@jp release gpu0:0)" 77 "another lane cannot release a card it does not hold"
+check "$(claim gpu0:0 --lane drift-gems --until 1h --peak-ram 1000 --peak-vram 1000)" 0 "a second lane SHARES a card while VRAM and the host budget fit"
+check "$(DREAMTEAM_GPU_NOW=1790690400 claim gpu0:0 --lane reverie-gems --until 1h --peak-ram 1000 --peak-vram 2500)" 0 "expired claims read as free (2 h later the card's VRAM is free again)"
+fresh
+check "$(claim gpu1:1 --lane morpheus-gems --until 2h --peak-ram 2000 --peak-vram 2000 --exclusive --purpose bench)" 0 "an exclusive claim (a bench)"
+check "$(claim gpu1:1 --lane reverie-gems --until 1h --peak-ram 1000 --peak-vram 1000)" 75 "an exclusive holder keeps co-tenants off the card"
+out=$(G "$ORCH" claim gpu1:1 --lane reverie-gems --until 1h --peak-ram 1000 --peak-vram 1000 2>&1)
+case "$out" in *"exclusively by morpheus-gems"*) pass "the refusal names the exclusive holder" ;; *) fail "holder not named: $out" ;; esac
+check "$(claim gpu1:1 --lane reverie-gems --until 1h --peak-ram 1000 --peak-vram 1000 --override 'lead: overlap for the handoff')" 0 "a granter's --override passes exclusivity, and records why"
+grep -q '"override": "lead: overlap for the handoff"' "$TMP/state/claims.json" && pass "the override reason is kept in the ledger" || fail "override not recorded"
+check "$(claim gpu1:1 --lane nebula-gems --until 1h --peak-ram 500 --peak-vram 7500 --override 'no')" 75 "nothing overrides the physics (2000 + 1000 + 7500 > 10240 on the card)"
+fresh
+check "$(claim familiar:0 --lane vesper-mozilla --until 2h --peak-ram 3000 --peak-vram 6560 --protected)" 75 "the 1 GiB margin: vesper's measured 6560 MiB beside 3406 MiB of residents is refused by policy"
+check "$(claim familiar:0 --lane vesper-mozilla --until 2h --peak-ram 3000 --peak-vram 6560 --protected --override 'lead: running at 97% since 09:40, measured')" 0 "the margin is policy: a granter's override seeds what already runs"
+check "$(claim familiar:0 --lane drift-gems --until 1h --peak-ram 500 --peak-vram 400 --override 'no')" 75 "but the physics holds: 6560 + 400 > 10240 - 3406, whatever the override"
+fresh
+check "$(claim gpu1:0 --lane morpheus-gems --until 13:15 --peak-ram 2000 --peak-vram 2000 --exclusive --purpose bench)" 0 "schedule: morpheus's bench until 13:15"
+check "$(claim gpu1:0 --lane nebula-gems --from 13:15 --until 14:35 --peak-ram 3277 --peak-vram 1400)" 0 "schedule: nebula's lindep from 13:15 (a handoff, no overlap)"
+check "$(claim gpu1:0 --lane drift-gems --from 13:00 --until 14:00 --peak-ram 1000 --peak-vram 1000)" 75 "schedule: a claim overlapping the exclusive bench is refused"
+check "$(claim gpu1:0 --lane drift-gems --from 2026-09-29T14:00 --until 2026-09-29T13:00 --peak-ram 1000 --peak-vram 1000)" 2 "schedule: an explicit --until before --from is a usage error"
+check "$(claim gpu0:0 --lane drift-gems --from 22:00 --until 06:00 --peak-ram 1000 --peak-vram 1000)" 0 "schedule: --from 22:00 --until 06:00 is an overnight claim (HH:MM = the next occurrence, like windows)"
+jq -nc --arg c 'ssh gpu1 "CUDA_VISIBLE_DEVICES=0 python lindep.py"' '{tool_name:"Bash", tool_input:{command:$c}}' > "$TMP/p.json"
+a1=$(DREAMTEAM_AGENT_ID=nebula-gems@jp python3 "$LIB" guard < "$TMP/p.json" | jq -r .action)
+a2=$(DREAMTEAM_GPU_NOW=1790692200 DREAMTEAM_AGENT_ID=nebula-gems@jp python3 "$LIB" guard < "$TMP/p.json" | jq -r .action)
+check "$a1/$a2" "block/allow" "schedule: nebula is blocked at 12:00 and allowed at 13:30, when its claim is live"
+fresh
+check "$(claim familiar:0 --lane morpheus-gems --until 2h --peak-ram 3000 --peak-vram 3000 --protected)" 0 "familiar: vesper-style protected run"
+check "$(claim familiar:xpu0 --lane drift-gems --until 2h --peak-ram 2000 --peak-vram 8000 --vulkan)" 75 "familiar: a second heavy job is refused (rule 2)"
+check "$(claim familiar:xpu0 --lane drift-gems --until 2h --peak-ram 2000 --peak-vram 8000 --vulkan --override 'lead: B60 bench beside vesper')" 0 "familiar: the lead's override admits the B60 bench, recorded"
+fresh
+check "$(claim gpu0:0 --lane luna-refurb --until 1h --peak-ram 1000 --peak-vram 1000)" 0 "release setup"
+check "$(rc G reverie-gems@jp release gpu0:0)" 77 "a lane with no claim on the card has nothing to release (77)"
+check "$(rc G reverie-gems@jp release gpu0:0 --lane luna-refurb)" 77 "only a granter releases another lane's claim"
+check "$(rc G luna-refurb@jp release gpu0:0)" 0 "the holder releases its own claim"
 
 # ── 6. the guard's decision ──────────────────────────────────────────────────────────────────────
 fresh
@@ -178,7 +213,7 @@ out=$(G drift-gems@jp run --card gpu1:1 --name g1-S3-test --dry-run -- bash tool
 case "$out" in *remote_run.sh*"--gpu 1 --cap 3454M --name g1-S3-test"*) pass "run gpu1: remote_run with the card index and cap" ;; *) fail "remote form: $out" ;; esac
 check "$(rc G luna-refurb@jp run --card gpu1:1 --dry-run -- python x.py)" 77 "run: a lane that does not hold the card is refused (77)"
 check "$(rc G drift-gems@jp run --card gpu1:0 --dry-run -- python x.py)" 77 "run: an unclaimed card is refused (77)"
-check "$(rc G drift-gems@jp run --card gpu1:1 --peak-ram 9000 --dry-run -- python x.py)" 75 "run: a peak above the claim re-runs the host budget (9000 x 1.2 is too big for gpu1)"
+check "$(rc G drift-gems@jp run --card gpu1:1 --peak-ram 9000 --dry-run -- python x.py)" 75 "run: a peak above the claim re-runs the pair rule (9000 + 1536 > 10444)"
 
 probe_fixture gpu1 1 9500 10240 python 9400
 check "$(rc G drift-gems@jp run --card gpu1:1 --dry-run -- python x.py)" 75 "run: live VRAM refuses a card another process fills (9500 of 10240 used)"
@@ -225,6 +260,39 @@ GPU_NVIDIA_SMI="$RS/nvidia-smi" GPU_DISK_FLOOR_GB=0 PATH="$RS:$PATH" bash "$R" -
 for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$REC" ] && break; sleep 0.1; done
 rec=$(cat "$REC" 2>/dev/null)
 case "$rec" in *"--what=sleep"*"sudo -n systemd-run --scope"*"MemoryMax=3454M -p MemorySwapMax=0"*"env CUDA_VISIBLE_DEVICES=1"*"python train.py"*) pass "remote_run: sleep lock + a system scope (no lingering) + the card, in that order" ;; *) fail "remote_run launch: $rec" ;; esac
+
+# ── 11. the call watcher: a stand-in camera (never the real one), OBS vs a second reader ───────────
+CW="$ROOT/scripts/gpu/callwatch.sh"; C="$TMP/cam"; mkdir -p "$C"; : > "$C/video9"
+DS="$TMP/dockstub"; mkdir -p "$DS"; DREC="$TMP/docker.rec"; : > "$DREC"
+cat > "$DS/docker" <<STUB
+#!/usr/bin/env bash
+case "\$1" in
+  ps) printf 'gpu-box\nweb-box\n' ;;
+  inspect) [ "\${@: -1}" = gpu-box ] && echo '[{"Driver":"nvidia","Count":-1}]' || echo null ;;
+  pause|unpause) echo "\$1 \$2" >> "$DREC" ;;
+esac
+STUB
+chmod +x "$DS/docker"
+cw() { CALLWATCH_DEVS="$C/video9" CALLWATCH_PAUSE="$C/pause" CALLWATCH_STATE="$C/state" CALLWATCH_LOG="$C/log" \
+       CALLWATCH_CALM_S=0 CALLWATCH_DOCKER="$DS/docker" bash "$CW" --once; }
+# the stand-in OBS: ONE process whose comm is "obs" holding the device (prctl PR_SET_NAME). A copy of
+# sleep named obs does not work here: sleep is a multi-call coreutils binary, and `obs` exits at once
+# with "unknown program" -- which made this negative control vacuous until it was perturbed (2026-09-29).
+python3 -c 'import ctypes, sys, time; ctypes.CDLL(None).prctl(15, b"obs", 0, 0, 0); f = open(sys.argv[1]); time.sleep(60)' "$C/video9" & OBSP=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ "$(cat /proc/$OBSP/comm 2>/dev/null)" = obs ] && break; sleep 0.1; done
+[ "$(cat /proc/$OBSP/comm 2>/dev/null)" = obs ] && pass "callwatch fixture: the stand-in OBS runs, holding the device, comm obs" || fail "stand-in OBS did not start"
+cw; [ ! -e "$C/pause" ] && pass "callwatch: OBS alone holding the camera is NOT a call (no pause)" || fail "callwatch paused on OBS alone"
+sleep 60 3<"$C/video9" & CALLP=$!; sleep 0.3
+cw; head -c 9 "$C/pause" 2>/dev/null | grep -qx callwatch && pass "callwatch: a second, non-OBS reader is a call: the pause file appears (ours)" || fail "no pause on a call"
+grep -qx "pause gpu-box" "$DREC" && ! grep -q "web-box" "$DREC" && pass "callwatch: only the GPU container is docker-paused" || fail "docker pause: $(cat "$DREC")"
+kill $CALLP; wait $CALLP 2>/dev/null
+cw; [ -e "$C/pause" ] && pass "callwatch: the call ended, but the pause holds for the calm period" || fail "cleared with no calm"
+cw; [ ! -e "$C/pause" ] && pass "callwatch: after the calm period our pause file is removed" || fail "pause not cleared"
+grep -qx "unpause gpu-box" "$DREC" && pass "callwatch: the container it paused is unpaused" || fail "docker unpause: $(cat "$DREC")"
+echo "manual pause by the lead" > "$C/pause"; : > "$DREC"
+sleep 60 3<"$C/video9" & CALLP=$!; sleep 0.3; cw; kill $CALLP; wait $CALLP 2>/dev/null; cw; cw
+[ "$(cat "$C/pause")" = "manual pause by the lead" ] && pass "callwatch: a pause file it did not write is never touched or removed" || fail "foreign pause file changed"
+kill $OBSP; wait $OBSP 2>/dev/null
 
 echo ""
 echo "test-gpu: $PASS passed, $FAIL failed"
