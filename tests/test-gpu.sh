@@ -245,6 +245,12 @@ apps = [{"name": "renderD128 --crashpad-handler-pid=1 --enable-crash-reporter", 
         {"name": "python", "used_mib": "1302"}, {"name": "python", "used_mib": "40"}]
 print(",".join(x["name"] for x in g.unclaimed_use(apps, res)))')
 check "$filters" "python" "board: a Chromium GPU process and a resident service are not 'in use, no claim'; a 1.3 GB python job is, a 40 MiB one is not"
+labels=$(cd "$ROOT/scripts/lib" && python3 -c '
+import gpu_fleet as g
+names = ["/opt/brave.com/brave/brave --type=gpu-process --render-node-override=/dev/dri/renderD128 --crashpad-handler-pid=7",
+         "/usr/bin/gnome-control-center", "python", "[Not Found]", ""]
+print(",".join(g.proc_label(n) for n in names))')
+check "$labels" "brave,gnome-control-center,python,[Not Found],?" "board: a process is labelled by its program, not by the tail of a Chromium command line (renderD128 --crashpad…)"
 
 # ── 9. safe_run.sh: the familiar form's live admission (stubbed meminfo, systemd-run and choom) ───
 S="$TMP/stub"; mkdir -p "$S"
