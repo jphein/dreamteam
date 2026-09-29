@@ -29,7 +29,7 @@ case "$INPUT" in
   *CUDA_VISIBLE_DEVICES*|*ZE_AFFINITY_MASK*|*--device*cuda*|*--device*xpu*) ;;
   *gpu1_launch.sh*|*run_exp.sh*|*remote_run.sh*|*guest_run.sh*|*safe_run.sh*) ;;
   *python*|*.sh*|*torchrun*|*deepspeed*|*accelerate*|*ollama*) ;;
-  *./*|*"sh "*|*"source "*|*". "*|*tmux*|*screen*|*xargs*|*"eval "*|*"su "*) ;;   # scripts it may follow (Oracle 09-29)
+  *./*|*"sh "*|*"source "*|*". /"*|*". ~"*|*tmux*|*screen*|*xargs*|*"eval "*|*"su "*) ;;   # scripts it may follow (Oracle 09-29)
   *docker*|*podman*) ;;
   *) exit 0 ;;
 esac

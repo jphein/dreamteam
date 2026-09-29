@@ -290,26 +290,6 @@ parsed the same way, on their host. An ssh to an unresolvable host (`ssh "$H"`) 
 - **In env-only evidence, a variable naming a device beats another variable's CPU marker:**
   `CUDA_VISIBLE_DEVICES= ZE_AFFINITY_MASK=0` is an XPU job.
 
-**The Oracle's final review (4d789ef), and a decoy found in #112 before it was reported (#113):**
-- **The decoy:** #112 skipped the `--protected` fallback after ANY CPU verdict, so
-  `--protected 20G bash -c "python build_stacks.py; python unknown.py"` hid the unknown job behind the CPU one. The
-  scan now counts the leaf programs a command runs (python, an unread script, a binary). The fallback is skipped
-  only when every one of them was judged CPU.
-- **Also closed:**
-  - a dot-source of a bare name (`. gpujob`) now reaches python, because the pre-filter passes `. `;
-  - tmux `if-shell` and `pipe-pane` are scanned;
-  - `screen -X stuff TEXT` is scanned;
-  - variables set by `export`, `declare`, `typeset`, `local` or `readonly` are tracked like `c=…`.
-
-**#114, a regression in #113 found before any report.** Counting every non-read program as a run made a CPU
-pipeline a training run under `--protected` (`python build_stacks.py && mv a b && mkdir -p out`, and even `cd`).
-- File, archive and data utilities, GDAL/PDAL CLIs and shell builtins are non-GPU, and never count as runs.
-- Python project runners are wrappers: `uv run`, `poetry run`, `conda run -n env`, `micromamba run`, `pdm run`,
-  `hatch run` and `pipx run` run their command. Otherwise `uv` on the non-GPU list would hide
-  `--protected … uv run python train.py`.
-- **By design (the Oracle, f705aba):** a `--device cpu` anywhere on a protected command line is trusted even when an
-  unread script ignores it. Only a deliberate decoy defeats it.
-
 **Not launches:** every argument and every quoted string, heredoc data (`cat > f`, `git commit -F -`, `jq`),
 reads, `bash -n`, `--help`, python without GPU evidence (CPU jobs), and the CPU markers:
 `CUDA_VISIBLE_DEVICES=` (empty), `-1`, and `--device cpu`. drift's 09:09 `dino_features.py --device cpu` smoke is

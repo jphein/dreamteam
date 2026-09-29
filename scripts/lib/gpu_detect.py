@@ -36,36 +36,7 @@ READS = {"echo", "printf", "true", "false", ":", "test", "[", "nvidia-smi", "exp
          # the Oracle's 09-29 false positives (`CUDA_VISIBLE_DEVICES=1 git status`), and their kin
          "git", "less", "more", "rg", "stat", "ps", "systemctl", "journalctl", "du", "df", "free", "uptime", "id",
          "whoami", "hostname", "file", "readlink", "realpath", "basename", "dirname", "diff", "cmp", "sha256sum",
-         "md5sum", "sort", "uniq", "cut", "tr", "sed", "awk", "pgrep", "lsof",
-         # file, archive and data utilities, and shell builtins: never a GPU job, and never a "run" a CPU verdict must
-         # cover, so a CPU pipeline under --protected (`python build_stacks.py && mv a b && mkdir -p out`) stays CPU
-         "cd", "pushd", "popd", "set", "unset", "shift", "exit", "return", "wait", "trap", "umask", "ulimit",
-         "alias", "read", "let", "hash", "shopt", "getopts", "break", "continue", "kill", "[[", "]]", "nproc", "seq",
-         "mv", "cp", "mkdir", "rm", "rmdir", "ln", "touch", "chmod", "chown", "chgrp", "install", "truncate", "split",
-         "tar", "gzip", "gunzip", "zcat", "zstd", "unzstd", "xz", "unxz", "bzip2", "bunzip2", "zip", "unzip", "pigz",
-         "sync", "tee", "find", "curl", "wget", "sqlite3", "yq", "pip", "uv",
-         "gdalinfo", "gdal_translate", "gdalwarp", "gdalbuildvrt", "gdaladdo", "ogr2ogr", "ogrinfo", "rio", "pdal"}
-# python project runners: `uv run CMD` runs CMD (uv's other verbs, `uv pip`/`uv sync`, are no GPU job)
-PY_RUNNERS = {"uv": {"--with", "--with-requirements", "--with-editable", "--python", "-p", "--project", "--directory",
-                     "--env-file", "--extra", "--group", "--package", "--index", "--index-url", "--default-index"},
-              "poetry": set(), "pdm": set(), "hatch": set(), "pipx": {"--spec", "--python"},
-              "conda": {"-n", "--name", "-p", "--prefix", "--cwd"}, "mamba": {"-n", "--name", "-p", "--prefix"},
-              "micromamba": {"-n", "--name", "-p", "--prefix"}}
-
-
-def _runner_rest(words: list):
-    """The command a `uv run` / `conda run -n env` / `poetry run` runs, or None when it is not a run."""
-    vals = PY_RUNNERS.get(os.path.basename(words[0]))
-    if vals is None or words[1:2] != ["run"]:
-        return None
-    rest = words[2:]
-    while rest and rest[0].startswith("-") and rest[0] != "-":
-        if rest[0] == "--":
-            return rest[1:]
-        rest = rest[2:] if (rest[0] in vals and "=" not in rest[0]) else rest[1:]
-    return rest
-
-
+         "md5sum", "sort", "uniq", "cut", "tr", "sed", "awk", "pgrep", "lsof"}
 # tmux subcommands that run a shell command, and the flags that take a value in each
 TMUX_RUNNERS = {"new-session": "cefFnstxy", "new": "cefFnstxy", "new-window": "ceFnt", "neww": "ceFnt",
                 "split-window": "ceFlpt", "splitw": "ceFlpt", "respawn-pane": "cet", "respawnp": "cet",
@@ -341,7 +312,6 @@ class _Scan:
         self.via_run = False
         self.copied = {}         # host -> {basename: text}: local scripts this command scp'd there
         self.cpu_verdicts = 0    # commands judged CPU-only (a CPU program, a CPU marker, --device cpu)
-        self.runs = 0            # leaf programs run (python, an unread script, a binary): what a verdict must cover
 
     def find(self, host, env: dict, why: str, idx=None, prefix="", all_cards=False, kind=None):
         """kind None: the environment names the device (CUDA_VISIBLE_DEVICES or ZE_AFFINITY_MASK). kind "cuda" or
@@ -548,8 +518,6 @@ def _simple(sc: dict, st: _Scan, host, env: dict, shvars: dict, cwd: str, depth:
                 _scan(args[1], st, host, cenv, cwd, depth, written)
                 return
             words = args
-        elif _runner_rest(words) is not None:   # uv run / poetry run / conda run -n env …: a wrapper
-            words = _runner_rest(words)
         elif prog == "command":            # `command X` runs X; `command -v X` only looks it up
             args = words[1:]
             if args and args[0].startswith("-") and any(ch in "vV" for ch in args[0][1:]):
@@ -634,18 +602,8 @@ def _simple(sc: dict, st: _Scan, host, env: dict, shvars: dict, cwd: str, depth:
             m = NAME_ASSIGN.match(a)
             if m:
                 env[m.group(1)] = m.group(2)
-                shvars[m.group(1)] = m.group(2)   # export c='…'; bash -c "$c" (the Oracle, 09-29)
             elif a in shvars:
                 env[a] = shvars[a]
-        return
-    if prog in ("declare", "typeset", "local", "readonly"):
-        exported = any(a.startswith("-") and "x" in a[1:] for a in args)
-        for a in args:
-            m = NAME_ASSIGN.match(a)
-            if m:
-                shvars[m.group(1)] = m.group(2)
-                if exported:
-                    env[m.group(1)] = m.group(2)
         return
     if prog in ("dreamteam", "gpu.sh") and args[:1] in (["gpu"], ["run"]):
         if (prog == "dreamteam" and args[1:2] == ["run"]) or (prog == "gpu.sh" and args[:1] == ["run"]):
@@ -667,16 +625,12 @@ def _simple(sc: dict, st: _Scan, host, env: dict, shvars: dict, cwd: str, depth:
     if prog in LAUNCHERS:
         if prog == "safe_run.sh" and not any(a in ("-h", "--help", "--version") for a in args[:3]):
             rest = [a for a in args if a not in ("--protected", "--")]
-            n0, c0, r0 = len(st.finds), st.cpu_verdicts, st.runs
+            n0, c0 = len(st.finds), st.cpu_verdicts
             if len(rest) > 1:              # the capped command first: it may name the card and its kind
                 _simple({"words": rest[1:], "redirs": [], "heredocs": [], "bg": False}, st, host, cenv, shvars,
                         cwd, depth, written)
-            if len(st.finds) > n0:
-                return                     # it named its card
-            ran = st.runs - r0
-            if ran and st.cpu_verdicts - c0 >= ran:
-                return                     # EVERY program it runs was judged CPU: no training run (the Oracle's FIX);
-                                           # one unjudged program keeps the fallback (no CPU decoy hides a GPU job)
+            if len(st.finds) > n0 or st.cpu_verdicts > c0:
+                return                     # it named its card, or it was judged CPU (the Oracle's FIX-BEFORE-ENFORCE)
         _launcher(prog, args, st, host, cenv)
         return
     if PY.match(prog):
@@ -698,7 +652,6 @@ def _simple(sc: dict, st: _Scan, host, env: dict, shvars: dict, cwd: str, depth:
         return
     if prog in READS:
         return
-    st.runs += 1                           # a leaf program: a binary, or a script that could not be read
     explicit = any(k in cenv and env.get(k) != cenv[k] for k in GPU_ENV)
     if explicit or (is_script and _has_gpu_env(cenv)):
         st.find(host, cenv, _env_why(cenv))
@@ -814,10 +767,9 @@ def _shell(args: list, sc: dict, st: _Scan, host, env: dict, cwd: str, depth: in
         if base in LAUNCHERS or base in WRAPPERS:   # `bash X args` is `X args`: its fixed semantics, not its source
             _simple({"words": [base] + args[j + 1:], "redirs": [], "heredocs": sc["heredocs"], "bg": sc["bg"]}, st,
                     host, env, {}, cwd, depth, written)
-        elif not _run_script(args[j], st, host, env, cwd, depth, written) and not _named_gpu_script(base, args[j + 1:], st, host, env):
-            st.runs += 1                   # an unread script: opaque
-            if _has_gpu_env(env):
-                st.find(host, env, _env_why(env))
+        elif not _run_script(args[j], st, host, env, cwd, depth, written) and not _named_gpu_script(base, args[j + 1:], st, host, env) \
+                and _has_gpu_env(env):
+            st.find(host, env, _env_why(env))
         return
     for body in sc["heredocs"]:
         _scan(body, st, host, env, cwd, depth, written)
@@ -857,19 +809,6 @@ def _tmux(args: list, st: _Scan, host, env: dict, shvars: dict, cwd: str, depth:
         cmd = " ".join(_expand_var(a, shvars) for a in rest[k:])
         if cmd.strip():
             _scan(cmd, st, host, tenv, cwd, depth, written)
-    elif sub in ("if-shell", "if"):           # if-shell [-bF] [-t target] SHELL-COMMAND tmux-command …
-        k = 0
-        while k < len(rest) and rest[k].startswith("-") and rest[k] != "-":
-            k += 2 if rest[k] == "-t" else 1
-        if k < len(rest):
-            _scan(_expand_var(rest[k], shvars), st, host, tenv, cwd, depth, written)
-    elif sub in ("pipe-pane", "pipep"):       # pipe-pane [-IOo] [-t target] [SHELL-COMMAND]
-        k = 0
-        while k < len(rest) and rest[k].startswith("-") and rest[k] != "-":
-            k += 2 if rest[k] == "-t" else 1
-        cmd = " ".join(_expand_var(a, shvars) for a in rest[k:])
-        if cmd.strip():
-            _scan(cmd, st, host, tenv, cwd, depth, written)
     elif sub in ("send-keys", "send"):
         k, literal = 0, False
         while k < len(rest) and rest[k].startswith("-") and rest[k] != "-":
@@ -897,9 +836,6 @@ def _screen(args: list, st: _Scan, host, env: dict, shvars: dict, cwd: str, dept
             k += 2
             continue
         if "X" in a[1:] and not a.startswith("--"):
-            rest = args[k + 1:]                                        # a screen command: only `stuff` types text
-            if rest[:1] == ["stuff"] and len(rest) > 1:
-                _scan(_unescape(_expand_var(rest[1], shvars)), st, host, env, cwd, depth, written)
             return
         took = False
         for i, ch in enumerate(a[1:]):
@@ -951,9 +887,6 @@ def _program_of(words: list) -> str | None:
             words = words[1:]
             while words and words[0].startswith("-") and words[0] != "-":
                 words = words[2:] if words[0] in ("-u", "--unset", "-C", "--chdir") else words[1:]
-            continue
-        if _runner_rest(words) is not None:
-            words = _runner_rest(words)
             continue
         if b == "command":
             if words[1:2] and words[1].startswith("-") and any(ch in "vV" for ch in words[1][1:]):
@@ -1010,7 +943,6 @@ def _launcher(prog: str, args: list, st: _Scan, host, env: dict):
 
 
 def _python(args: list, sc: dict, st: _Scan, host, env: dict):
-    st.runs += 1
     j, script, module, inline = 0, None, None, False
     while j < len(args):
         a = args[j]
