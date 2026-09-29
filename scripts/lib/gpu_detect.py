@@ -38,6 +38,7 @@ DEFAULT_GPU_PROGRAMS = [r"^stage2_train.*\.py$", r"^dino_features.*\.py$", r"^tr
 SSH_OPTS_WITH_ARG = set("-B -b -c -D -E -e -F -I -i -J -L -l -m -O -o -p -Q -R -S -W -w".split())
 NAME_ASSIGN = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
 SUB = "\x00"                  # placeholder for a command substitution inside a word
+ARRAY_HEAD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=")   # arr=( … ), arr+=( … ), declare -a Q=( … )
 
 # wrapper -> (flags, options taking a value, positionals to skip after the options)
 WRAPPERS = {
@@ -119,6 +120,10 @@ def _word(s: str, i: int, subs: list):
     while i < n:
         c = s[i]
         if c in " \t\n;&|()<>":
+            if c == "(" and ARRAY_HEAD.fullmatch("".join(out)):
+                inner, i = _balanced(s, i + 1, "(", ")")    # an array literal is one word: data, not a command
+                out.append("(" + inner + ")")
+                continue
             if c in "<>" and i + 1 < n and s[i + 1] == "(" and not out:
                 inner, i = _balanced(s, i + 2, "(", ")")
                 subs.append(inner)

@@ -220,7 +220,8 @@ for c in 'cat tools/gpu1_launch.sh; sed -n 1,60p tools/guest_run.sh; grep -n obs
          "ssh gpu1 'CUDA_VISIBLE_DEVICES= python train.py'" "ssh gpu1 'python train.py --device cpu'" \
          'ssh gpu1 python3 run.py' 'ssh gpu1 .venv/bin/python train.py --help' \
          'docker run --rm img:latest python x.py --gpus all' 'CUDA_VISIBLE_DEVICES=0 nvidia-smi' \
-         'tools/../../../tools/guest_run.sh --help 2>&1 | head -0' "ssh familiar '/work/tools/safe_run.sh --protected 64M true; echo exit \$?'"; do
+         'tools/../../../tools/guest_run.sh --help 2>&1 | head -0' \
+         'arr=(guest_run.sh run_exp.sh); echo "${arr[@]}"' 'declare -a Q=(run_exp.sh gpu1_launch.sh); printf "%s\n" "${Q[@]}"' 'L+=(tools/gpu1_launch.sh)' "ssh familiar '/work/tools/safe_run.sh --protected 64M true; echo exit \$?'"; do
   check "$(cards "$c")" "" "v1.3 not a launch: ${c%%$NL*}"
 done
 check "$(cards "(FEATURES=f.tif setsid nohup tools/guest_run.sh --mem 6G --gpu-mem 3 -- queue.sh a b > q.log 2>&1 &)")" "katana:0" "v1.3 launch: a detached guest_run queue in a subshell"
