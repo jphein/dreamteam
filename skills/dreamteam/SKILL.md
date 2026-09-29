@@ -932,6 +932,11 @@ measured sizes and each host's admission rules in `gpu/fleet.json`. Spec:
   - VRAM leaves 1 GiB beside the resident services.
 
   An unmeasured peak needs `--estimate --solo`, meaning alone on its host until measured.
+  - **Cards are shared** while their VRAM and the host budget hold. gpu0's one card runs two lanes' DEM3 jobs.
+    `--exclusive` keeps co-tenants off, for a bench.
+  - **Handoffs are claims with `--from`**, for example `--from 10:15 --until 11:35`. A claim is live only in its span.
+  - **Overrides:** a granter's `--override "<why>"` passes a soft refusal (window, exclusivity, solo, host budget, the
+    1 GiB VRAM margin) and records the reason. It never passes the physics, meaning VRAM beyond the card.
 - **Launch:** `dreamteam gpu run --card <card> -- CMD`. It is THE launcher: it checks your claim, the window, and
   live VRAM, then runs the host's form:
   - **familiar:** safe_run's capped scope, with −300 protection for training;
@@ -943,6 +948,9 @@ measured sizes and each host's admission rules in `gpu/fleet.json`. Spec:
   `CUDA_VISIBLE_DEVICES=…`, the GEMS launchers, and python over ssh to gpu0, gpu1 or game, on a card the lane does
   not hold. It runs in **warn** mode until the current holdings are seeded, and logs to
   `~/.claude/state/dreamteam/gpu/guard.log`. Then it moves to **enforce** (exit 2). Orchestrators always pass.
+- **katana during calls:** OBS holds the virtual camera all day, so that is not a call. A live call is a non-OBS reader of
+  `/dev/video9`. The call watcher (`dreamteam-gpu-callwatch` user service) writes `~/.gems-pause` and
+  `docker pause`s GPU containers for the call's length. After 60 s of calm it removes only what it wrote.
 
 ## Local-Model Lane (ollama) — mechanical bulk, summaries, embeddings
 

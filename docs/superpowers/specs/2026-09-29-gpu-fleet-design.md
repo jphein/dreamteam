@@ -1,7 +1,7 @@
 # The GPU fleet: inventory, claims, one launcher, a launch guard (design spec)
 
 - **Date:** 2026-09-29 (drafted 09:2x–09:4x PDT by cirrus-scry, a Morpheus lane)
-- **Status:** built in the same PR as this spec. The guard ships in `warn` mode (§5.3).
+- **Status:** v1 is live (dreamteam #101, f55fbd2). v1.1 (this revision, 10:0x) adds shared and scheduled claims, the raw-peak pair rule keyed to idle MemAvailable, and katana's call watcher. The guard is still in `warn` mode (§5.3).
 - **Asked by:** JP, 08:5x, relayed by team-lead: *"we need a gpu part for dreamteam plugin pls"*.
 - **Domain sources:**
   - `money/scratch/contests/gems/FAMILIAR-RULES.md` (the lead, Lucid, Drift and Morpheus-gems, 2026-09-28);
@@ -21,13 +21,14 @@
 | # | Decision |
 |---|---|
 | D1 | **Inventory is data:** `gpu/fleet.json`, which lists every host and card with measured sizes, capabilities and the host's admission rules. Code reads it; no host is hard-coded in a script again. |
-| D2 | **One claims ledger:** `~/.claude/state/dreamteam/gpu/claims.json`, written under `flock`. There is **one holder per card**. A claim records the lane, the purpose, the end time, and the job's **measured** peaks: host RAM, VRAM, and whether it grows with run length. |
+| D2 | **One claims ledger:** `~/.claude/state/dreamteam/gpu/claims.json`, written under `flock`. A claim records the lane, the purpose, `from`/`until`, and the job's **measured** peaks: host RAM, VRAM, and whether it grows with run length. **v1.1:** claims **share** a card while its VRAM and the host budget hold (GEMS runs two lanes on gpu0's one card). A claim may **start later** (`--from`, for the schedule's handoffs). `--exclusive` keeps co-tenants off (a bench). A granter's `--override REASON` passes a soft refusal, is recorded, and never passes VRAM or a compute block. |
 | D3 | **Only granters write claims and windows.** A granter is an orchestrator session, identified by having no `--agent-id` (the lead, or JP's own shells), or a name matching `gpu.granters` in config (default `nyx*` and `morpheus-gems`). A lane asks its lead by SendMessage. |
 | D4 | **One admission library** (`scripts/lib/gpu_fleet.py`), used by `claim`, `run` and `admit`. The cap is measured peak × 1.2, or × 1.5 when the job grows with run length. Host rules come from `fleet.json` (§3). |
 | D5 | **`dreamteam gpu run` is the single launcher.** It checks the caller holds the card, computes the cap, admits, and runs the host's form: familiar the `safe_run` form, katana and game the `guest_run` form, gpu0 and gpu1 the detached sleep-locked form. The three scripts are promoted into `scripts/gpu/` with their budgets read from `fleet.json`. |
 | D6 | **A PreToolUse Bash guard** (`gpu-guard.sh`) detects a GPU launch and checks the caller holds that card. It runs in `warn` mode first, then `enforce` once the current holdings are seeded (§5.3). It fails open on unknown identity, like every guard in this plugin. |
 | D7 | **`dreamteam gpu board`** shows, per card: the holder, the claim's end, the window, and live VRAM and processes. Per host: available RAM, swap use, root free space and the pause file. It reads over ssh, in parallel, with a 5 s timeout; a sleeping host shows as `asleep` and is **never woken** by the board. |
 | D8 | **Windows:** `gpu window <card> <HH:MM-HH:MM|always|never>` sets when a card may be used, for example katana's GPU while JP is away from the desk. A claim or run outside its card's window is refused. |
+| D9 | **katana's call watcher** (`scripts/gpu/callwatch.sh`, a user service). JP's OBS holds the virtual camera all day, so OBS is not a call. While a **non-OBS** process reads `/dev/video9`, it writes `~/.gems-pause` (which guest-form GPU jobs obey) and `docker pause`s GPU containers. It undoes only its own actions after 60 s of calm (§3b). |
 
 ## 1. The inventory (`gpu/fleet.json`)
 
@@ -63,8 +64,20 @@ as `realm vlans verify`.
 
 ## 2. Claims and windows
 
-A **claim** is `{card, lane, purpose, since, until, peak_ram_mb, peak_vram_mib, grows, protected}`. Rules:
-- There is one holder per card. `claim` on a held card is refused, and names the holder and the end time.
+A **claim** is `{card, lane, purpose, from, until, peak_ram_mb, peak_vram_mib, grows, protected, exclusive, override}`,
+keyed `card#lane#from`. Rules (v1.1, after morpheus-gems's holdings showed two lanes on gpu0's one card and
+handoffs through the day):
+- **Sharing:** claims that overlap in time on one card must fit its VRAM together: Σ peak VRAM ≤ vram − 1 GiB −
+  resident services (familiar:0 carries 3.4 GiB of llama-servers). The host budget (§3) counts every overlapping
+  claim on the host. A lane re-claiming a card replaces its own overlapping claim.
+- **Exclusive:** `--exclusive` refuses any overlapping co-tenant, and an exclusive holder refuses newcomers. The
+  refusal names the holder and the span.
+- **Schedules:** `--from T` starts a claim later, so the gpu1 card 0 handoff (morpheus's bench until 10:15, then
+  nebula's lindep) is two claims. A claim is live only between `from` and `until`: before its start, the guard
+  treats the lane as holding nothing. HH:MM means the next occurrence, so `--from 22:00 --until 06:00` is overnight.
+- **Override:** a granter's `--override REASON` passes a window, exclusivity, solo or host-budget refusal, and the
+  reason is kept in the ledger (for example, the lead's B60 bench beside vesper's protected run). Nothing overrides
+  the physics: VRAM beyond the card's total less its resident services, or a compute-blocked card. The 1 GiB VRAM margin is policy, so it can be overridden (vesper's 6.5 GB beside familiar:0's 3.4 GiB of services runs at 97%).
 - **Peaks must be measured.** `--peak-ram` and `--peak-vram` are required. `--estimate` is accepted only
   together with `--solo`, which makes the claim exclusive on its host until a measurement replaces the
   estimate. That is the "46 bands: unmeasured; run it solo first" rule, in code [rule].
@@ -97,9 +110,13 @@ Every job prints its measured peak, and the claim is updated from it.
 - The zram is RAM, which is why `MemorySwapMax=0` makes the cap real.
 
 **gpu0 and gpu1**, `launch_form: remote`, no swap:
-- The pair rule, generalized: `Σ caps of the jobs on the host + 1.0 GiB (OS) + 0.5 GiB (scoring overlap) ≤ ram − 0.5 GiB`.
-- For gpu1 (10938 MB = 10.68 GiB) that is ≤ 10.18 GiB, the "~10.2 GiB" of rule 7 [rule].
-- For gpu0 (11941 MB = 11.66 GiB) it is ≤ 11.16 GiB [proposed, same derivation; Drift asked to confirm].
+- The pair rule, on **raw measured full-run peaks** (×1.5 when the job grows): `Σ peaks + 1.5 GiB ≤ the host's limit`.
+  The ×1.2 cap is the per-job MemoryMax, not the pair sum. STAGE3 00:27: "2 × peak + 1.5 ≤ 10.2, no margin
+  needed" [rule].
+- The limit is keyed to the host's measured **idle MemAvailable**, not its total (drift-gems, 09-29): gpu1 10.2 GiB
+  (10444 MiB); gpu0 about 9.5 GB. gpu0 has 11941 MB, but services hold about 2.4 GB.
+- STAGE3's measured full-run VmHWM: 26 bands 3.2 GiB, 32 bands 3.43, 34 bands 3.53, 46 bands 4.22. The 46-band pair
+  is 2 × 4.22 + 1.5 = 9.94, so it fits.
 - The evidence: a 26-band pair on gpu1 was kernel-OOM-killed at 19:29:47 on 09-28 at 5.23 GiB each. The
   pad-once loader's 2.81 GiB made pairs fit (2 × 2.81 + 1.5 = 7.1).
 
@@ -114,7 +131,29 @@ Every job prints its measured peak, and the claim is updated from it.
   It thaws after 60 s calm, with hysteresis. It is never left frozen: the launcher's TERM handler thaws it.
 - The GPU watchdog TERMs, then KILLs after 30 s, a job whose processes hold more VRAM than their cap.
 
-**Every card.** `Σ claimed VRAM on the card ≤ vram − 1 GiB`. A card whose `compute_ok` is false is refused.
+**Every card.** `Σ claimed VRAM on the card ≤ vram − 1 GiB − resident services`. At launch, `run` also checks
+the card's **live** free VRAM (another process may hold it) and names what does. A card whose `compute_ok` is false
+is refused.
+
+### 3b. katana's call watcher (the lead's correction, 2026-09-29)
+- **The premise that was wrong:** "no heavy CUDA on katana while OBS's virtual camera is live". OBS runs all day in
+  the tray with the virtual camera on (the Kiyo-Call profile), holding `/dev/video9`, so that rule meant never
+  (memory `obs-virtualcam-not-a-call`).
+- **The rule:** a live call is a **second, non-OBS** process reading `/dev/video9`.
+- **The watcher:** `scripts/gpu/callwatch.sh`, run by `systemd/dreamteam-gpu-callwatch.service`, polls every 5 s with
+  one `find /proc/*/fd -lname` pass (~50 ms). This mirrors `guest_run.sh`'s own call guard, which refuses and freezes
+  guest GPU jobs during a call.
+- **On a call:** it writes `~/.gems-pause` with a `callwatch` marker, unless a pause file already exists that it did not
+  write (set on JP's word: left alone). It also `docker pause`s running containers that hold a GPU
+  (`HostConfig.DeviceRequests`): a container runs outside a user scope, so freezing the launcher does not reach it
+  (morpheus-gems).
+- **After 60 s of calm:** it removes only its own pause file, and unpauses only the containers it paused.
+- **Controls:**
+  - In `tests/test-gpu.sh`, a stand-in device, never the real camera. The "OBS alone" negative uses one process with
+    comm `obs` (via `prctl`). A copy of `sleep` named `obs` dies at once on this coreutils ("unknown program"), which
+    made that negative vacuous until perturbed.
+  - A live control on katana's real `/dev/video9` (09:58): OBS alone, no pause; ffmpeg as a second reader, the pause
+    file appeared naming ffmpeg; after calm, it was removed.
 
 **Every host.** Each `disk_floors` entry holds: familiar's run outputs never on the nvme root [rule 5],
 enforced as root free ≥ 10 GB [proposed]. A refusal exits **75** (EX_TEMPFAIL, retry later), the
@@ -182,8 +221,9 @@ The guard fires on every lane's Bash calls, and the GEMS lanes launch jobs today
 enforcing on day one would stop GEMS mid-run. Hence:
 1. Ship in `warn`. The log is a live positive control: the would-block lines must name real GEMS launches and
    nothing else.
-2. morpheus-gems, the window-granter in FAMILIAR-RULES, supplies the current holdings. They are seeded as
-   claims.
+2. morpheus-gems, the window-granter in FAMILIAR-RULES, supplied the holdings (09:18). The v1.1 model (shared,
+   scheduled) can express them. They are seeded as claims by a granter (the lead or morpheus-gems) from
+   `money/scratch/gpu-fleet/seed-2026-09-29.sh`, which should be dry-run first.
 3. Flip `gpu.guard` to `enforce` in `config.json`, a one-line reversible change, once a day of warn lines shows
    no false positives.
 
@@ -226,9 +266,12 @@ It reads over ssh, in parallel, `ConnectTimeout=5` and a 12 s wall clock. **The 
   (`scripts/gpu/test_guest_run.sh`, run on katana).
 - **Perturbation for the PR:** disabling the pair rule turns the suite red.
 
-## 9. Open (asked by message, not blocking)
-- morpheus-gems: the current holdings (to seed claims), rule changes since 23:5x, and where the measured
-  peaks live.
-- drift-gems: confirm the gpu0 budget derivation, and any launcher trap to turn into a test.
+## 9. Open
+- Answered: morpheus-gems (the holdings; the rules since 23:5x; the peaks ledger in STAGE3.md) and drift-gems (the
+  pair rule keyed to idle MemAvailable; the traps). GEMS-wrapper traps (absolute holdouts, `--threads 1` ordering)
+  stay in GEMS's wrapper. The detachment trap (every remote fd redirected) and the inhibitor's lifetime are covered:
+  the live control on gpu1 showed ssh returning at once, and the inhibitor held, then gone after the run.
+- v2: `host:cpu` claims for CPU jobs (today they pass safe_run's live admission only), and B60 live VRAM (it needs
+  xpu-smi).
 - JP's floor: nothing here spends money, signs or needs his hands. katana's GPU window is `always`, protected by
   the desktop-first freezer and the pause file; JP or the lead can narrow it with one `gpu window` call.

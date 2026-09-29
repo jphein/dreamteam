@@ -68,7 +68,12 @@ fi
 # 3d. (katana) the call guard: a SECOND reader of the virtual camera (not OBS) blocks and freezes GPU jobs
 if [ "$(hostname -s)" = katana ]; then
   export GUEST_CALL_DEV=$d/video9; : > $GUEST_CALL_DEV
-  cp /bin/sleep $d/obs; $d/obs 120 3<$GUEST_CALL_DEV & OBS=$!               # comm "obs": the always-on writer
+  # comm "obs": the always-on writer. ONE process with comm obs holding the device (prctl PR_SET_NAME);
+  # a copy of sleep named obs dies at once here ("coreutils: unknown program 'obs'": sleep is multi-call),
+  # which made "OBS alone does not block" pass vacuously (found by cirrus-scry's perturbation, 2026-09-29)
+  python3 -c 'import ctypes, sys, time; ctypes.CDLL(None).prctl(15, b"obs", 0, 0, 0); f = open(sys.argv[1]); time.sleep(120)' "$GUEST_CALL_DEV" & OBS=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do [ "$(cat /proc/$OBS/comm 2>/dev/null)" = obs ] && break; sleep 0.1; done
+  ok "$([ "$(cat /proc/$OBS/comm 2>/dev/null)" = obs ] && echo 1 || echo 0)" "call guard fixture: the stand-in OBS is running (comm obs)"
   sleep 0.5
   "$R" --gpu-mem 0.05 --mem 256M -- true 2>/dev/null
   ok "$([ $? -eq 0 ] && echo 1 || echo 0)" "call guard: OBS alone holding the camera does not block a GPU job"
