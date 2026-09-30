@@ -1013,6 +1013,9 @@ measured sizes and each host's admission rules in `gpu/fleet.json`. Spec:
   - familiar: one heavy job;
   - VRAM leaves 1 GiB beside the resident services; katana's desktop is one, at about 2.7 GiB. A growing job's VRAM
     counts ×1.5, which is its headroom, with no 1 GiB on top.
+  - **katana jobs longer than 15 minutes should checkpoint; a desktop spike kills the job, never the desktop.** Claims
+    use the desktop's typical use (2.7 GiB). Its 3.7 GB peak is guarded live: docker_guard at launch, and the call
+    watcher's 1 GiB kill line (the lead, 09-30).
 
   An unmeasured peak needs `--estimate --solo`, meaning alone on its host until measured.
   - **Cards are shared** while their VRAM and the host budget hold. gpu0's one card runs two lanes' DEM3 jobs.

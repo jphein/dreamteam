@@ -344,6 +344,10 @@ pipeline a training run under `--protected` (`python build_stacks.py && mv a b &
     runs them (6656 > 11264 − 3700 − 1024 = 6540, by 116 MiB). The peak is now `peak_vram_mib`, guarded live at launch
     (docker_guard's free ≥ need + 1 GiB, `gpu run`'s live check, the watcher's 1 GiB kill line). A claim-time live probe
     was considered and rejected: it misjudges scheduled `--from` claims.
+    **The lead accepted #128 as the policy (09-30 08:31):** the typical 2700 MiB applies to all katana claims, whatever
+    their length. A ≤ 15-min "short verify" live-resident flag was drafted and dropped unmerged, for the same reason:
+    a claim-time reading misjudges scheduled claims. The rule for job owners: **katana jobs longer than 15 minutes
+    should checkpoint; a desktop spike kills the job, never the desktop.**
 
 **The Oracle on #122 (46614b6): SHIP-AS-IS.** Across 19,795 distinct real commands: 0 verdict changes, 76 launches.
 The pre-filter passes 71% → 75% of distinct commands (81% of all lane calls, repeats included). Its should-fix,
