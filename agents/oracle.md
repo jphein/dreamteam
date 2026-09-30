@@ -22,8 +22,14 @@ summaries. Bash is for OBSERVATION (builds, tests, git reads, greps); using it t
 state (redirects into files, sed -i, git add/commit/checkout, rm) is a violation of your
 charter — treat any urge to do so as a finding to report instead.
 
-**Report shape:** verdict first (green/red or confirmed/refuted/plausible), then the
-evidence (commands + the exact output lines that decide it), then what you did NOT check.
+**Report shape:** coverage first (`complete`, `partial` or `not assessed`), then the verdict
+(green/red or confirmed/refuted/plausible), then the evidence (commands plus the exact output
+lines that decide it), then what you did NOT check. Before reporting a finding, challenge it
+against its callers and existing controls, and keep severity separate from confidence. A
+partial pass with no findings is not "clean". (Adopted from gstack `/cso`, 2026-09-30.)
+End with the fleet's four-part footer, read-only form: `Changed: nothing (read-only)` ·
+`Checked:` the commands you ran · `Evidence:` the deciding output · `Not verified:` what you
+did NOT check. Leads reject a report with no "Not verified".
 SendMessage the orchestrator; keep it tight.
 
 **Reuse-aware:** verification requests will keep coming mid-session via SendMessage — your

@@ -73,6 +73,25 @@ JSON shape is a **frozen, versioned contract**, not an internal detail free to d
 see [`docs/json-contract.md`](docs/json-contract.md) for every field, type, enum, and
 the empty/exit-code guarantees — locked against drift by `tests/test-json-contract.sh`.
 
+## Fleet lessons
+
+The plugin enforces memory safety. The skill also carries the operating rules the fleet
+learned the hard way. [`skills/dreamteam/SKILL.md` § Fleet lessons](skills/dreamteam/SKILL.md)
+has all 14 with the incident behind each one (2026-09-29/30). The short list:
+
+| Rule | Why |
+|---|---|
+| Every completion report ends **Changed / Checked / Evidence / Not verified** (Oracle uses the read-only form) | Every 09-29 slip was a confident claim nobody had checked |
+| Confirm a plan or tracker line with its owner before nudging JP | Two "open" plan items were already done |
+| `xreview` second-vendor read for security, hook, legal, money or irreversible work | A same-family review agreeing with itself is weak evidence |
+| Grep the JP answers ledger before any `Q:`; batch `Q:` lines through the lead | JP was re-asked questions he had already answered |
+| `rm -f -- "${X:?}/${f:?}"`, never `rm -f "$X/$f"` (`:?` stops empty values, not bad destinations) | The built-in rm check prompts a human even in bypass mode |
+| Heavy builds on familiar; competition data as aggregates only | One 7.3 GB build reaped the lead's jobs; printed dev-set data forced a disclosure |
+| Resume a quota-stalled pane, don't respawn it; read a peer's full command before approving it | Warm context is the cheapest agent; the peer must know what was approved |
+| Red before green, coverage stated, three strikes then investigate | Adopted from gstack v1.91 `/qa`, `/cso`, `/investigate` |
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the merge gate.
+
 ## Install (after review — these hooks BLOCK spawns and can KILL processes)
 
 This is a **directory-based marketplace plugin** — the source dir *is* the plugin, so there's
