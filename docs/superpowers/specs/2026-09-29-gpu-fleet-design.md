@@ -341,6 +341,16 @@ pipeline a training run under `--protected` (`python build_stacks.py && mv a b &
     katana only);
   - katana's desktop resident is now its measured 3.7 GB peak, so an 8 GB container is refused as physics there.
 
+**The Oracle on #122 (46614b6): SHIP-AS-IS.** Across 19,795 distinct real commands: 0 verdict changes, 76 launches.
+The pre-filter passes 71% → 75% of distinct commands (81% of all lane calls, repeats included). Its should-fix,
+present since a99c84c, is fixed in #124:
+- **The problem:** a `--protected` command headed by a program on the read list (`find`, `tar`) with an unjudged
+  program inside (`-exec python {}`, `--to-command="python unknown.py"`) reached the no-op test, which saw `find`/`tar`
+  and skipped the fallback.
+- **The rule now:** if an unjudged program ran inside, the protected run itself is the evidence. The no-op test is
+  consulted only when nothing ran, so `--protected 64M true` stays a no-op.
+- **Also scanned:** `trap -- CMD`, and tar's bundled `-xI CMD`.
+
 **Not launches:** every argument and every quoted string, heredoc data (`cat > f`, `git commit -F -`, `jq`),
 reads, `bash -n`, `--help`, python without GPU evidence (CPU jobs), and the CPU markers:
 `CUDA_VISIBLE_DEVICES=` (empty), `-1`, and `--device cpu`. drift's 09:09 `dino_features.py --device cpu` smoke is

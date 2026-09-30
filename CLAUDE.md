@@ -115,6 +115,9 @@ bash tests/run.sh          # runs every suite, exits non-zero on any failure
     - uv run -m, uv run x.py, pushd;
     - the pre-filter passes runners and `.py`;
     - cuda13 caps in the inventory; katana's 3.7 GB desktop refuses an 8 GB container as physics;
+  - **#124:**
+    - a protected find -exec or tar --to-command of an unjudged program is a training run, and of a read it stays CPU;
+    - `trap -- CMD` and `tar -xI CMD` are scanned;
   - **the board's guard section:**
     - unguarded = a lane session started before the hook's reflog arrival; an orchestrator is no lane, and an unknown arrival counts every lane unguarded;
     - the incremental replay cache: a new line is read once, a line still being written waits, the offset stops at the last complete line, and a replaced transcript rebuilds;
