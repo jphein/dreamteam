@@ -129,6 +129,7 @@ bash tests/run.sh          # runs every suite, exits non-zero on any failure
   - **the wrapper's exit codes;**
   - **`run --dry-run`** for all three forms, plus the live-VRAM refusal;
   - **safe_run and remote_run** with PATH stubs (meminfo refusals; the exact scope, sleep lock and card of a remote launch).
+- `tests/test-lessons.sh` — the 14 Fleet lessons (SKILL.md § Fleet lessons, 2026-09-29/30, incl. three adopted from gstack v1.91). Every lesson check is scoped to the SECTION (a phrase that also lives in the spawn template cannot keep a deleted lesson green), plus numbered lessons 1–14, placement between REACHING JP and Org map, all four report fields + red-before-green in the spawn template, Oracle's coverage-before-verdict order, and README/CONTRIBUTING pointers. Targeted perturbations for the section scope, the spawn template and the Oracle shape (fixture writes checked, so a failed write cannot pass as a detection); placement and README/CONTRIBUTING are plain greps.
 - `tests/test-worktree-create.sh` — the #26 WorktreeCreate hook adapter (`worktree-create-hook.sh`): asserts **stdout is exactly the worktree path** (the command-hook contract that was missing), cwd-independence, branch-off-HEAD, opt-in git-ignored-input copy (`.claude/worktree-copy`), name sanitization, and a clean **non-zero exit on failure** (no phantom "succeeded but no path").
 
 Quick static checks:

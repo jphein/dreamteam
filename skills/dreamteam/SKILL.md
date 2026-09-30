@@ -540,8 +540,16 @@ CI AND MERGE — you push, the lead gates. Four rules, all measured 2026-09-11:
   and a rebase whose PR is not next in the queue is thrown away. Wait for the
   lead's `go #<pr> <sha>`, rebase then, push, reply "pushed".
 - When done: SendMessage (silently — completion is not a speak event) orchestrator
-  with the PR URL + ETA, then STOP. "pushed" is the whole report; the lead runs
-  `scripts/pr-gate.sh` once and tells you if anything is red.
+  with the PR URL, then STOP. The lead runs `scripts/pr-gate.sh` once and tells
+  you if anything is red. After that, "pushed <sha>" is the whole message.
+- Your ONE completion report ends with the four parts from § Fleet lessons.
+  The lead rejects a report that has no "Not verified":
+    Changed: <plain words> · Checked: <instruments run on the real thing>
+    Evidence: <sha / PR / log line / count> · Not verified: <honest list>
+- Fixing a bug? Red before green: show the regression failing before the fix.
+  After three failed fixes, stop and report; don't make a fourth guess.
+- A JP-only question: first check the answers ledger, then send a `Q: … [options]`
+  line to the lead (§ Fleet lessons 4–5).
 - If you hit ANY git error referencing a branch you didn't expect, STOP and
   SendMessage Sandman — do not try to recover. The orchestrator has the
   cross-agent view and will salvage."""
@@ -641,6 +649,8 @@ finally breaks the check, long after the merge that caused it.
 #### What a lane owes the board
 
 `pushed <sha>` — nothing else. The lead gates once and says if anything is red.
+This covers merge-wave traffic only. The lane's single completion report still
+ends with Changed / Checked / Evidence / Not verified (§ Fleet lessons 1).
 
 ## 🔴 REACHING JP: ALL THREE CHANNELS, EVERY AGENT (JP, 2026-09-06)
 
@@ -713,6 +723,78 @@ the real ones get ignored.** ⭐ **The test is JP's own wording: does this REALL
 - Lanes validate, test and **merge their own PRs**: CI green, the project gate, a red perturbation, a secret scan, and an Oracle verdict for license, signing, secrets or CI code.
 - Don't use "[for JP]", "HOLD for JP" or "JP's call" labels, and don't demand JP's yes in your own pane. JP's words relayed by the lead, quoted verbatim with a time, count as his.
 - Only the floor reaches him: money, legal signatures and filings, messages sent as JP to outside people, and his logins or hands. Prepare each of those to a single click.
+
+## ✅ Fleet lessons — every lead, every lane (measured 2026-09-29/30)
+
+Each one is a rule plus the incident that produced it. `~/.claude/CLAUDE.md` "Definition of done" and "JP is never the bottleneck" are the source; this is the fleet-operations cut.
+
+### Reports and facts
+
+1. **Definition of done.** A lane's completion report ends with four parts:
+   - **Changed:** what's different, in plain words.
+   - **Checked:** the instruments run against the real thing. "Tests pass" or "it compiles" alone is not a check.
+   - **Evidence:** something rerunnable, such as a sha, PR number, log line or count.
+   - **Not verified:** an honest list. "Nothing" is suspicious.
+
+   The lead **rejects a report with no "Not verified"** and sends it back.
+   *Why:* every 2026-09-29 slip was a confident claim nobody had checked. "The router log holds ~1 min" was wrong (it held 58 min), and "the watcher's alert was a false positive" was wrong too (the alert was real).
+2. **A relayed or planned fact isn't a verified one.** Before a lead nudges JP from a plan line, tracker row or another lane's report, confirm with the owning lane that the item is still open.
+   *Why:* the 09-29 plan still listed "fill the yellow items" and "send the Ad Grants reply", and both were already done.
+3. **Cross-model check for high-stakes work.** For security, hook, legal, money or irreversible work, get a second-vendor read with `~/.claude/scripts/xreview "<read-only question>" [files…]` (Azure Foundry, gpt-6.1-sol). Its first line names the model that answered; confirm it isn't Claude. Record both verdicts on the PR.
+   - **Send the minimum:** no secrets, no competition data, no personal details. Summarise confidential text.
+   - **It's evidence, not a gate.** If Foundry is down, the independent Oracle pass alone satisfies the merge gate. List "no cross-model check (reason)" under Not verified. The gate itself is in CONTRIBUTING.md.
+
+   *Why:* a same-family review agreeing with itself is weak evidence.
+
+### Asking JP
+
+4. **Check the answers ledger before any `Q:`.** Grep `~/.claude/projects/-home-jp/scratch/slack-coms/ANSWERS.jsonl`, or run `python3 ~/Projects/money/scripts/answers.py "<Q>"` (exit 0 = already answered: use it and cite its `ts`). When JP answers you in your own pane, append the answer yourself (`source: "<session> pane"`) and tell the lead.
+   *Why:* on 09-29 JP was re-asked questions he had already answered (NASE, age, DDGP).
+5. **Q: protocol.** A JP-only question goes to the lead as a SendMessage line: `Q: <question> [option / option]`, one per line. The lead batches them to Slack/Ember, at most 4 at a time, and relays the answer back verbatim with the time. Spec: `~/.claude/projects/-home-jp/scratch/slack-coms/PROTOCOL.md`. Urgent hands or safety alerts still use § REACHING JP directly.
+   *Why:* single questions sent one at a time interrupt JP; a batch gets answered in one sitting.
+
+### Guards and the host
+
+6. **Never write `rm` on a possibly-empty variable path.** Claude Code's built-in `dangerousRemoval` check prompts a HUMAN even in bypass mode on shapes like `rm -f "$SP/$f.new"` (loop variables). No hook "allow" lifts it.
+   - Write `rm -f -- "${SP:?}/${f:?}.new"` or a literal path instead. `~/.claude/hooks/rm-var-guard.sh` blocks the shape and prints the rewrite.
+   - `:?` guarantees only that no variable is unset or empty. It does not check the destination: `SP=/` or a `../` in `f` still passes. Validate untrusted values before deleting.
+   - `settings.json` hooks hot-reload into running sessions (measured), so never tell a lane to restart to pick one up. Plugin hooks are different; see § GPU Fleet.
+
+   *Why:* money-e8 sat on three such prompts on 09-29, each waiting minutes for the lead.
+7. **Heavy builds run on familiar.** `~/.claude/hooks/katana-build-guard.sh` blocks local Gradle, cargo build/test, npm/pnpm/yarn installs, mvn and docker builds on katana. Run them with `ssh familiar …` (see § Remote Build Lane).
+   *Why:* on 09-29 one AAB build (7.3 GB, two JVMs) pushed katana into swap, and the harness reaped the lead's background jobs.
+8. **Never print competition data into context.** Report aggregates and numbers only. `~/.claude/hooks/competition-data-guard.sh` blocks Reads and content Greps of registered paths.
+   *Why:* dev-set transcripts printed into an agent context reached a third-party model API, which the contest rules forbid. It forced the Mozilla disclosure.
+
+### Keeping lanes alive
+
+9. **A quota stall is transient: resume, don't respawn.** A teamclaude "all N accounts at quota" error clears at the reset. `quota-resume.timer` on katana resumes the stalled pane automatically every 2 min.
+   *Why:* a fresh spawn throws away the lane's warm context and costs RAM for nothing.
+10. **Approving a peer's permission prompt.** The lead reads the **full** command first and approves only routine or safe work. Then it SendMessages the peer the command and the time it approved.
+    *Why:* the peer can then verify what was approved in its name.
+11. **Delegate to familiar when katana's memory gate blocks a spawn.** Write the prompt to a project scratch file on familiar, then on familiar run:
+    ```bash
+    tmux new-session -d -s <lane> "bash -lc 'cd <dir> && claude -p \"\$(cat <prompt-file>)\" --dangerously-skip-permissions --model opus > <lane>.log 2>&1; echo EXIT \$? >> <lane>.log'"
+    ```
+    - The placeholders must be shell-safe: no spaces or quotes. Check that the prompt file is readable first, because a failed `cat` launches `claude` with an empty prompt.
+    - `bash -lc` runs the login startup files. On familiar those put `claude` and `gh` on PATH.
+    - `claude -p` writes its report only when it exits, so `<lane>.log` ends with the report and `EXIT <code>`. While it runs, its commits, PR and notes file show progress.
+
+    *Why:* the guards and nebula-lessons lanes both shipped this way on 09-29/30. This is the form nebula-lessons was launched with.
+
+### Adopted from gstack v1.91 (2026-09-30)
+
+These come from upstream garrytan/gstack (`/qa`, `/review`, `/test-audit`, `/cso`). They are carried here as practice, not code.
+
+12. **Red before green.** A bug fix follows four steps: reproduce the bug; write a regression test that **fails on the unfixed code**; fix; then re-run the regression test, the original repro and the nearest adjacent path.
+    - Put the red run's output under **Evidence**.
+    - A test earns its place by protecting behaviour a real regression would break. Test count is not a goal, and a test that only greps source is not coverage.
+
+    *Why:* a regression test nobody saw fail proves nothing. That is the same logic as the "one perturbation went red" merge condition.
+13. **Reviews and audits state their coverage.** A verifier's verdict opens with `complete`, `partial` or `not assessed`, then says exactly what was left undone. Before reporting a finding, challenge it against its callers and existing controls, and keep severity separate from confidence.
+    *Why:* "no findings" from a partial pass reads as "clean", and that is the same false-zero trap as an unproven instrument.
+14. **Three strikes, then investigate.** After three failed fixes for the same failure, stop patching and report to the lead with what each attempt showed. The next step is root cause (a `lucid` investigation), not a fourth guess.
+    *Why:* repeated guessing burns the lane's context and often buries the real cause under patches.
 
 ## Org map — department, owner, escalation (optional)
 
