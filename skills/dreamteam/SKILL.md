@@ -961,7 +961,8 @@ measured sizes and each host's admission rules in `gpu/fleet.json`. Spec:
   - **fleet.json `guard` holds the GEMS classes:** `gpu_programs`, `gpu_scripts` (wrappers such as chain45.sh, which
     count by name when unreadable) and `cpu_programs` (which never count). An XPU job, `--device xpu` or
     `ZE_AFFINITY_MASK`, is attributed to the B60. A new GPU program or wrapper goes into that block.
-  - **Hooks load at session start,** so a lane is guarded only once it is respawned. An empty `guard.log` proves
+  - **This plugin's hooks (hooks.json) load at session start,** so a lane is guarded only once it is respawned.
+    (settings.json hooks are different: they are re-read live, per the lead's 09-29 18:3x control.) An empty `guard.log` proves
     nothing. The board's guard section lists the lane sessions still unguarded and today's would-blocks (the last
     10; `dreamteam gpu board --guard` lists all). Review warn mode with `dreamteam gpu replay --since '<date> 00:00'`,
     which replays the lanes' real
