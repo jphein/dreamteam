@@ -743,8 +743,9 @@ def _simple(sc: dict, st: _Scan, host, env: dict, shvars: dict, cwd: str, depth:
             st.runs += 1                   # an unread sourced script is opaque: a CPU decoy cannot hide it (L2)
         return
     if prog == "trap":                     # trap CMD SIGNAL…: CMD runs later, on the signal or EXIT (the Oracle's L1)
-        if args and not args[0].startswith("-"):
-            _scan(_expand_var(args[0], shvars), st, host, cenv, cwd, depth, written)
+        targs = args[1:] if args[:1] == ["--"] else args          # `trap -- CMD SIG` (POSIX end of options)
+        if targs and not targs[0].startswith("-"):
+            _scan(_expand_var(targs[0], shvars), st, host, cenv, cwd, depth, written)
         return
     if prog == "find":                     # find … -exec CMD {} ; / + runs CMD (the Oracle's L1)
         for k, a in enumerate(args):
@@ -757,6 +758,9 @@ def _simple(sc: dict, st: _Scan, host, env: dict, shvars: dict, cwd: str, depth:
         return
     if prog == "tar":                      # tar --to-command=CMD / -I CMD / --use-compress-program CMD runs CMD
         for k, a in enumerate(args):
+            if len(a) > 2 and a.startswith("-") and not a.startswith("--") and a.endswith("I") and k + 1 < len(args):
+                _scan(_expand_var(args[k + 1], shvars), st, host, cenv, cwd, depth, written)   # bundled: tar -xI CMD
+                continue
             for opt in ("--to-command", "--use-compress-program", "--checkpoint-action", "-I"):
                 if a.startswith(opt + "="):
                     v = a.split("=", 1)[1]
@@ -781,6 +785,9 @@ def _simple(sc: dict, st: _Scan, host, env: dict, shvars: dict, cwd: str, depth:
             if ran and st.cpu_verdicts - c0 >= ran:
                 return                     # EVERY program it runs was judged CPU: no training run (the Oracle's FIX);
                                            # one unjudged program keeps the fallback (no CPU decoy hides a GPU job)
+            if ran:                        # an unjudged program ran inside: the protected run itself is the evidence,
+                _launch_find(st, host, cenv, "safe_run.sh --protected (a training run)", args)
+                return                     # even under a head on the read list (find/tar; the Oracle, 09-29 17:2x)
         _launcher(prog, args, st, host, cenv)
         return
     if PY.match(prog):
