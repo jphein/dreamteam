@@ -339,7 +339,7 @@ pipeline a training run under `--protected` (`python build_stacks.py && mv a b &
 - **fleet.json:**
   - `caps.cuda13` (CUDA 13 dropped Pascal; the Mozilla official image is CUDA 13, so official-image verifies run on
     katana only);
-  - katana's desktop resident was set to its measured 3.7 GB peak here. **Reverted to the typical 2700 MiB on 09-30 (#127)**:
+  - katana's desktop resident was set to its measured 3.7 GB peak here. **Reverted to the typical 2700 MiB on 09-30 (#128)**:
     as a static resident the peak made every CUDA-13 official-image verify (~6.5 GB) unclaimable on the only host that
     runs them (6656 > 11264 − 3700 − 1024 = 6540, by 116 MiB). The peak is now `peak_vram_mib`, guarded live at launch
     (docker_guard's free ≥ need + 1 GiB, `gpu run`'s live check, the watcher's 1 GiB kill line). A claim-time live probe
