@@ -322,6 +322,25 @@ pipeline a training run under `--protected` (`python build_stacks.py && mv a b &
   - **any other verb fails closed**: it is an opaque run, so the `--protected` fallback still fires and an explicit
     GPU variable still counts.
 
+**After the flip (enforce since 16:52:33): the Oracle's follow-ups, in #122.**
+- **L4, a latent false block:** uv takes its global options after `run` too, so `--protected … uv run --color never
+  python build_stacks.py` was a training run. Both the run and the global options are now skipped after `run`.
+- **S1:** `hatch env run -- CMD` runs CMD; `hatch test` and `hatch shell` are no longer reads.
+- **L2:** a sourced unread script (`source`/`.`) is a leaf, so a CPU decoy cannot hide it.
+- **L1, programs that run another command:**
+  - `find … -exec`/`-execdir`/`-ok` scans its command;
+  - `trap CMD SIG` scans CMD;
+  - `tar --to-command`/`-I`/`--use-compress-program`/`--checkpoint-action=exec=` scan theirs;
+  - a non-GPU program counts as a read only as a bare name or from a system path, so `/w/bin/cp` is an opaque run.
+- **L3:** `uv run -m M` is `python -m M`; `uv run x.py` is `python x.py`; `pushd DIR` moves the directory a script
+  is found in, like `cd`.
+- **The pre-filter** passes `.py` and the python project runners, so `uv run train.py` reaches python. On the day's
+  replay it now passes 81% of lane calls, about 71 ms added per call on average.
+- **fleet.json:**
+  - `caps.cuda13` (CUDA 13 dropped Pascal; the Mozilla official image is CUDA 13, so official-image verifies run on
+    katana only);
+  - katana's desktop resident is now its measured 3.7 GB peak, so an 8 GB container is refused as physics there.
+
 **Not launches:** every argument and every quoted string, heredoc data (`cat > f`, `git commit -F -`, `jq`),
 reads, `bash -n`, `--help`, python without GPU evidence (CPU jobs), and the CPU markers:
 `CUDA_VISIBLE_DEVICES=` (empty), `-1`, and `--device cpu`. drift's 09:09 `dino_features.py --device cpu` smoke is

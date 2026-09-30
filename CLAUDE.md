@@ -107,6 +107,14 @@ bash tests/run.sh          # runs every suite, exits non-zero on any failure
     - runner global options (`uv --directory DIR run`, `uv -q run`) are skipped, so the command is seen and a CPU program behind them stays CPU;
     - `uvx` runs its command;
     - an unknown runner verb fails closed;
+  - **post-flip follow-ups (#122):**
+    - uv global options after `run` are skipped (no false block);
+    - hatch env run, hatch test;
+    - a sourced unread script is a leaf;
+    - find -exec, trap (its command scanned, not just counted), tar --to-command, and path-named reads;
+    - uv run -m, uv run x.py, pushd;
+    - the pre-filter passes runners and `.py`;
+    - cuda13 caps in the inventory; katana's 3.7 GB desktop refuses an 8 GB container as physics;
   - **the board's guard section:**
     - unguarded = a lane session started before the hook's reflog arrival; an orchestrator is no lane, and an unknown arrival counts every lane unguarded;
     - the incremental replay cache: a new line is read once, a line still being written waits, the offset stops at the last complete line, and a replaced transcript rebuilds;

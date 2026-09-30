@@ -86,10 +86,11 @@ check "$(claim gpu0:0 --lane reverie-gems --until 2h --peak-ram 500 --peak-vram 
 # ── 3. the other host rules ──────────────────────────────────────────────────────────────────────
 fresh
 check "$(claim katana:0 --lane reverie-gems --until 2h --peak-ram 11000 --peak-vram 4000)" 75 "katana guest budget: a cap above 12 GB is refused (the sum rule)"
-check "$(claim katana:0 --lane reverie-gems --until 2h --peak-ram 5000 --peak-vram 5000)" 0 "katana guest budget: a 6 GB cap and 5 GiB VRAM fit beside the desktop's 2700 MiB"
+check "$(claim katana:0 --lane reverie-gems --until 2h --peak-ram 5000 --peak-vram 5000)" 0 "katana guest budget: a 6 GB cap and 5 GiB VRAM fit beside the desktop's 3700 MiB (5000 <= 6540)"
 fresh
-check "$(claim katana:0 --lane luna-refurb --until 1h --peak-ram 5000 --peak-vram 8000)" 75 "katana: an 8 GB docker audit breaks the margin beside the desktop (8000 + 1024 > 11264 - 2700)"
-check "$(claim katana:0 --lane luna-refurb --until 1h --peak-ram 5000 --peak-vram 8000 --override 'lead: the call watcher kills it under 1 GiB free')" 0 "katana: the lead may override the margin (8000 <= 8564 physically)"
+check "$(claim katana:0 --lane luna-refurb --until 1h --peak-ram 5000 --peak-vram 8000)" 75 "katana: an 8 GB docker audit breaks the margin beside the 3.7 GB desktop"
+check "$(claim katana:0 --lane luna-refurb --until 1h --peak-ram 5000 --peak-vram 8000 --override 'lead: the call watcher kills it under 1 GiB free')" 75 "katana: no override passes physics: 8000 > 11264 - 3700 = 7564 (morpheus 09-29: the desktop peaks at 3.7 GB)"
+check "$(claim katana:0 --lane vesper-mozilla --until 1h --peak-ram 5120 --peak-vram 6656 --override 'lead: batch-1 docker verify window')" 0 "katana: vesper's ~6.5 GB batch-1 window fits physically (6656 <= 7564) with the margin overridden"
 fresh
 check "$(claim familiar:0 --lane morpheus-gems --until 2h --peak-ram 3000 --peak-vram 3000 --protected)" 0 "familiar: one heavy job"
 check "$(claim familiar:xpu0 --lane tapstone --until 2h --peak-ram 2000 --peak-vram 8000 --vulkan)" 75 "familiar: a second heavy job is refused (rule 2)"
@@ -320,6 +321,29 @@ check "$(cards "screen -S job -X stuff '$GJ\\n'")" "katana:0" "final: screen -X 
 check "$(cards 'screen -ls')" "" "final: screen -ls is a read"
 check "$(cards "export c='$GJ'; bash -c \"\$c\"")" "katana:0" "final: an exported variable is tracked"
 check "$(cards "declare c='$GJ'; eval \"\$c\"")" "katana:0" "final: a declared variable is tracked"
+# after the flip: the Oracle's #118 follow-ups (S1, L4) and the earlier queue (L1-L3), 09-29 evening
+P='/work/tools/safe_run.sh --protected'
+check "$(cards "ssh familiar '$P 20G uv run --color never python build_stacks.py'")" "" "post-flip L4: uv's global option after run is skipped (no false block)"
+check "$(cards 'uv run --cache-dir /c python train.py')" "katana:0" "post-flip L4: the command after a post-run global option is seen"
+check "$(cards 'CUDA_VISIBLE_DEVICES=0 hatch env run -e gpu -- python train.py')" "katana:0" "post-flip S1: hatch env run runs its command"
+check "$(cards "ssh familiar '$P 6G hatch test'")" "familiar:0" "post-flip S1: hatch test is not a read (opaque under --protected)"
+check "$(cards 'hatch env show')" "" "post-flip S1: hatch env show is a read"
+check "$(cards "ssh familiar '$P 8G bash -c \"python build_stacks.py; source /var/tmp/unread.sh\"'")" "familiar:0" "post-flip L2: a sourced unread script is a leaf (no CPU decoy hides it)"
+check "$(cards 'CUDA_VISIBLE_DEVICES=0 find /w -name train.py -exec python {} \;')" "katana:0" "post-flip L1: find -exec runs its command"
+check "$(cards 'find . -name "*.tif" -delete')" "" "post-flip L1: find without -exec is a read"
+check "$(cards "ssh familiar '$P 8G bash -c \"trap \\\"python train.py\\\" EXIT; python build_stacks.py\"'")" "familiar:0" "post-flip L1: trap's command runs (no CPU decoy hides it)"
+check "$(cards 'trap "rm -f x" EXIT')" "" "post-flip L1: a harmless trap is no launch"
+check "$(cards 'trap "CUDA_VISIBLE_DEVICES=0 python train.py" EXIT')" "katana:0" "post-flip L1: trap's command is scanned, not just counted (a GPU index in it is seen)"
+check "$(cards "ssh familiar '$P 8G /w/bin/cp train.py'")" "familiar:0" "post-flip L1: a path-named cp is not the real cp (an opaque run)"
+check "$(cards "ssh familiar '$P 20G bash -c \"python build_stacks.py && /usr/bin/cp a b\"'")" "" "post-flip L1: /usr/bin/cp is still a read"
+check "$(cards 'CUDA_VISIBLE_DEVICES=0 tar -xf a.tar --to-command="python train.py"')" "katana:0" "post-flip L1: tar --to-command runs its command"
+check "$(cards 'uv run -m torch.distributed.run train.py')" "katana:0" "post-flip L3: uv run -m is python -m"
+check "$(cards 'uv run train.py')" "katana:0" "post-flip L3: uv run SCRIPT.py is python SCRIPT.py"
+mkdir -p "$TMP/pd"; printf '%s\n' 'CUDA_VISIBLE_DEVICES=0 python train.py' > "$TMP/pd/job.sh"
+check "$(cards "pushd $TMP/pd && bash job.sh")" "katana:0" "post-flip L3: pushd moves the directory a script is found in"
+inv=$(DREAMTEAM_AGENT_ID=x python3 "$LIB" inventory 2>&1)
+case "$(echo "$inv" | grep '^katana:0')" in *cuda13*) pass "fleet: katana's 2080 Ti runs CUDA 13 (the Mozilla official image)" ;; *) fail "katana cuda13: $(echo "$inv" | grep '^katana:0')" ;; esac
+case "$(echo "$inv" | grep '^gpu1:0')" in *cuda13*) fail "a P102 claims CUDA 13" ;; *) pass "fleet: a Pascal P102 does not run CUDA 13" ;; esac
 # a local chain script followed two levels: chain.sh -> gpu_run.sh -> ssh gpu1 (vesper's chain-nh.sh, 09-29)
 mkdir -p "$TMP/chain"
 printf '#!/usr/bin/env bash\nset -u\n./gpu_run.sh 1 nh-C\n' > "$TMP/chain/chain.sh"
