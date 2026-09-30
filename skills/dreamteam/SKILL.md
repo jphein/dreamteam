@@ -955,6 +955,9 @@ measured sizes and each host's admission rules in `gpu/fleet.json`. Spec:
   - **python on a GPU host is a CPU job** unless it has GPU evidence: an index, `--device cuda|xpu`, or a GPU
     program from `fleet.json guard.gpu_programs`. Mark CPU work explicitly with `CUDA_VISIBLE_DEVICES=` (empty) or
     `--device cpu`.
+  - **Under `safe_run --protected`, a build tool (make, cmake, cargo) keeps the training-run fallback.** Mark a
+    CPU-only protected pipeline with `CUDA_VISIBLE_DEVICES=` (empty) or `--device cpu`. Plain utilities (mv, cp,
+    tar, mkdir) are never counted.
   - **fleet.json `guard` holds the GEMS classes:** `gpu_programs`, `gpu_scripts` (wrappers such as chain45.sh, which
     count by name when unreadable) and `cpu_programs` (which never count). An XPU job, `--device xpu` or
     `ZE_AFFINITY_MASK`, is attributed to the B60. A new GPU program or wrapper goes into that block.

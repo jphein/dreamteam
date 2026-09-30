@@ -29,6 +29,7 @@ case "$INPUT" in
   *CUDA_VISIBLE_DEVICES*|*ZE_AFFINITY_MASK*|*--device*cuda*|*--device*xpu*) ;;
   *gpu1_launch.sh*|*run_exp.sh*|*remote_run.sh*|*guest_run.sh*|*safe_run.sh*) ;;
   *python*|*.sh*|*torchrun*|*deepspeed*|*accelerate*|*ollama*) ;;
+  *.py*|*"uv "*|*uvx*|*poetry*|*conda*|*mamba*|*pdm*|*hatch*|*pipx*) ;;   # python project runners (uv run train.py)
   *./*|*"sh "*|*"source "*|*". "*|*tmux*|*screen*|*xargs*|*"eval "*|*"su "*) ;;   # scripts it may follow (Oracle 09-29)
   *docker*|*podman*) ;;
   *) exit 0 ;;

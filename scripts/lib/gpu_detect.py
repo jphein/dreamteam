@@ -39,12 +39,22 @@ READS = {"echo", "printf", "true", "false", ":", "test", "[", "nvidia-smi", "exp
          "md5sum", "sort", "uniq", "cut", "tr", "sed", "awk", "pgrep", "lsof",
          # file, archive and data utilities, and shell builtins: never a GPU job, and never a "run" a CPU verdict must
          # cover, so a CPU pipeline under --protected (`python build_stacks.py && mv a b && mkdir -p out`) stays CPU
-         "cd", "pushd", "popd", "set", "unset", "shift", "exit", "return", "wait", "trap", "umask", "ulimit",
+         "cd", "pushd", "popd", "set", "unset", "shift", "exit", "return", "wait", "umask", "ulimit",
          "alias", "read", "let", "hash", "shopt", "getopts", "break", "continue", "kill", "[[", "]]", "nproc", "seq",
          "mv", "cp", "mkdir", "rm", "rmdir", "ln", "touch", "chmod", "chown", "chgrp", "install", "truncate", "split",
          "tar", "gzip", "gunzip", "zcat", "zstd", "unzstd", "xz", "unxz", "bzip2", "bunzip2", "zip", "unzip", "pigz",
          "sync", "tee", "find", "curl", "wget", "sqlite3", "yq", "pip",
          "gdalinfo", "gdal_translate", "gdalwarp", "gdalbuildvrt", "gdaladdo", "ogr2ogr", "ogrinfo", "rio", "pdal"}
+SYSTEM_BIN = {"/bin", "/usr/bin", "/usr/local/bin", "/sbin", "/usr/sbin"}
+
+
+def _is_read(word: str) -> bool:
+    """A non-GPU program by name, only as a bare name or from a system path: `/w/bin/cp train.py` is not the real cp
+    (the Oracle's L1, 09-29), so it counts as an opaque run."""
+    b = os.path.basename(word)
+    return b in READS and ("/" not in word or os.path.dirname(word) in SYSTEM_BIN)
+
+
 # python project runners (the Oracle, 09-29: `uv --directory /w run python train.py` put global options before the
 # verb, so a runner matched on words[1] read as a no-op and hid a protected run). Each runner: its global options that
 # take a value, its `run` options that take a value, and the verbs that run nothing (reads). Any OTHER verb fails
@@ -67,8 +77,8 @@ PY_RUNNERS = {
                                          "build", "publish", "init", "info", "config", "cache", "venv", "export",
                                          "import", "self", "fix", "search", "outdated", "use"}),
     "hatch": ({"-e", "--env", "-p", "--project", "--data-dir", "--cache-dir", "--config"}, set(),
-              {"build", "clean", "config", "dep", "env", "fmt", "new", "project", "publish", "python", "self",
-               "status", "test", "version", "shell"}),
+              {"build", "clean", "config", "dep", "fmt", "new", "project", "publish", "python", "self", "status",
+               "version"}),                      # env run/test/shell run things (the Oracle's S1): not reads
     "pipx": (set(), {"--spec", "--python", "--pip-args"},
              {"install", "uninstall", "upgrade", "upgrade-all", "list", "inject", "uninject", "ensurepath",
               "environment", "reinstall", "reinstall-all", "completions", "interpreter", "pin", "unpin"}),
@@ -107,7 +117,21 @@ def _runner(words: list):
         return ("read", None)                      # `uv --version`, `poetry -h`
     verb = rest[0]
     if verb == "run":
-        return ("run", _skip(rest[1:], run_opts))
+        r, opts = rest[1:], run_opts | globals_     # uv accepts its global options after the verb (the Oracle's L4)
+        while r and r[0].startswith("-") and r[0] != "-":
+            if r[0] == "--":
+                r = r[1:]
+                break
+            if name == "uv" and r[0] in ("-m", "--module") and len(r) > 1:
+                return ("run", ["python", "-m"] + r[1:])     # uv run -m torch.distributed.run … (L3)
+            r = r[2:] if (r[0] in opts and "=" not in r[0]) else r[1:]
+        if r and r[0].endswith(".py"):
+            r = ["python"] + r                     # `uv run train.py`: python runs the script (L3)
+        return ("run", r)
+    if name == "hatch" and verb == "env":
+        if rest[1:2] == ["run"]:                   # hatch env run [-e ENV] -- CMD (the Oracle's S1)
+            return ("run", _skip(rest[2:], {"-e", "--env", "-i", "--include", "-x", "--exclude", "--filter", "-f"}))
+        return ("read", None)
     if name == "uv" and verb == "tool" and rest[1:2] == ["run"]:
         return ("run", _skip(rest[2:], PY_RUNNERS["uvx"][0]))
     if verb in reads or (name == "uv" and verb == "tool"):
@@ -507,7 +531,7 @@ def _scan(cmd: str, st: _Scan, host, env: dict, cwd: str, depth: int, written: d
     for sc in cmds:
         _simple(sc, st, host, env, shvars, cwd, depth, written)
         w = sc["words"]
-        if len(w) == 2 and w[0] == "cd" and host == st.local:
+        if len(w) == 2 and w[0] in ("cd", "pushd") and host == st.local:
             cwd = os.path.normpath(os.path.join(cwd, os.path.expanduser(w[1])))
     for sub in subs:
         _scan(sub, st, host, env, cwd, depth, written)
@@ -715,8 +739,34 @@ def _simple(sc: dict, st: _Scan, host, env: dict, shvars: dict, cwd: str, depth:
         _shell(args, sc, st, host, cenv, cwd, depth, written, shvars)
         return
     if prog in ("source", "."):
-        if args:
-            _run_script(args[0], st, host, cenv, cwd, depth, written)
+        if args and not _run_script(args[0], st, host, cenv, cwd, depth, written):
+            st.runs += 1                   # an unread sourced script is opaque: a CPU decoy cannot hide it (L2)
+        return
+    if prog == "trap":                     # trap CMD SIGNAL…: CMD runs later, on the signal or EXIT (the Oracle's L1)
+        if args and not args[0].startswith("-"):
+            _scan(_expand_var(args[0], shvars), st, host, cenv, cwd, depth, written)
+        return
+    if prog == "find":                     # find … -exec CMD {} ; / + runs CMD (the Oracle's L1)
+        for k, a in enumerate(args):
+            if a in ("-exec", "-execdir", "-ok", "-okdir"):
+                end = next((j for j in range(k + 1, len(args)) if args[j] in (";", "+")), len(args))
+                cmd = [("x" if w == "{}" else w) for w in args[k + 1:end]]
+                if cmd:
+                    _simple({"words": cmd, "redirs": [], "heredocs": [], "bg": False}, st, host, cenv, shvars, cwd,
+                            depth, written)
+        return
+    if prog == "tar":                      # tar --to-command=CMD / -I CMD / --use-compress-program CMD runs CMD
+        for k, a in enumerate(args):
+            for opt in ("--to-command", "--use-compress-program", "--checkpoint-action", "-I"):
+                if a.startswith(opt + "="):
+                    v = a.split("=", 1)[1]
+                elif a == opt and k + 1 < len(args):
+                    v = args[k + 1]
+                else:
+                    continue
+                v = v.split("exec=", 1)[1] if opt == "--checkpoint-action" and "exec=" in v else (None if opt == "--checkpoint-action" else v)
+                if v:
+                    _scan(_expand_var(v, shvars), st, host, cenv, cwd, depth, written)
         return
     if prog in LAUNCHERS:
         if prog == "safe_run.sh" and not any(a in ("-h", "--help", "--version") for a in args[:3]):
@@ -750,7 +800,7 @@ def _simple(sc: dict, st: _Scan, host, env: dict, shvars: dict, cwd: str, depth:
         return                             # followed: its own commands decide, under this env
     if is_script and _named_gpu_script(prog, args, st, host, cenv):
         return
-    if prog in READS:
+    if _is_read(words[0]):
         return
     st.runs += 1                           # a leaf program: a binary, or a script that could not be read
     explicit = any(k in cenv and env.get(k) != cenv[k] for k in GPU_ENV)
@@ -1023,7 +1073,7 @@ def _program_of(words: list) -> str | None:
             flags, vals, pos = WRAPPERS[b]
             words = _skip_opts(words[1:], flags, vals, pos, {}, b)
             continue
-        return b
+        return b if _is_read(words[0]) or b not in READS else words[0]   # a path-named "cp" is not a read
     return None
 
 

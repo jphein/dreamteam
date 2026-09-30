@@ -10,7 +10,7 @@
       "cap_margin": "cap = measured peak x 1.2 for fixed-shape jobs (FAMILIAR-RULES rule 3: 'measured peak plus 20%'; stage2_train's peaks are stable across runs).",
       "grows_margin": "x 1.5 for any job whose memory grows with run length (caches, arenas, variable-length inputs). FAMILIAR-RULES amendment 2026-09-28 23:4x-23:5x after two OOM kills: Canary-1B's arena (a 2-clip 4.75 GB peak + 20% = 6 GB; the full run passed 6.26 GB) and the lidar build's GDAL block cache.",
       "vram_margin_mib": "claimed VRAM on a card must leave 1 GiB (guest_run.sh: GPU free >= cap + 1 GB).",
-      "refuse_exit": "75 = EX_TEMPFAIL, retry later: the code all three GEMS launchers already use for an admission refusal."
+      "refuse_exit": "75 = EX_TEMPFAIL, retry later: the code all three GEMS launchers already use for an admission refusal.", "cuda13": "caps.cuda13: the card runs CUDA 13, which dropped Pascal (sm_6x). The Mozilla official image is CUDA 13, so official-image docker verifies run only on katana (morpheus-gems 09-29); the 1650 (game) is Turing and could too."
     }
   },
   "guard": {
@@ -92,15 +92,15 @@
   },
   "cards": {
     "katana:0": {"host": "katana", "index": 0, "model": "NVIDIA GeForce RTX 2080 Ti", "vram_mib": 11264, "arch": "turing", "compute_cap": "7.5",
-                 "caps": {"cuda": true, "bf16": false, "fp16": "fast", "tensor_cores": true, "xpu": false, "vulkan": true},
+                 "caps": {"cuda": true, "cuda13": true, "bf16": false, "fp16": "fast", "tensor_cores": true, "xpu": false, "vulkan": true},
                  "compute_ok": true, "drives_display": true, "pci": "01:00.0",
                  "residents": [
-                   {"name": "the desktop: GNOME, the browsers, OBS's virtual camera (it grows: JP's Brave grew during luna's audits)", "vram_mib": 2700,
+                   {"name": "the desktop: GNOME, the browsers, OBS's virtual camera (it grows: JP's Brave grew during luna's audits)", "vram_mib": 3700,
                     "match": "gnome|xorg|xwayland|xdg-|mutter|firefox|chrom|brave|code|electron|obs|crashpad|renderD"}
                  ],
-                 "_residents_note": "the desktop holds ~2.6-3.1 GiB (morpheus-gems 10:1x: 2.6 of 11 GiB; board 09:34: 2648 MiB with desktop apps only). Claimable = 11264 - 2700 - margin. The call watcher also kills GPU containers when free VRAM falls below 512 MiB."},
+                 "_residents_note": "the desktop peaks at ~3.7 GB (morpheus-gems 09-29 13:47-13:57: JP's desktop moved 2.8-3.7 GB in Brave; it was 2.6 GiB at 10:1x and 2648 MiB on the 09:34 board; 3349 MiB on the 16:50 board). Claimable = 11264 - 3700 - margin = 6540 MiB for a fixed-shape job; physically 7564. The call watcher kills GPU containers when free VRAM falls below 1 GiB."},
     "familiar:0": {"host": "familiar", "index": 0, "model": "NVIDIA P102-100", "vram_mib": 10240, "arch": "pascal", "compute_cap": "6.1",
-                   "caps": {"cuda": true, "bf16": false, "fp16": "slow", "tensor_cores": false, "xpu": false, "vulkan": true},
+                   "caps": {"cuda": true, "cuda13": false, "bf16": false, "fp16": "slow", "tensor_cores": false, "xpu": false, "vulkan": true},
                    "compute_ok": true, "drives_display": false, "pci": "06:00.0",
                    "residents": [
                      {"name": "ollama-embed.service: nomic-embed-text v1.5 embeddings (port 11435)", "vram_mib": 380, "match": "llama-server"},
@@ -108,21 +108,21 @@
                    ],
                    "_residents_note": "standing services that hold VRAM on this card (nvidia-smi 09:34 PDT: pid 3513, 380 MiB, user ollama; pid 4078769, 3026 MiB, user jp). Claimable VRAM = vram - residents - margin. Update from a new measurement if the services change."},
     "familiar:xpu0": {"host": "familiar", "index": 0, "model": "Intel Arc Pro B60", "vram_mib": 24576, "arch": "battlemage", "compute_cap": null,
-                      "caps": {"cuda": false, "bf16": true, "fp16": "fast", "tensor_cores": true, "xpu": true, "vulkan": true},
+                      "caps": {"cuda": false, "cuda13": false, "bf16": true, "fp16": "fast", "tensor_cores": true, "xpu": true, "vulkan": true},
                       "compute_ok": false,
                       "blocked_by": "BIOS Resizable BAR is off: BAR2 is 16 GB against 24 GB of VRAM (lspci, 09:1x), and Intel's compute runtime exposes nothing ('Small BAR detected'; torch.xpu.device_count() == 0, Drift 2026-09-28). Vulkan works (Ember/llama.cpp). Enabling ReBAR is JP's hands at familiar's BIOS. Memory: familiar-b60-needs-rebar.",
                       "drives_display": false, "pci": "09:00.0", "_vram_source": "documented (24 GB), not measured: xpu-smi is not installed"},
     "game:0": {"host": "game", "index": 0, "model": "NVIDIA GeForce GTX 1650", "vram_mib": 4096, "arch": "turing", "compute_cap": "7.5",
-               "caps": {"cuda": true, "bf16": false, "fp16": "fast", "tensor_cores": false, "xpu": false, "vulkan": true},
+               "caps": {"cuda": true, "cuda13": true, "bf16": false, "fp16": "fast", "tensor_cores": false, "xpu": false, "vulkan": true},
                "compute_ok": true, "drives_display": true, "pci": "01:00.0", "notes": "TU117: no tensor cores."},
     "gpu0:0": {"host": "gpu0", "index": 0, "model": "NVIDIA GeForce GTX 1050 Ti", "vram_mib": 4096, "arch": "pascal", "compute_cap": "6.1",
-               "caps": {"cuda": true, "bf16": false, "fp16": "slow", "tensor_cores": false, "xpu": false, "vulkan": true},
+               "caps": {"cuda": true, "cuda13": false, "bf16": false, "fp16": "slow", "tensor_cores": false, "xpu": false, "vulkan": true},
                "compute_ok": true, "drives_display": false, "pci": "01:00.0"},
     "gpu1:0": {"host": "gpu1", "index": 0, "model": "NVIDIA P102-100", "vram_mib": 10240, "arch": "pascal", "compute_cap": "6.1",
-               "caps": {"cuda": true, "bf16": false, "fp16": "slow", "tensor_cores": false, "xpu": false, "vulkan": true},
+               "caps": {"cuda": true, "cuda13": false, "bf16": false, "fp16": "slow", "tensor_cores": false, "xpu": false, "vulkan": true},
                "compute_ok": true, "drives_display": false, "pci": "03:00.0"},
     "gpu1:1": {"host": "gpu1", "index": 1, "model": "NVIDIA P102-100", "vram_mib": 10240, "arch": "pascal", "compute_cap": "6.1",
-               "caps": {"cuda": true, "bf16": false, "fp16": "slow", "tensor_cores": false, "xpu": false, "vulkan": true},
+               "caps": {"cuda": true, "cuda13": false, "bf16": false, "fp16": "slow", "tensor_cores": false, "xpu": false, "vulkan": true},
                "compute_ok": true, "drives_display": false, "pci": "04:00.0"}
   }
 }
