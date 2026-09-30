@@ -95,10 +95,10 @@
                  "caps": {"cuda": true, "cuda13": true, "bf16": false, "fp16": "fast", "tensor_cores": true, "xpu": false, "vulkan": true},
                  "compute_ok": true, "drives_display": true, "pci": "01:00.0",
                  "residents": [
-                   {"name": "the desktop: GNOME, the browsers, OBS's virtual camera (it grows: JP's Brave grew during luna's audits)", "vram_mib": 3700,
+                   {"name": "the desktop: GNOME, the browsers, OBS's virtual camera (it grows: JP's Brave grew during luna's audits)", "vram_mib": 2700, "peak_vram_mib": 3700,
                     "match": "gnome|xorg|xwayland|xdg-|mutter|firefox|chrom|brave|code|electron|obs|crashpad|renderD"}
                  ],
-                 "_residents_note": "the desktop peaks at ~3.7 GB (morpheus-gems 09-29 13:47-13:57: JP's desktop moved 2.8-3.7 GB in Brave; it was 2.6 GiB at 10:1x and 2648 MiB on the 09:34 board; 3349 MiB on the 16:50 board). Claimable = 11264 - 3700 - margin = 6540 MiB for a fixed-shape job; physically 7564. The call watcher kills GPU containers when free VRAM falls below 1 GiB."},
+                 "_residents_note": "Claim admission uses the desktop's TYPICAL use, 2700 MiB (2181 at 09-30 08:24, 3349 on the 09-29 16:50 board, 2648 on the 09-29 09:34 board). Its PEAK, 3.7 GB (JP in Brave, morpheus-gems 09-29 13:5x), is guarded live at launch, not at claim time: docker_guard admits only with free VRAM >= need + 1024, `dreamteam gpu run` checks live VRAM, and the call watcher kills the biggest GPU container below 1 GiB free. With the peak as a static resident, every CUDA-13 official-image verify (~6.5 GB) was unclaimable on the only host that can run it (morpheus-gems 09-30 08:2x; cirrus chose this over a claim-time live probe, which would misjudge scheduled --from claims). Claimable = 11264 - 2700 - margin = 7540 MiB for a fixed-shape job; physically 8564."},
     "familiar:0": {"host": "familiar", "index": 0, "model": "NVIDIA P102-100", "vram_mib": 10240, "arch": "pascal", "compute_cap": "6.1",
                    "caps": {"cuda": true, "cuda13": false, "bf16": false, "fp16": "slow", "tensor_cores": false, "xpu": false, "vulkan": true},
                    "compute_ok": true, "drives_display": false, "pci": "06:00.0",

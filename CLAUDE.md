@@ -114,7 +114,8 @@ bash tests/run.sh          # runs every suite, exits non-zero on any failure
     - find -exec, trap (its command scanned, not just counted), tar --to-command, and path-named reads;
     - uv run -m, uv run x.py, pushd;
     - the pre-filter passes runners and `.py`;
-    - cuda13 caps in the inventory; katana's 3.7 GB desktop refuses an 8 GB container as physics;
+    - cuda13 caps in the inventory;
+    - katana's resident is the desktop's TYPICAL 2700 MiB (its 3.7 GB peak is guarded live), so a ~6.5 GB official-image verify is claimable without an override, and putting the peak back goes red;
   - **#124:**
     - a protected find -exec or tar --to-command of an unjudged program is a training run, and of a read it stays CPU;
     - `trap -- CMD` and `tar -xI CMD` are scanned;

@@ -339,7 +339,11 @@ pipeline a training run under `--protected` (`python build_stacks.py && mv a b &
 - **fleet.json:**
   - `caps.cuda13` (CUDA 13 dropped Pascal; the Mozilla official image is CUDA 13, so official-image verifies run on
     katana only);
-  - katana's desktop resident is now its measured 3.7 GB peak, so an 8 GB container is refused as physics there.
+  - katana's desktop resident was set to its measured 3.7 GB peak here. **Reverted to the typical 2700 MiB on 09-30 (#127)**:
+    as a static resident the peak made every CUDA-13 official-image verify (~6.5 GB) unclaimable on the only host that
+    runs them (6656 > 11264 − 3700 − 1024 = 6540, by 116 MiB). The peak is now `peak_vram_mib`, guarded live at launch
+    (docker_guard's free ≥ need + 1 GiB, `gpu run`'s live check, the watcher's 1 GiB kill line). A claim-time live probe
+    was considered and rejected: it misjudges scheduled `--from` claims.
 
 **The Oracle on #122 (46614b6): SHIP-AS-IS.** Across 19,795 distinct real commands: 0 verdict changes, 76 launches.
 The pre-filter passes 71% → 75% of distinct commands (81% of all lane calls, repeats included). Its should-fix,
