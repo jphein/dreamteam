@@ -86,11 +86,12 @@ check "$(claim gpu0:0 --lane reverie-gems --until 2h --peak-ram 500 --peak-vram 
 # ── 3. the other host rules ──────────────────────────────────────────────────────────────────────
 fresh
 check "$(claim katana:0 --lane reverie-gems --until 2h --peak-ram 11000 --peak-vram 4000)" 75 "katana guest budget: a cap above 12 GB is refused (the sum rule)"
-check "$(claim katana:0 --lane reverie-gems --until 2h --peak-ram 5000 --peak-vram 5000)" 0 "katana guest budget: a 6 GB cap and 5 GiB VRAM fit beside the desktop's 3700 MiB (5000 <= 6540)"
+check "$(claim katana:0 --lane reverie-gems --until 2h --peak-ram 5000 --peak-vram 5000)" 0 "katana guest budget: a 6 GB cap and 5 GiB VRAM fit beside the desktop's typical 2700 MiB (5000 <= 7540)"
 fresh
-check "$(claim katana:0 --lane luna-refurb --until 1h --peak-ram 5000 --peak-vram 8000)" 75 "katana: an 8 GB docker audit breaks the margin beside the 3.7 GB desktop"
-check "$(claim katana:0 --lane luna-refurb --until 1h --peak-ram 5000 --peak-vram 8000 --override 'lead: the call watcher kills it under 1 GiB free')" 75 "katana: no override passes physics: 8000 > 11264 - 3700 = 7564 (morpheus 09-29: the desktop peaks at 3.7 GB)"
-check "$(claim katana:0 --lane vesper-mozilla --until 1h --peak-ram 5120 --peak-vram 6656 --override 'lead: batch-1 docker verify window')" 0 "katana: vesper's ~6.5 GB batch-1 window fits physically (6656 <= 7564) with the margin overridden"
+check "$(claim katana:0 --lane luna-refurb --until 1h --peak-ram 5000 --peak-vram 8000)" 75 "katana: an 8 GB docker audit breaks the margin beside the typical desktop (8000 > 7540)"
+check "$(claim katana:0 --lane luna-refurb --until 1h --peak-ram 5000 --peak-vram 8000 --override 'lead: the call watcher kills it under 1 GiB free')" 0 "katana: the margin may be overridden for 8 GB (8000 <= 8564 physically; the watcher guards the desktop's growth)"
+fresh
+check "$(claim katana:0 --lane luna-refurb --until 1h --peak-ram 5120 --peak-vram 6656)" 0 "katana: a ~6.5 GB batch-1 official-image verify is claimable WITHOUT an override (6656 <= 7540; morpheus 09-30)"
 fresh
 check "$(claim familiar:0 --lane morpheus-gems --until 2h --peak-ram 3000 --peak-vram 3000 --protected)" 0 "familiar: one heavy job"
 check "$(claim familiar:xpu0 --lane tapstone --until 2h --peak-ram 2000 --peak-vram 8000 --vulkan)" 75 "familiar: a second heavy job is refused (rule 2)"
