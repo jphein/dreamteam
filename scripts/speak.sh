@@ -85,6 +85,14 @@ done
 # with no gnome-speaks has no call detection either, so direct speech there
 # is the exact hazard this exists to remove). One line per outcome is appended
 # to $STATE/voice.log so "why didn't it speak?" has an answer.
+#
+# TOKEN (gnome-speaks #186 phase 2): the service writes a per-install token to
+# $XDG_CONFIG_HOME/gnome-speaks/token (0600) and checks it on every endpoint but
+# GET /health. When that file is readable it is sent as X-Speaks-Token -- through
+# curl's config on STDIN (-K -), never argv, because /proc/<pid>/cmdline is
+# world-readable and the token's whole point is keeping OTHER local accounts out.
+# No file (older service, another host) = no header, exactly the old request.
+# 401 = the service wants a token we do not have -- logged, silent.
 QUEUE_URL="$(jq -r '.speech.queueUrl // empty' "$CFG" 2>/dev/null || true)"
 [ -z "$QUEUE_URL" ] && QUEUE_URL="${SPEAK_QUEUE_URL:-}"   # env: a test suite pins a dead port here
 [ -z "$QUEUE_URL" ] && QUEUE_URL="http://127.0.0.1:7710/speak"
@@ -94,6 +102,8 @@ SOURCE="${SPEAK_SOURCE:-}"
 [ -z "$SOURCE" ] && SOURCE="dreamteam"
 STATE="${DREAMTEAM_STATE:-$ROOT/state}"
 VOICE_LOG="$STATE/voice.log"
+# env SPEAK_TOKEN_FILE: a test suite pins a scratch file here (never JP's real token).
+TOKEN_FILE="${SPEAK_TOKEN_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/gnome-speaks/token}"
 
 # Resolve tts.py: config .speech.ttsPath override → default; expand a leading ~.
 TTS="$(jq -r '.speech.ttsPath // empty' "$CFG" 2>/dev/null || true)"
@@ -150,8 +160,9 @@ PAYLOAD="$(jq -cn --arg t "$TEXT" --arg s "$SOURCE" --arg v "$QVOICE" \
 [ -n "$PAYLOAD" ] || PAYLOAD="{\"text\":$(printf '%s' "$TEXT" | jq -Rs .),\"source\":\"$SOURCE\"}"
 mkdir -p "$STATE" 2>/dev/null || true
 # Flatten the resolved chain into positional args for the detached child:
-#   PAYLOAD URL DIRECT LOG  TEXT PY TTS N  then N × (engine, voiceEnvName, voiceId)
-ARGS=("$PAYLOAD" "$QUEUE_URL" "$DIRECT_FALLBACK" "$VOICE_LOG" "$TEXT" "$PY" "$TTS" "${#CHAIN[@]}")
+#   PAYLOAD URL DIRECT LOG TOKENFILE  TEXT PY TTS N  then N × (engine, voiceEnvName, voiceId)
+# The token FILE path travels, never the token: the child reads it itself.
+ARGS=("$PAYLOAD" "$QUEUE_URL" "$DIRECT_FALLBACK" "$VOICE_LOG" "$TOKEN_FILE" "$TEXT" "$PY" "$TTS" "${#CHAIN[@]}")
 for eng in "${CHAIN[@]}"; do
   ARGS+=("$eng" "$(voice_env_name "$eng")" "$(resolve_voice "$eng")")
 done
@@ -173,14 +184,43 @@ case "$TIMEOUT" in ''|*[!0-9]*) TIMEOUT=180 ;; esac      # 3) default
 # The child walks the chain, stopping at the first engine that exits 0. Data is
 # passed POSITIONALLY (never interpolated into code) so arbitrary TEXT is injection-safe.
 # ($TIMEOUT is the sole exception — a validated integer, baked in at construction.)
-CHILD='payload=$1; url=$2; direct=$3; logf=$4; text=$5; py=$6; tts=$7; n=$8; shift 8
+CHILD='payload=$1; url=$2; direct=$3; logf=$4; tokf=$5; text=$6; py=$7; tts=$8; n=$9; shift 9
 vlog(){ printf "%s %s | %s\n" "$(date +%FT%T)" "$1" "$(printf "%s" "$text" | head -c 80)" >> "$logf" 2>/dev/null || true; }
+set +x   # never trace the token, whatever the environment exported
+tok=""
+# The WHOLE file is validated (only the trailing newline is dropped): a file
+# holding anything but 32-256 of [A-Za-z0-9_-] is not sent, never trimmed into
+# something sendable. 300 bytes is enough to see an over-long one.
+[ -r "$tokf" ] && tok=$(head -c 300 "$tokf" 2>/dev/null)
+case "$tok" in
+  "") ;;
+  *[!A-Za-z0-9_-]*) vlog "token file holds unexpected characters -- not sent"; tok="" ;;
+  *) if [ "${#tok}" -lt 32 ] || [ "${#tok}" -gt 256 ]; then
+       vlog "token file is not 32-256 characters -- not sent"; tok=""; fi ;;
+esac
+# The token only ever goes to THIS host: a queueUrl naming another machine
+# would carry it across the LAN in plain HTTP (and hand it to that service).
+# Loopback literals only, no userinfo (http://127.0.0.1:1@evil/ is evil).
+case "$url" in
+  *@*) [ -n "$tok" ] && vlog "queue url carries userinfo -- token withheld"; tok="" ;;
+  http://127.0.0.1:*|http://127.0.0.1/*|http://localhost:*|http://localhost/*|http://\[::1\]:*|http://\[::1\]/*) ;;
+  https://127.0.0.1:*|https://127.0.0.1/*|https://localhost:*|https://localhost/*|https://\[::1\]:*|https://\[::1\]/*) ;;
+  *) [ -n "$tok" ] && vlog "queue url is not loopback -- token withheld"; tok="" ;;
+esac
 if command -v curl >/dev/null 2>&1; then
-  code=$(curl -s -o /dev/null -w "%{http_code}" -m 4 -H "Content-Type: application/json" \
+  # printf is a builtin: the token reaches curl through the pipe, never argv.
+  # -q FIRST: no ~/.curlrc, so a trace/verbose setting there cannot write the
+  # header into $code or a trace file. --noproxy "*": an http_proxy in the
+  # environment must never receive the token (the queue is local anyway).
+  # No token = an empty config on stdin = the pre-token request, byte for byte.
+  code=$( { [ -n "$tok" ] && printf "header = \"X-Speaks-Token: %s\"\n" "$tok"; } |
+         curl -q -K - --noproxy "*" -s -o /dev/null -w "%{http_code}" -m 4 -H "Content-Type: application/json" \
            -X POST --data-binary "$payload" "$url" 2>/dev/null); rc=$?
   if [ "$rc" -eq 0 ] && [ -n "$code" ]; then
     case "$code" in
       2*)  vlog "queued $code"; exit 0 ;;
+      401) if [ -n "$tok" ]; then vlog "queue refused 401: token sent but wrong -- silent"
+           else vlog "queue refused 401: no token file at $tokf -- silent"; fi; exit 0 ;;
       503) vlog "gated 503 (quiet hours / on a call / extension off) -- silent"; exit 0 ;;
       *)   vlog "queue answered $code -- silent"; exit 0 ;;
     esac

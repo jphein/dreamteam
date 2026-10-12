@@ -34,12 +34,14 @@ export DREAMTEAM_STATE="$TMP/state"      # speak.sh's voice.log lands here, neve
 # ── fake gnome-speaks QUEUE (2026-09-18: speak.sh posts here FIRST). Records every
 # POST body; answers the code in $QCODE (200 by default, 503 = "gated").
 QLOG="$TMP/queue.log"; QCODE="$TMP/queue.code"; echo 200 > "$QCODE"
-python3 - "$QLOG" "$QCODE" > "$TMP/queue.port" 2>/dev/null <<'PY' &
+QTOK="$TMP/queue.tok"   # one line per POST: the X-Speaks-Token it carried, or NONE
+python3 - "$QLOG" "$QCODE" "$QTOK" > "$TMP/queue.port" 2>/dev/null <<'PY' &
 import http.server, socketserver, sys
-log, codef = sys.argv[1], sys.argv[2]
+log, codef, tokf = sys.argv[1], sys.argv[2], sys.argv[3]
 class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0)); body = self.rfile.read(n)
+        open(tokf, "a").write((self.headers.get("X-Speaks-Token") or "NONE") + "\n")
         open(log, "ab").write(body + b"\n")
         code = int(open(codef).read().strip() or 200)
         self.send_response(code); self.send_header("Content-Type", "application/json")
@@ -59,6 +61,8 @@ DEAD_QURL="http://127.0.0.1:1/speak"     # nothing listens on port 1 -> connect 
 # service on 7710 -- 2026-09-18 the engine-chain fixtures spoke "chain hi" x4
 # through JP's live queue before this line existed.
 export SPEAK_QUEUE_URL="$DEAD_QURL"
+# Same rule for the gnome-speaks token (#186 phase 2): never read JP's real one.
+export SPEAK_TOKEN_FILE="$TMP/no-such-token"
 wait_qlines(){ local n="$1" i; for i in $(seq 1 40); do [ -f "$QLOG" ] && [ "$(wc -l < "$QLOG" 2>/dev/null || echo 0)" -ge "$n" ] && return 0; sleep 0.1; done; return 1; }
 
 # fake tts.py — speak.sh runs `python3 <ttsPath>`, so this MUST be python.
@@ -143,6 +147,77 @@ else
   fail "queue route (rc=$rc qlog: $(cat "$QLOG" 2>/dev/null | head -c 200) rec: $(cat "$REC" 2>/dev/null))"
 fi
 # Q1b) default source tag when --source is omitted
+# ── token (gnome-speaks #186 phase 2): sent from the token file as X-Speaks-Token,
+# absent when there is no file, withheld when the file holds anything but [A-Za-z0-9_-].
+: > "$QLOG"; : > "$QTOK"
+env DREAMTEAM_CONFIG="$TMP/cfg-queue.json" bash "$SPEAK" "no token line" --voice davis
+{ wait_qlines 1 && [ "$(cat "$QTOK")" = "NONE" ]; } && pass "no token file -> no X-Speaks-Token header (the pre-token request)" || fail "tokenless request carried a token ($(cat "$QTOK"))"
+TOKV="tok_ABC-123xyz_0123456789abcdefghijKLMN"     # 40 chars of [A-Za-z0-9_-]
+printf '%s\n' "$TOKV" > "$TMP/token"; chmod 600 "$TMP/token"
+: > "$QLOG"; : > "$QTOK"
+env DREAMTEAM_CONFIG="$TMP/cfg-queue.json" SPEAK_TOKEN_FILE="$TMP/token" bash "$SPEAK" "token line" --voice davis
+{ wait_qlines 1 && [ "$(cat "$QTOK")" = "$TOKV" ]; } && pass "token file -> X-Speaks-Token sent (trailing newline stripped)" || fail "token not sent ($(cat "$QTOK"))"
+# The token must NEVER be in curl's argv (/proc/<pid>/cmdline is world-readable):
+# a PATH-stub curl records its argv and stdin, then runs the real curl unchanged.
+REALCURL="$(command -v curl)"; SPY="$TMP/curlspy"; mkdir -p "$SPY"
+cat > "$SPY/curl" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$TMP/curl.argv"
+cat > "$TMP/curl.stdin"
+exec "$REALCURL" "\$@" < "$TMP/curl.stdin"
+SH
+chmod +x "$SPY/curl"; : > "$TMP/curl.argv"; : > "$QLOG"; : > "$QTOK"
+env PATH="$SPY:$PATH" DREAMTEAM_CONFIG="$TMP/cfg-queue.json" SPEAK_TOKEN_FILE="$TMP/token" bash "$SPEAK" "argv line" --voice davis
+if wait_qlines 1 && [ "$(cat "$QTOK")" = "$TOKV" ] && [ -s "$TMP/curl.argv" ] \
+   && ! grep -qF "$TOKV" "$TMP/curl.argv" && grep -qF "$TOKV" "$TMP/curl.stdin" \
+   && grep -q -- '-q -K -' "$TMP/curl.argv"; then
+  pass "the token reaches curl on stdin, never argv (spied curl; -q first so no curlrc can trace it)"
+else
+  fail "token argv check (argv: $(sed "s/$TOKV/<TOKEN>/g" "$TMP/curl.argv" 2>/dev/null | head -c 300))"
+fi
+# The token goes to loopback queue URLs only: 0.0.0.0 reaches the same fake
+# server on Linux but is not a loopback literal, and userinfo is refused.
+for qurl in "http://0.0.0.0:$QPORT/speak" "http://127.0.0.1:1@127.0.0.1:$QPORT/speak"; do
+  printf '{"speech":{"ttsPath":"%s","queueUrl":"%s"}}\n' "$TMP/tts.py" "$qurl" > "$TMP/cfg-nonloop.json"
+  : > "$QLOG"; : > "$QTOK"; : > "$TMP/state/voice.log"
+  env DREAMTEAM_CONFIG="$TMP/cfg-nonloop.json" SPEAK_TOKEN_FILE="$TMP/token" bash "$SPEAK" "nonloop line" --voice davis
+  if wait_qlines 1 && [ "$(cat "$QTOK")" = "NONE" ] && grep -q "token withheld" "$TMP/state/voice.log"; then
+    pass "token withheld from a non-loopback queue url ($qurl)"
+  else
+    fail "token sent to $qurl ($(cat "$QTOK" | head -c 60))"
+  fi
+done
+for bad in "short_token" "tok_ABC-123xyz 0123456789abcdefghijKLMN" "$(printf 'x%.0s' $(seq 1 257))"; do
+  printf '%s\n' "$bad" > "$TMP/badlen"
+  : > "$QLOG"; : > "$QTOK"
+  env DREAMTEAM_CONFIG="$TMP/cfg-queue.json" SPEAK_TOKEN_FILE="$TMP/badlen" bash "$SPEAK" "badlen line" --voice davis
+  { wait_qlines 1 && [ "$(cat "$QTOK")" = "NONE" ]; } && pass "an invalid token file (${#bad} chars) is not sent, not trimmed into one" || fail "invalid token file sent: $(cat "$QTOK" | head -c 60)"
+done
+printf 'bad;token"x\n' > "$TMP/badtoken"
+: > "$QLOG"; : > "$QTOK"
+env DREAMTEAM_CONFIG="$TMP/cfg-queue.json" SPEAK_TOKEN_FILE="$TMP/badtoken" bash "$SPEAK" "bad token line" --voice davis
+{ wait_qlines 1 && [ "$(cat "$QTOK")" = "NONE" ]; } && pass "a token file with unexpected characters is not sent (no curl-config injection)" || fail "bad token was sent ($(cat "$QTOK"))"
+grep -q 'printf "header = ' "$SPEAK" && ! grep -qE 'curl[^|]*(X-Speaks-Token|Authorization)' "$SPEAK" \
+  && pass "lint: no curl line in speak.sh carries a token header in argv" || fail "speak.sh may put the token on curl's command line"
+: > "$QLOG"; : > "$QTOK"; echo 401 > "$QCODE"; : > "$TMP/state/voice.log"
+env DREAMTEAM_CONFIG="$TMP/cfg-queue.json" SPEAK_TOKEN_FILE="$TMP/token" bash "$SPEAK" "refused line" --voice davis
+if wait_qlines 1 && no_rec && { for _ in $(seq 1 30); do grep -q 'refused 401' "$TMP/state/voice.log" 2>/dev/null && break; sleep 0.1; done; grep -q 'refused 401: token sent but wrong' "$TMP/state/voice.log"; }; then
+  pass "401 -> logged as a token refusal, silent, no direct fallback"
+else
+  fail "401 handling (log: $(cat "$TMP/state/voice.log" 2>/dev/null))"
+fi
+echo 200 > "$QCODE"
+# An http_proxy in the environment never receives the request (or the token):
+# the proxy here is a dead port, so only a direct connection reaches the queue.
+: > "$QLOG"; : > "$QTOK"
+env http_proxy="http://127.0.0.1:1" HTTP_PROXY="http://127.0.0.1:1" all_proxy="http://127.0.0.1:1" \
+  DREAMTEAM_CONFIG="$TMP/cfg-queue.json" SPEAK_TOKEN_FILE="$TMP/token" bash "$SPEAK" "proxy line" --voice davis
+{ wait_qlines 1 && [ "$(cat "$QTOK")" = "$TOKV" ]; } && pass "an http_proxy is bypassed (--noproxy): the token goes straight to the local queue" \
+  || fail "proxied request (qtok: $(cat "$QTOK" | head -c 20))"
+# Across every token case above, voice.log never held the token itself.
+! grep -rqF "$TOKV" "$TMP/state" && pass "the token never reaches voice.log or any state file" \
+  || fail "the token leaked into $TMP/state"
+
 : > "$QLOG"
 env DREAMTEAM_CONFIG="$TMP/cfg-queue.json" bash "$SPEAK" "default tag" --voice davis
 { wait_qlines 1 && grep -q '"source":"dreamteam"' "$QLOG"; } && pass "speak.sh tags the queue item source=dreamteam by default" || fail "default source tag (qlog: $(cat "$QLOG" 2>/dev/null))"
