@@ -207,6 +207,13 @@ else
   fail "401 handling (log: $(cat "$TMP/state/voice.log" 2>/dev/null))"
 fi
 echo 200 > "$QCODE"
+# An http_proxy in the environment never receives the request (or the token):
+# the proxy here is a dead port, so only a direct connection reaches the queue.
+: > "$QLOG"; : > "$QTOK"
+env http_proxy="http://127.0.0.1:1" HTTP_PROXY="http://127.0.0.1:1" all_proxy="http://127.0.0.1:1" \
+  DREAMTEAM_CONFIG="$TMP/cfg-queue.json" SPEAK_TOKEN_FILE="$TMP/token" bash "$SPEAK" "proxy line" --voice davis
+{ wait_qlines 1 && [ "$(cat "$QTOK")" = "$TOKV" ]; } && pass "an http_proxy is bypassed (--noproxy): the token goes straight to the local queue" \
+  || fail "proxied request (qtok: $(cat "$QTOK" | head -c 20))"
 # Across every token case above, voice.log never held the token itself.
 ! grep -rqF "$TOKV" "$TMP/state" && pass "the token never reaches voice.log or any state file" \
   || fail "the token leaked into $TMP/state"

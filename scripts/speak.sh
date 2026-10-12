@@ -210,10 +210,11 @@ esac
 if command -v curl >/dev/null 2>&1; then
   # printf is a builtin: the token reaches curl through the pipe, never argv.
   # -q FIRST: no ~/.curlrc, so a trace/verbose setting there cannot write the
-  # header into $code or a trace file.
+  # header into $code or a trace file. --noproxy "*": an http_proxy in the
+  # environment must never receive the token (the queue is local anyway).
   # No token = an empty config on stdin = the pre-token request, byte for byte.
   code=$( { [ -n "$tok" ] && printf "header = \"X-Speaks-Token: %s\"\n" "$tok"; } |
-         curl -q -K - -s -o /dev/null -w "%{http_code}" -m 4 -H "Content-Type: application/json" \
+         curl -q -K - --noproxy "*" -s -o /dev/null -w "%{http_code}" -m 4 -H "Content-Type: application/json" \
            -X POST --data-binary "$payload" "$url" 2>/dev/null); rc=$?
   if [ "$rc" -eq 0 ] && [ -n "$code" ]; then
     case "$code" in
