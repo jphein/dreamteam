@@ -34,12 +34,14 @@ export DREAMTEAM_STATE="$TMP/state"      # speak.sh's voice.log lands here, neve
 # ── fake gnome-speaks QUEUE (2026-09-18: speak.sh posts here FIRST). Records every
 # POST body; answers the code in $QCODE (200 by default, 503 = "gated").
 QLOG="$TMP/queue.log"; QCODE="$TMP/queue.code"; echo 200 > "$QCODE"
-python3 - "$QLOG" "$QCODE" > "$TMP/queue.port" 2>/dev/null <<'PY' &
+QTOK="$TMP/queue.tok"   # one line per POST: the X-Speaks-Token it carried, or NONE
+python3 - "$QLOG" "$QCODE" "$QTOK" > "$TMP/queue.port" 2>/dev/null <<'PY' &
 import http.server, socketserver, sys
-log, codef = sys.argv[1], sys.argv[2]
+log, codef, tokf = sys.argv[1], sys.argv[2], sys.argv[3]
 class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0)); body = self.rfile.read(n)
+        open(tokf, "a").write((self.headers.get("X-Speaks-Token") or "NONE") + "\n")
         open(log, "ab").write(body + b"\n")
         code = int(open(codef).read().strip() or 200)
         self.send_response(code); self.send_header("Content-Type", "application/json")
@@ -59,6 +61,8 @@ DEAD_QURL="http://127.0.0.1:1/speak"     # nothing listens on port 1 -> connect 
 # service on 7710 -- 2026-09-18 the engine-chain fixtures spoke "chain hi" x4
 # through JP's live queue before this line existed.
 export SPEAK_QUEUE_URL="$DEAD_QURL"
+# Same rule for the gnome-speaks token (#186 phase 2): never read JP's real one.
+export SPEAK_TOKEN_FILE="$TMP/no-such-token"
 wait_qlines(){ local n="$1" i; for i in $(seq 1 40); do [ -f "$QLOG" ] && [ "$(wc -l < "$QLOG" 2>/dev/null || echo 0)" -ge "$n" ] && return 0; sleep 0.1; done; return 1; }
 
 # fake tts.py — speak.sh runs `python3 <ttsPath>`, so this MUST be python.
@@ -143,6 +147,30 @@ else
   fail "queue route (rc=$rc qlog: $(cat "$QLOG" 2>/dev/null | head -c 200) rec: $(cat "$REC" 2>/dev/null))"
 fi
 # Q1b) default source tag when --source is omitted
+# ── token (gnome-speaks #186 phase 2): sent from the token file as X-Speaks-Token,
+# absent when there is no file, withheld when the file holds anything but [A-Za-z0-9_-].
+: > "$QLOG"; : > "$QTOK"
+env DREAMTEAM_CONFIG="$TMP/cfg-queue.json" bash "$SPEAK" "no token line" --voice davis
+{ wait_qlines 1 && [ "$(cat "$QTOK")" = "NONE" ]; } && pass "no token file -> no X-Speaks-Token header (the pre-token request)" || fail "tokenless request carried a token ($(cat "$QTOK"))"
+printf 'tok_ABC-123xyz\n' > "$TMP/token"; chmod 600 "$TMP/token"
+: > "$QLOG"; : > "$QTOK"
+env DREAMTEAM_CONFIG="$TMP/cfg-queue.json" SPEAK_TOKEN_FILE="$TMP/token" bash "$SPEAK" "token line" --voice davis
+{ wait_qlines 1 && [ "$(cat "$QTOK")" = "tok_ABC-123xyz" ]; } && pass "token file -> X-Speaks-Token sent (trailing newline stripped)" || fail "token not sent ($(cat "$QTOK"))"
+printf 'bad;token"x\n' > "$TMP/badtoken"
+: > "$QLOG"; : > "$QTOK"
+env DREAMTEAM_CONFIG="$TMP/cfg-queue.json" SPEAK_TOKEN_FILE="$TMP/badtoken" bash "$SPEAK" "bad token line" --voice davis
+{ wait_qlines 1 && [ "$(cat "$QTOK")" = "NONE" ]; } && pass "a token file with unexpected characters is not sent (no curl-config injection)" || fail "bad token was sent ($(cat "$QTOK"))"
+grep -q 'printf "header = ' "$SPEAK" && ! grep -qE 'curl[^|]*X-Speaks-Token' "$SPEAK" \
+  && pass "the token reaches curl through stdin (-K -), never argv" || fail "speak.sh may put the token on curl's command line"
+: > "$QLOG"; : > "$QTOK"; echo 401 > "$QCODE"; : > "$TMP/state/voice.log"
+env DREAMTEAM_CONFIG="$TMP/cfg-queue.json" SPEAK_TOKEN_FILE="$TMP/token" bash "$SPEAK" "refused line" --voice davis
+if wait_qlines 1 && no_rec && { for _ in $(seq 1 30); do grep -q 'refused 401' "$TMP/state/voice.log" 2>/dev/null && break; sleep 0.1; done; grep -q 'refused 401: token sent but wrong' "$TMP/state/voice.log"; }; then
+  pass "401 -> logged as a token refusal, silent, no direct fallback"
+else
+  fail "401 handling (log: $(cat "$TMP/state/voice.log" 2>/dev/null))"
+fi
+echo 200 > "$QCODE"
+
 : > "$QLOG"
 env DREAMTEAM_CONFIG="$TMP/cfg-queue.json" bash "$SPEAK" "default tag" --voice davis
 { wait_qlines 1 && grep -q '"source":"dreamteam"' "$QLOG"; } && pass "speak.sh tags the queue item source=dreamteam by default" || fail "default source tag (qlog: $(cat "$QLOG" 2>/dev/null))"

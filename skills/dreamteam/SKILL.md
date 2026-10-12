@@ -676,6 +676,7 @@ or need to give me info that i really need, or thery really need info that i tru
 ```
 1. gnome-speaks   REACHES HIM NOW, if he is at the desk.
                   POST http://127.0.0.1:7710/speak  {"text":"...","source":"<agent-name>"}
+                  curl -s -K ~/.config/gnome-speaks/curl.conf -X POST ... (the token, gnome-speaks #186)
                   ⛔ never "interrupt": true -- it flushes other agents' queues
 2. SLACK          DURABLE. The ONLY one that survives him being away, and the only
                   one he can come back to hours later. DM: U04GRDBE2UC
@@ -692,6 +693,7 @@ or need to give me info that i really need, or thery really need info that i tru
 > **JP, 2026-09-06: *"if they are speaking they need to use the gnome-speaks queue"*.**
 > ```
 > ✅ ALWAYS   POST http://127.0.0.1:7710/speak   {"text":"...","source":"<agent-name>"}
+>             with curl -s -K ~/.config/gnome-speaks/curl.conf (per-install token, never in argv)
 > ⛔ NEVER    speak.py directly -- a PreToolUse hook BLOCKS it
 >             (~/.claude/hooks/gnome-speaks-guard.sh)
 > ⛔ NEVER    "interrupt": true -- it flushes OTHER agents' queues
@@ -1142,7 +1144,9 @@ your name. It resolves the voice and **POSTs to the gnome-speaks queue** (`.spee
 default `http://127.0.0.1:7710/speak`) tagged with `--source`, so every gate JP relies on applies:
 **quiet hours, video-call mute, the extension master switch**, FIFO serialization, the chronicle.
 A **503 is the gate working — the line is dropped silently by design**; check `state/voice.log`
-for the reason. The direct `tts.py` engine chain (#17) runs only when the queue is unreachable
+for the reason. It sends the per-install token (gnome-speaks #186 phase 2) from
+`~/.config/gnome-speaks/token` as `X-Speaks-Token`, through curl's stdin config, never argv; a
+**401** means the service requires a token this host's file doesn't hold (logged, silent). The direct `tts.py` engine chain (#17) runs only when the queue is unreachable
 **and** `.speech.directFallback` is true (default false). It **detaches** (returns instantly,
 never blocks a hook or a turn). Use your persona's **plain `*Neural`** id
 (the `DragonHD` ids 400 through the CLI in this region). Don't narrate every step — voice is
