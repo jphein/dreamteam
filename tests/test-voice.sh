@@ -152,16 +152,41 @@ fi
 : > "$QLOG"; : > "$QTOK"
 env DREAMTEAM_CONFIG="$TMP/cfg-queue.json" bash "$SPEAK" "no token line" --voice davis
 { wait_qlines 1 && [ "$(cat "$QTOK")" = "NONE" ]; } && pass "no token file -> no X-Speaks-Token header (the pre-token request)" || fail "tokenless request carried a token ($(cat "$QTOK"))"
-printf 'tok_ABC-123xyz\n' > "$TMP/token"; chmod 600 "$TMP/token"
+TOKV="tok_ABC-123xyz_0123456789abcdefghijKLMN"     # 40 chars of [A-Za-z0-9_-]
+printf '%s\n' "$TOKV" > "$TMP/token"; chmod 600 "$TMP/token"
 : > "$QLOG"; : > "$QTOK"
 env DREAMTEAM_CONFIG="$TMP/cfg-queue.json" SPEAK_TOKEN_FILE="$TMP/token" bash "$SPEAK" "token line" --voice davis
-{ wait_qlines 1 && [ "$(cat "$QTOK")" = "tok_ABC-123xyz" ]; } && pass "token file -> X-Speaks-Token sent (trailing newline stripped)" || fail "token not sent ($(cat "$QTOK"))"
+{ wait_qlines 1 && [ "$(cat "$QTOK")" = "$TOKV" ]; } && pass "token file -> X-Speaks-Token sent (trailing newline stripped)" || fail "token not sent ($(cat "$QTOK"))"
+# The token must NEVER be in curl's argv (/proc/<pid>/cmdline is world-readable):
+# a PATH-stub curl records its argv and stdin, then runs the real curl unchanged.
+REALCURL="$(command -v curl)"; SPY="$TMP/curlspy"; mkdir -p "$SPY"
+cat > "$SPY/curl" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$TMP/curl.argv"
+cat > "$TMP/curl.stdin"
+exec "$REALCURL" "\$@" < "$TMP/curl.stdin"
+SH
+chmod +x "$SPY/curl"; : > "$TMP/curl.argv"; : > "$QLOG"; : > "$QTOK"
+env PATH="$SPY:$PATH" DREAMTEAM_CONFIG="$TMP/cfg-queue.json" SPEAK_TOKEN_FILE="$TMP/token" bash "$SPEAK" "argv line" --voice davis
+if wait_qlines 1 && [ "$(cat "$QTOK")" = "$TOKV" ] && [ -s "$TMP/curl.argv" ] \
+   && ! grep -qF "$TOKV" "$TMP/curl.argv" && grep -qF "$TOKV" "$TMP/curl.stdin" \
+   && grep -q -- '-q -K -' "$TMP/curl.argv"; then
+  pass "the token reaches curl on stdin, never argv (spied curl; -q first so no curlrc can trace it)"
+else
+  fail "token argv check (argv: $(sed "s/$TOKV/<TOKEN>/g" "$TMP/curl.argv" 2>/dev/null | head -c 300))"
+fi
+for bad in "short_token" "tok_ABC-123xyz 0123456789abcdefghijKLMN" "$(printf 'x%.0s' $(seq 1 257))"; do
+  printf '%s\n' "$bad" > "$TMP/badlen"
+  : > "$QLOG"; : > "$QTOK"
+  env DREAMTEAM_CONFIG="$TMP/cfg-queue.json" SPEAK_TOKEN_FILE="$TMP/badlen" bash "$SPEAK" "badlen line" --voice davis
+  { wait_qlines 1 && [ "$(cat "$QTOK")" = "NONE" ]; } && pass "an invalid token file (${#bad} chars) is not sent, not trimmed into one" || fail "invalid token file sent: $(cat "$QTOK" | head -c 60)"
+done
 printf 'bad;token"x\n' > "$TMP/badtoken"
 : > "$QLOG"; : > "$QTOK"
 env DREAMTEAM_CONFIG="$TMP/cfg-queue.json" SPEAK_TOKEN_FILE="$TMP/badtoken" bash "$SPEAK" "bad token line" --voice davis
 { wait_qlines 1 && [ "$(cat "$QTOK")" = "NONE" ]; } && pass "a token file with unexpected characters is not sent (no curl-config injection)" || fail "bad token was sent ($(cat "$QTOK"))"
-grep -q 'printf "header = ' "$SPEAK" && ! grep -qE 'curl[^|]*X-Speaks-Token' "$SPEAK" \
-  && pass "the token reaches curl through stdin (-K -), never argv" || fail "speak.sh may put the token on curl's command line"
+grep -q 'printf "header = ' "$SPEAK" && ! grep -qE 'curl[^|]*(X-Speaks-Token|Authorization)' "$SPEAK" \
+  && pass "lint: no curl line in speak.sh carries a token header in argv" || fail "speak.sh may put the token on curl's command line"
 : > "$QLOG"; : > "$QTOK"; echo 401 > "$QCODE"; : > "$TMP/state/voice.log"
 env DREAMTEAM_CONFIG="$TMP/cfg-queue.json" SPEAK_TOKEN_FILE="$TMP/token" bash "$SPEAK" "refused line" --voice davis
 if wait_qlines 1 && no_rec && { for _ in $(seq 1 30); do grep -q 'refused 401' "$TMP/state/voice.log" 2>/dev/null && break; sleep 0.1; done; grep -q 'refused 401: token sent but wrong' "$TMP/state/voice.log"; }; then

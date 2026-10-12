@@ -186,14 +186,25 @@ case "$TIMEOUT" in ''|*[!0-9]*) TIMEOUT=180 ;; esac      # 3) default
 # ($TIMEOUT is the sole exception — a validated integer, baked in at construction.)
 CHILD='payload=$1; url=$2; direct=$3; logf=$4; tokf=$5; text=$6; py=$7; tts=$8; n=$9; shift 9
 vlog(){ printf "%s %s | %s\n" "$(date +%FT%T)" "$1" "$(printf "%s" "$text" | head -c 80)" >> "$logf" 2>/dev/null || true; }
+set +x   # never trace the token, whatever the environment exported
 tok=""
-[ -r "$tokf" ] && tok=$(head -c 256 "$tokf" 2>/dev/null | tr -d "[:space:]")
-case "$tok" in *[!A-Za-z0-9_-]*) vlog "token file holds unexpected characters -- not sent"; tok="" ;; esac
+# The WHOLE file is validated (only the trailing newline is dropped): a file
+# holding anything but 32-256 of [A-Za-z0-9_-] is not sent, never trimmed into
+# something sendable. 300 bytes is enough to see an over-long one.
+[ -r "$tokf" ] && tok=$(head -c 300 "$tokf" 2>/dev/null)
+case "$tok" in
+  "") ;;
+  *[!A-Za-z0-9_-]*) vlog "token file holds unexpected characters -- not sent"; tok="" ;;
+  *) if [ "${#tok}" -lt 32 ] || [ "${#tok}" -gt 256 ]; then
+       vlog "token file is not 32-256 characters -- not sent"; tok=""; fi ;;
+esac
 if command -v curl >/dev/null 2>&1; then
   # printf is a builtin: the token reaches curl through the pipe, never argv.
+  # -q FIRST: no ~/.curlrc, so a trace/verbose setting there cannot write the
+  # header into $code or a trace file.
   # No token = an empty config on stdin = the pre-token request, byte for byte.
   code=$( { [ -n "$tok" ] && printf "header = \"X-Speaks-Token: %s\"\n" "$tok"; } |
-         curl -K - -s -o /dev/null -w "%{http_code}" -m 4 -H "Content-Type: application/json" \
+         curl -q -K - -s -o /dev/null -w "%{http_code}" -m 4 -H "Content-Type: application/json" \
            -X POST --data-binary "$payload" "$url" 2>/dev/null); rc=$?
   if [ "$rc" -eq 0 ] && [ -n "$code" ]; then
     case "$code" in
