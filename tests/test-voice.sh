@@ -175,6 +175,18 @@ if wait_qlines 1 && [ "$(cat "$QTOK")" = "$TOKV" ] && [ -s "$TMP/curl.argv" ] \
 else
   fail "token argv check (argv: $(sed "s/$TOKV/<TOKEN>/g" "$TMP/curl.argv" 2>/dev/null | head -c 300))"
 fi
+# The token goes to loopback queue URLs only: 0.0.0.0 reaches the same fake
+# server on Linux but is not a loopback literal, and userinfo is refused.
+for qurl in "http://0.0.0.0:$QPORT/speak" "http://127.0.0.1:1@127.0.0.1:$QPORT/speak"; do
+  printf '{"speech":{"ttsPath":"%s","queueUrl":"%s"}}\n' "$TMP/tts.py" "$qurl" > "$TMP/cfg-nonloop.json"
+  : > "$QLOG"; : > "$QTOK"; : > "$TMP/state/voice.log"
+  env DREAMTEAM_CONFIG="$TMP/cfg-nonloop.json" SPEAK_TOKEN_FILE="$TMP/token" bash "$SPEAK" "nonloop line" --voice davis
+  if wait_qlines 1 && [ "$(cat "$QTOK")" = "NONE" ] && grep -q "token withheld" "$TMP/state/voice.log"; then
+    pass "token withheld from a non-loopback queue url ($qurl)"
+  else
+    fail "token sent to $qurl ($(cat "$QTOK" | head -c 60))"
+  fi
+done
 for bad in "short_token" "tok_ABC-123xyz 0123456789abcdefghijKLMN" "$(printf 'x%.0s' $(seq 1 257))"; do
   printf '%s\n' "$bad" > "$TMP/badlen"
   : > "$QLOG"; : > "$QTOK"
@@ -195,6 +207,9 @@ else
   fail "401 handling (log: $(cat "$TMP/state/voice.log" 2>/dev/null))"
 fi
 echo 200 > "$QCODE"
+# Across every token case above, voice.log never held the token itself.
+! grep -rqF "$TOKV" "$TMP/state" && pass "the token never reaches voice.log or any state file" \
+  || fail "the token leaked into $TMP/state"
 
 : > "$QLOG"
 env DREAMTEAM_CONFIG="$TMP/cfg-queue.json" bash "$SPEAK" "default tag" --voice davis

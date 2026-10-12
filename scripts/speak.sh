@@ -198,6 +198,15 @@ case "$tok" in
   *) if [ "${#tok}" -lt 32 ] || [ "${#tok}" -gt 256 ]; then
        vlog "token file is not 32-256 characters -- not sent"; tok=""; fi ;;
 esac
+# The token only ever goes to THIS host: a queueUrl naming another machine
+# would carry it across the LAN in plain HTTP (and hand it to that service).
+# Loopback literals only, no userinfo (http://127.0.0.1:1@evil/ is evil).
+case "$url" in
+  *@*) [ -n "$tok" ] && vlog "queue url carries userinfo -- token withheld"; tok="" ;;
+  http://127.0.0.1:*|http://127.0.0.1/*|http://localhost:*|http://localhost/*|http://\[::1\]:*|http://\[::1\]/*) ;;
+  https://127.0.0.1:*|https://127.0.0.1/*|https://localhost:*|https://localhost/*|https://\[::1\]:*|https://\[::1\]/*) ;;
+  *) [ -n "$tok" ] && vlog "queue url is not loopback -- token withheld"; tok="" ;;
+esac
 if command -v curl >/dev/null 2>&1; then
   # printf is a builtin: the token reaches curl through the pipe, never argv.
   # -q FIRST: no ~/.curlrc, so a trace/verbose setting there cannot write the
