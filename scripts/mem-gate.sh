@@ -62,7 +62,7 @@ BUDGET=$(( HEADROOM / PER_AGENT )); [ "$BUDGET" -lt 0 ] && BUDGET=0
 block() {
   {
     echo "🚫 DREAMTEAM MEMORY GATE — spawn blocked: $1"
-    echo "   avail=${AVAIL}MiB  swap_used=${SWAP_USED}MiB  agents=${2:-?}  budget=${BUDGET} more"
+    echo "   avail=${AVAIL}MiB  swap_used=${SWAP_USED}MiB  agents=${2:-not counted (RAM block fires before the count)}  budget=${BUDGET} more"
     echo "   (per_agent=${PER_AGENT}  host_reserve=${HOST_RESERVE}  balloon_reserve=${BALLOON}  floor=${MIN_AVAIL}${LOCAL_NOTE})"
     echo "   Recover headroom: let in-flight agents finish + merge, reuse an idle teammate"
     echo "   (/dreamteam-roster), close Waydroid (waydroid session stop) + the browser, or"
