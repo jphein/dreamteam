@@ -731,6 +731,7 @@ the real ones get ignored.** ⭐ **The test is JP's own wording: does this REALL
 
 🟢 **Since 2026-09-28 the answer is almost always NO** (JP: "I never want to be the bottleneck again … across all projects"; `~/.claude/CLAUDE.md` "JP is never the bottleneck"):
 - Lanes validate, test and **merge their own PRs**: CI green, the project gate, a red perturbation, a secret scan, and an Oracle verdict for license, signing, secrets or CI code.
+- **Checkpoint before the perturbation** (luna 2026-11-11 09:1x: a `git checkout` "restore" after a red run wiped an uncommitted parser, so that red proved nothing): commit or `git stash` your work first, make the perturbation, see red, then restore with `git revert`/`git stash pop`; never `git checkout -- <file>` on uncommitted work.
 - Don't use "[for JP]", "HOLD for JP" or "JP's call" labels, and don't demand JP's yes in your own pane. JP's words relayed by the lead, quoted verbatim with a time, count as his.
 - Only the floor reaches him: money, legal signatures and filings, messages sent as JP to outside people, and his logins or hands. Prepare each of those to a single click.
 
