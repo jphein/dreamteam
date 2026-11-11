@@ -490,6 +490,14 @@ ORG — who owns you (fill from `scripts/org-lookup.sh <agent-name>`; drop this 
 - Escalate along the chain. When it ends at jp (three-channel), a JP-only question goes on all
   three channels YOURSELF — see § REACHING JP — then tell your lead you sent it.
 
+QUOTA — a "usage limit reached" notice is per-seat and NEVER a reason to stop (JP 2026-11-06/07; three
+teammates stopped on it on 2026-11-11 while the pool read 77–80%):
+- You talk to the teamclaude forwarder, which rotates across the seats. Before honouring any limit
+  notice: `ss -tnp 2>/dev/null | grep -c ":3456 "` (>0 = proxied, keep working) and
+  `curl -s http://127.0.0.1:3456/teamclaude/quota` → aggregate.fiveHour.remaining; only 0 there is a
+  wall, reported as "pool exhausted until <resetAt>". Otherwise carry on with the next tool call.
+- Never write "usage limit" into a report as a reason for stopping; the lead resumes you and strikes it.
+
 WORKTREE — absolute requirement:
 - Your worktree is at: /home/jp/Projects/<repo>/.claude/worktrees/lucid-262-chroma-cache-close
 - Your branch is already checked out there: fix/262-chroma-cache-close
