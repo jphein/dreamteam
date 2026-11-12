@@ -10,7 +10,7 @@ before any commit.
 
 | Backend | API | Needs | Status |
 |---|---|---|---|
-| Ollama on a desktop GPU box (RTX 2080 Ti, 11 GiB, Turing sm_75) | Ollama `/api/generate`, `/api/tags` | Ollama >= 0.40 as a user unit; host and model in the private overlay `~/.config/dreamteam/local.json` on each consumer; the box's firewall allows only the consumer host | **live 2026-11-12**: `qwen3.5:9b-q4_K_M` (6.6 GB, all in VRAM, 16k context, unloads after 5 idle minutes) |
+| Ollama on a desktop GPU box (RTX 2080 Ti, 11 GiB, Turing sm_75) | Ollama `/api/generate`, `/api/tags` | Ollama >= 0.40 as a user unit; host and model in the private overlay `~/.config/dreamteam/local.json` on each consumer; the box's firewall allows only the consumer host | **live 2026-11-12**: `qwen3.5:9b-q4_K_M` (6.6 GB, all in VRAM, 16k context, unloads after 5 idle minutes); 61-65 tok/s, summaries pass, code fails (table below) |
 | Ollama embeddings | `/api/embeddings` | `nomic-embed-text:v1.5` pulled on the same box | not pulled yet: `--embed` exits 3 and the caller falls back |
 | OpenAI-compatible llama-server (a server GPU, qwen3.6-35B-A3B) | `/v1/chat/completions` | an adapter in `local-model.sh` (it speaks Ollama only) and the server's API key | backlog: the server already serves the palace's dream job; no adapter yet |
 
@@ -24,6 +24,16 @@ Picked by fit first, then quality, then freshness, because the card is shared wi
 3. **Qwen3.6-35B-A3B (Apr 2026) with experts offloaded to the CPU.** The strongest that runs, but its
    experts would sit in 12-15 GB of the desktop's RAM and load its 8-core CPU while someone works.
    Rejected for a shared desktop; it stays on the server GPU.
+
+**Measured 2026-11-12 09:43** (Ollama 0.40.16, `num_ctx` 16384, temperature 0, thinking off, one request):
+
+| Probe | Generation | Prompt | VRAM | Verdict |
+|---|---|---|---|---|
+| Summarise a 1,676-token README into 5 bullets | 64.7 tok/s | 2,104 tok/s | 7.8 GB loaded (1.0 GB before), 3.2 GB free | **pass**: 5 accurate bullets, 267 tokens |
+| Write an ISO-8601 duration parser and 5 pytest tests | 61.0 tok/s | 467 tok/s | same | **fail**: 3,826 tokens for "code only"; its regex has 6 groups and the code unpacks 7, so every call raises |
+
+For comparison, the server GPU's qwen3.6-35B-A3B generates about 50 tok/s. The 9B is faster, but only
+good enough for summaries and triage. Keep code generation and review on the larger model.
 
 Too big for this card: Qwen3.8-27B (dense, 18 GB at Q4), Qwen3.8-Flash-Next (125-180B MoE), Gemma 4
 26B/31B.
