@@ -158,3 +158,7 @@ CLAUDE_PLUGIN_ROOT=$PWD scripts/mem-budget.sh   # set CLAUDE_PLUGIN_ROOT so it r
   the first draft of the mempalace#497 pre-mutation hook, whose README argued
   the non-existent ceiling was a safety backstop.
 - The dream-name roster is a DERIVED artifact. Source of truth: lexicon's `vocabularies/dreams.yaml` (`dreams.roster`). Add names there, then regenerate the `ROSTER=` regex in `scripts/spawn-standards.sh` with the command in the comment above it — `tests/test-standards.sh` fails on drift. New names must be single lowercase tokens (the gate splits the agent name on the FIRST hyphen) and must not collide with JP's tmux session names.
+
+## Stack choices (STACK-CHOICES rule)
+
+- **Local model lane: Ollama + `qwen3.5:9b-q4_K_M` on the desktop 2080 Ti** (2026-11-12). Ollama because `local-model.sh` speaks its API (config change only, no adapter). That model because it is the newest that fits an 11 GiB Turing card entirely in VRAM with headroom left for the desktop and NVENC. The stronger MoE models (qwen3.6-35B-A3B) need their experts in the desktop's RAM and CPU, so they stay on the server GPU. Shortlist, sources and limits: `docs/BACKENDS.md`. Host and address live in a private per-host overlay, never in this public repo.
