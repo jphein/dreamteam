@@ -58,7 +58,7 @@ CFG_ABSENT="$TMP/none.json"; printf '%s' '{"memory":{"maxAgents":36}}' > "$CFG_A
 # runlm <cfg> <daemon up|down> [args...]  → sets OUT (stdout) + RC; resets $REC.
 runlm(){
   : > "$REC"
-  OUT="$(env FAKE_DAEMON="$2" PATH="$BIN:$PATH" DREAMTEAM_CONFIG="$1" \
+  OUT="$(env FAKE_DAEMON="$2" PATH="$BIN:$PATH" DREAMTEAM_CONFIG="$1" DREAMTEAM_LOCAL_OVERLAY="${OVERLAY_FILE:-$TMP/no-overlay.json}" \
          CLAUDE_PLUGIN_ROOT="$ROOT" bash "$LM" "${@:3}" </dev/null 2>/dev/null)"
   RC=$?
 }
@@ -146,6 +146,22 @@ OUT="$(printf 'STDIN-PROMPT-42' | env FAKE_DAEMON=up PATH="$BIN:$PATH" \
 { [ "$RC" -eq 0 ] && [ "$OUT" = "MOCK COMPLETION" ] && grep -q 'STDIN-PROMPT-42' "$REC"; } \
   && pass "prompt on stdin → exit 0, forwarded to the request body" \
   || fail "stdin prompt (rc=$RC out=[$OUT] rec: $(cat "$REC" 2>/dev/null))"
+
+# §14  a private overlay supplies host + model (beats config), env still beats the overlay,
+#      and the overlay can never arm a lane that config leaves off
+OVL="$TMP/overlay.json"; printf '%s' '{"host":"http://gpu-box.example:11434","model":"overlay-model:9b","enabled":true}' > "$OVL"
+OVERLAY_FILE="$OVL" runlm "$CFG_ON" up "hi"
+{ [ "$RC" -eq 0 ] && grep -q 'gpu-box.example:11434/api/generate' "$REC" && grep -q 'overlay-model:9b' "$REC"; } \
+  && pass "overlay host + model reach the request (overlay beats config)" \
+  || fail "overlay host/model (rc=$RC rec: $(cat "$REC" 2>/dev/null))"
+: > "$REC"
+env FAKE_DAEMON=up DREAMTEAM_LOCAL_MODEL=env-wins:1b DREAMTEAM_LOCAL_OVERLAY="$OVL" PATH="$BIN:$PATH" \
+    DREAMTEAM_CONFIG="$CFG_ON" CLAUDE_PLUGIN_ROOT="$ROOT" bash "$LM" "hi" </dev/null >/dev/null 2>&1
+grep -q 'env-wins:1b' "$REC" && pass "env model beats the overlay" || fail "env vs overlay (rec: $(cat "$REC"))"
+OVERLAY_FILE="$OVL" runlm "$CFG_OFF" up "hi"
+{ [ "$RC" -eq 3 ] && [ ! -s "$REC" ]; } \
+  && pass "overlay enabled:true cannot arm a lane config leaves off" \
+  || fail "overlay must not arm (rc=$RC)"
 
 echo "─────────────────────────────────────────────────────────────────"
 echo "SUMMARY: $PASS passed, $FAIL failed, $((PASS+FAIL)) total"

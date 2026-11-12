@@ -32,7 +32,7 @@
 # Config lane (.local in config.json) + env overrides (env WINS over config):
 #   enabled    (bool, DEFAULT false)  DREAMTEAM_LOCAL_ENABLED     — only literal true arms it
 #   host       (url)                  DREAMTEAM_LOCAL_HOST         default http://localhost:11434
-#   model      (str)                  DREAMTEAM_LOCAL_MODEL        default qwen2.5:14b-instruct-q4_K_M
+#   model      (str)                  DREAMTEAM_LOCAL_MODEL        default qwen3.5:9b-q4_K_M
 #   embedModel (str)                  DREAMTEAM_LOCAL_EMBED_MODEL  default nomic-embed-text:v1.5
 #   timeoutSec (int)                  DREAMTEAM_LOCAL_TIMEOUT      default 120 (per-request curl cap)
 set -uo pipefail
@@ -72,8 +72,14 @@ fi
 # EMPTY/invalid JSON (jq exits 0 but prints nothing — the `//` default never
 # fires on zero input), or an empty/null value. More defensive than mem-budget's
 # getcfg, which relies on jq erroring; an empty config file would slip past that.
+# A private per-host overlay (a flat JSON object: host, model, embedModel, timeoutSec) wins over
+# config.json, so a host-specific address (a GPU box on the LAN) never lands in this public repo.
+# It never arms the lane: `enabled` stays env/config only. Order: env > overlay > config > default.
+OVERLAY="${DREAMTEAM_LOCAL_OVERLAY:-${XDG_CONFIG_HOME:-$HOME/.config}/dreamteam/local.json}"
 getcfg() {
-  local v; v="$(jq -r --arg k "$1" --arg d "$2" '.local[$k] // $d' "$CFG" 2>/dev/null)"
+  local v=""
+  [ -r "$OVERLAY" ] && v="$(jq -r --arg k "$1" '.[$k] // empty | tostring' "$OVERLAY" 2>/dev/null)"
+  [ -z "$v" ] && v="$(jq -r --arg k "$1" --arg d "$2" '.local[$k] // $d' "$CFG" 2>/dev/null)"
   [ -n "$v" ] && printf '%s' "$v" || printf '%s' "$2"
 }
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -94,7 +100,7 @@ if [ -z "$MODEL" ]; then
   if [ "$MODE" = embed ]; then
     MODEL="${DREAMTEAM_LOCAL_EMBED_MODEL:-$(getcfg embedModel nomic-embed-text:v1.5)}"
   else
-    MODEL="${DREAMTEAM_LOCAL_MODEL:-$(getcfg model qwen2.5:14b-instruct-q4_K_M)}"
+    MODEL="${DREAMTEAM_LOCAL_MODEL:-$(getcfg model qwen3.5:9b-q4_K_M)}"
   fi
 fi
 [ -z "$TIMEOUT" ] && TIMEOUT="${DREAMTEAM_LOCAL_TIMEOUT:-$(getcfg timeoutSec 120)}"
