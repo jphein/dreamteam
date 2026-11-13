@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# headless-chrome — run headless Chrome/Chromium on a fleet host without the fleet's
+# browser policy getting in the way. Usage: headless-chrome [chrome args…]
+#
+# Why (TOOLING-FRICTION 2026-11-13, dreamteam #184): wakizashi carries a managed
+# ExtensionInstallForcelist (Claude in Chrome fcoeoabgfenejglbffodgkkbkcdhcgfn +
+# Bitwarden nngceckbapebfimnlniiiahkandclblb) in
+#   /etc/opt/chrome/policies/managed/extensions.json   (2026-10-03 17:20:42)
+#   /etc/brave/policies/managed/extensions.json        (2026-10-03 17:20:42)
+# Managed policy applies to EVERY profile, a fresh --user-data-dir included, so a
+# "clean profile" is not policy-free. Claude in Chrome's first-run claude.ai OAuth tab
+# takes the foreground, the caller's tab is backgrounded and gets no
+# requestAnimationFrame, and rAF-based waits hang (emberburrito pwa_check, 2026-11-13).
+# --disable-extensions is the lever that worked there (169/169 in 36 s). A truly
+# policy-free browser would need a build that reads no /etc policy dir (e.g. a
+# chrome-for-testing / chrome-headless-shell binary): set HEADLESS_CHROME_BIN to it.
+#
+# What it does: runs the first of $HEADLESS_CHROME_BIN, google-chrome,
+# google-chrome-stable, chromium, chromium-browser with
+#   --headless=new          (unless the caller passed any --headless…)
+#   --disable-extensions --no-first-run
+#   --user-data-dir=<fresh> (unless the caller passed one; under $XDG_RUNTIME_DIR when
+#                            it is a writable dir, else ~/.cache; removed afterwards)
+# prepended to the caller's args. Chrome runs as a CHILD, not exec'd, so the fresh
+# profile can be removed when it exits; TERM/INT/HUP to this wrapper are forwarded to
+# Chrome. (A SIGKILL to the wrapper cannot be forwarded; send TERM.)
+# HEADLESS_CHROME_DRY_RUN=1 prints the argv, one per line, and runs nothing.
+# Exit: Chrome's status; 127 when no browser is found.
+set -uo pipefail
+
+browser=""
+for b in ${HEADLESS_CHROME_BIN:-} google-chrome google-chrome-stable chromium chromium-browser; do
+  if p=$(command -v -- "$b" 2>/dev/null) && [ -n "$p" ]; then browser=$p; break; fi
+done
+[ -n "$browser" ] || { echo "headless-chrome: no google-chrome/chromium on PATH (or set HEADLESS_CHROME_BIN)" >&2; exit 127; }
+
+has_headless=0; has_profile=0
+for a in "$@"; do
+  case "$a" in
+    --headless|--headless=*) has_headless=1 ;;
+    --user-data-dir|--user-data-dir=*) has_profile=1 ;;
+  esac
+done
+
+pre=()
+[ "$has_headless" = 1 ] || pre+=(--headless=new)
+pre+=(--disable-extensions --no-first-run)
+made=""
+if [ "$has_profile" = 0 ]; then
+  base=${XDG_RUNTIME_DIR:-}
+  { [ -n "$base" ] && [ -d "$base" ] && [ -w "$base" ]; } || base="$HOME/.cache"
+  if [ "${HEADLESS_CHROME_DRY_RUN:-}" = 1 ]; then
+    pre+=("--user-data-dir=$base/headless-chrome.XXXXXX")
+  else
+    mkdir -p -- "$base" && made=$(mktemp -d "$base/headless-chrome.XXXXXX") \
+      || { echo "headless-chrome: cannot create a profile dir under $base" >&2; exit 1; }
+    pre+=("--user-data-dir=$made")
+  fi
+fi
+
+if [ "${HEADLESS_CHROME_DRY_RUN:-}" = 1 ]; then
+  printf '%s\n' "$browser" "${pre[@]}" "$@"
+  exit 0
+fi
+
+"$browser" "${pre[@]}" "$@" &
+child=$!
+trap 'kill -TERM "$child" 2>/dev/null' TERM INT HUP
+rc=0
+wait "$child"; rc=$?
+while kill -0 "$child" 2>/dev/null; do wait "$child"; rc=$?; done   # a trapped signal ends wait early
+[ -n "$made" ] && rm -rf -- "$made"
+exit "$rc"
