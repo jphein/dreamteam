@@ -1034,6 +1034,15 @@ monitor relaying hits. Its spawn prompt must cover all four parts:
    file, replies `STOPPED <name> <mark>`, and ends. Prose such as "loop until I say stop" is
    not a protocol.
 
+**Reference implementation (#81): `scripts/roster-watch.sh`.** A standing manager runs it
+under `Monitor` as its roster-health watcher and heartbeat: `Monitor` on
+`scripts/roster-watch.sh --until <epoch>` (team pinned on the first poll, SELF from the
+agent id). It prints only `SETTLED-IDLE` (idle for `--debounce` 4 consecutive polls; a
+VERIFY-FIRST prompt naming `pane-peek.sh`, never a conclusion), `AGENT-DEAD`,
+`MEMBERSHIP-CHANGE`, `ROSTER-POLL-ERROR` and a final `WATCH-END`. It never flags its own
+name (that would be a self-wake loop) and baseline-seeds agents already idle at launch.
+Stop it with `TaskStop` or `--until`; resume by re-arming it.
+
 ## Remote Build Lane (familiar) — heavy compiles leave the orchestrator's box
 
 **JP directive 2026-08-15, the day two 24G build scopes plus the desktop OOM-killed the
