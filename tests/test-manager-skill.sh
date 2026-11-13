@@ -72,6 +72,9 @@ present 'scratch/<team>/roster\.md'                 "R3: roster.md lives under s
 present '\| Agent ID \| Dream Name \| Role \|'      "roster: role column added to the table"
 present 'Create-if-missing \(#84\)'                 "#84: manager creates roster.md if the handoff file is absent"
 present 'sole-editor handoff in the main tree \(#80\)' "#80: sole-editor pattern for a user-open main-tree file"
+present 'Watcher agents — the contract \(#79\)'      "#79: watcher-agent contract section"
+present 'Poll idiom: a waiter that exits on the change' "#79: canonical poll idiom"
+present 'literal message \*\*`STOP <name>`\*\*'      "#79: standard stop protocol"
 present 'Commit locally, never push, while the user'"'"'s flow is live' "#80: no push during a live user flow"
 
 # Startup: managers before the worker wave

@@ -1008,6 +1008,32 @@ spawn whenever the target team has a reusable idle agent, and names the best-fit
 > Reinforces `feedback_reuse_idle_agents.md` and `feedback_never_shutdown_active_agents.md`:
 > keep agents alive AND recycle them. Idle agents are a resource, not waste.
 
+## Watcher agents — the contract (#79)
+
+A **watcher** is a long-running background agent that waits for something to change (a
+transcript, a log, a PR, a file) and acts on each change: a scribe keeping a doc in sync, a
+monitor relaying hits. Its spawn prompt must cover all four parts:
+
+1. **Detached spawn.** An `Agent()` subagent runs in the background and a `team_name` dream
+   agent runs in its own tmux pane; neither blocks the orchestrator. If a spawn *does* block
+   the lead, that is a bug: stop it and report it, never "wait it out".
+2. **Poll idiom: a waiter that exits on the change.** Foreground `sleep` is blocked. Launch a
+   short script with `run_in_background` that loops (`sleep` inside the script is fine) until
+   the watched thing changes (file size or mtime past a recorded mark, a new line, a state
+   flip), then **exits**. The exit re-invokes the watcher, which reads the change, acts,
+   records the new mark in a state file, and launches the next waiter. `Monitor` with an
+   until-loop is the same shape. Measure the output (size, line count), not the process
+   table. Never loop on GitHub CI reads: the no-poll guard blocks it, and the GraphQL quota
+   is per account. Use a long heartbeat (1200 s+) only as a fallback for a waiter that hangs.
+3. **Resume** with `SendMessage({to:"<name>"})`. The watcher keeps its mark in a state file
+   (`scratch/<task>/<name>.state`), so a resumed or respawned watcher continues from its mark,
+   never from zero.
+4. **Stop protocol.** Every watcher has (a) a **deadline** written in its prompt, after which
+   it stops by itself, and (b) the literal message **`STOP <name>`**. On that message the
+   watcher `TaskStop`s its waiter, writes its final mark and a one-line summary to its scratch
+   file, replies `STOPPED <name> <mark>`, and ends. Prose such as "loop until I say stop" is
+   not a protocol.
+
 ## Remote Build Lane (familiar) — heavy compiles leave the orchestrator's box
 
 **JP directive 2026-08-15, the day two 24G build scopes plus the desktop OOM-killed the
