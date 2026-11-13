@@ -58,6 +58,11 @@ The orchestrator is **Sandman** — the one who brings the dreams. Uses Davis vo
 ```
 0. Pre-flight       Orchestrator MUST be inside tmux — else the whole team dies
                     with the terminal. `echo ${TMUX:-NOT-IN-TMUX}` — see below.
+                    AND its cwd must be a TRUSTED workspace: teammate panes start
+                    there and an untrusted one parks each at Claude Code's "Quick
+                    safety check" ("No, exit" selected). Trust on a parent does NOT
+                    cover a git repo below it. spawn-standards blocks it; roster-watch
+                    and agent-activity flag a stuck pane as TRUST-DIALOG / STUCK.
 0.1 Mem pre-flight  Memory-aware admission control. Run `/dreamteam-status` for the
                     live budget (tunables live in config.json, not here). Shape:
                     MAX = min(count cap, (avail − host − balloon) / perAgent). The

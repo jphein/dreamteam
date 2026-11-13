@@ -232,6 +232,7 @@ def status_base(r):
     if v.startswith("DEAD"): return "DEAD"
     if "no-pane" in v:       return "no-pane"
     ps = r.get("pane_state")
+    if ps == "TRUST-DIALOG": return "STUCK"   # Claude Code's trust dialog: not idle, not working
     if ps == "ACTIVE" or v.startswith("ACTIVE"): return "ACTIVE"
     if ps == "IDLE"   or v.startswith("IDLE"):   return "IDLE"
     return (v.split() or ["?"])[0]

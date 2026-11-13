@@ -96,6 +96,60 @@ if [ -n "$TEAM" ] && [ -z "${TMUX:-}" ]; then
   exit 2
 fi
 
+# Rule 0b — the lead's cwd must be a TRUSTED workspace (2026-11-13). Teammate panes start in the
+# lead's cwd; in an untrusted one each pane stops at Claude Code's "Quick safety check" dialog with
+# "No, exit" pre-selected and waits there silently (10:26–11:06: five fixers spawned from
+# /home/jp/.claude sat 40 min). Trust rules as MEASURED on 2.1.323 (lucid, tmux probes, 11-13):
+#   * outside git, trust is inherited from any trusted ancestor (a dir under trusted $HOME: no dialog);
+#   * inside a git checkout it is NOT inherited across the repository root: a fresh repo under trusted
+#     ~/srv prompted, and so did a worktree of that untrusted repo; a worktree of a TRUSTED repo did not.
+# So: in git, trusted iff some dir from cwd up to the checkout root, or the main repo root, has
+# projects[<dir>].hasTrustDialogAccepted == true in ~/.claude.json; outside git, cwd or any ancestor.
+# Unknown (no cwd, unreadable config, jq error) fails OPEN: a guard bug must not block every spawn.
+cwd_trust() {   # 0 trusted · 1 untrusted · 2 unknown; sets TRUST_KEY (the dir to pre-set)
+  local cwd="$1" cj="${DREAMTEAM_CLAUDE_JSON:-$HOME/.claude.json}" top common d rc
+  local -a cands=()
+  TRUST_KEY="$cwd"
+  [ -n "$cwd" ] && [ -d "$cwd" ] && [ -r "$cj" ] || return 2
+  top="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || true)"
+  d="$cwd"
+  while :; do
+    cands+=("$d")
+    { [ -n "$top" ] && [ "$d" = "$top" ]; } && break
+    [ "$d" = / ] && break
+    d="$(dirname "$d")"
+  done
+  if [ -n "$top" ]; then
+    TRUST_KEY="$top"
+    common="$(git -C "$cwd" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+    case "$common" in */.git) cands+=("${common%/.git}"); TRUST_KEY="${common%/.git}" ;; esac
+  fi
+  # The config goes on STDIN: after --args jq reads every word as a string, never as a file
+  # (the draft passed "$cj" there, so jq saw empty input, rc 4 = "unknown", and every spawn passed).
+  jq -e --args '[.projects[$ARGS.positional[]]?.hasTrustDialogAccepted] | any(. == true)' "${cands[@]}" <"$cj" >/dev/null 2>&1
+  rc=$?
+  case $rc in 0) return 0 ;; 1) return 1 ;; *) return 2 ;; esac
+}
+if [ -n "$TEAM" ]; then
+  LEAD_CWD="$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)"
+  cwd_trust "$LEAD_CWD"
+  if [ $? -eq 1 ]; then
+    {
+      echo "🔒 DREAMTEAM SPAWN STANDARDS — teammate spawn blocked: the lead's cwd is not a TRUSTED workspace:"
+      echo "     $LEAD_CWD"
+      echo "   Every teammate pane would start there and stop at Claude Code's 'Quick safety check'"
+      echo "   with 'No, exit' selected, silently (2026-11-13 10:26–11:06: five fixers sat 40 min)."
+      echo "   Trust on a parent dir does NOT cover a git repo below it (measured on 2.1.323)."
+      echo "   Fix one of:"
+      echo "     1. cd into a trusted project first, then spawn; or"
+      echo "     2. pre-set trust (back up ~/.claude.json first), for the repo root:"
+      echo "          projects[\"$TRUST_KEY\"].hasTrustDialogAccepted = true"
+      echo "   Deliberate exception? Add 'STANDARDS-EXEMPT: <reason>' to the prompt."
+    } >&2
+    exit 2
+  fi
+fi
+
 # Rule 1a — teammates must be named.
 if [ -z "$NAME" ]; then
   [ -n "$TEAM" ] && teach "teammate spawned without a name (SendMessage addressing needs one)."

@@ -10,6 +10,11 @@
 #   AGENT-DEAD         status dead (no live process): unreachable, escalate
 #   MEMBERSHIP-CHANGE  an agent joined or left the team
 #   ROSTER-POLL-ERROR  roster.sh returned nothing or invalid JSON
+#   TRUST-DIALOG       an agent's pane shows Claude Code's "Quick safety check" (the lead's cwd
+#                      is not a trusted workspace): it is waiting on a dialog, not working and not
+#                      idle. Announced on the FIRST poll that sees it (no debounce, no baseline
+#                      seed), so at the default 60 s interval it surfaces within 60 s of spawn.
+#                      (2026-11-13 10:26-11:06: five fixers sat at it 40 min, read as idle.)
 #   WATCH-END          the deadline or poll limit was reached (always the last line)
 #
 # Because a Monitor wakes its owner on output, this doubles as the manager's
@@ -31,7 +36,8 @@
 #   --team     defaults to roster.sh's own choice on the first poll, then PINNED
 #              (a newer team appearing mid-watch must not swap the roster under us)
 #   --self     defaults to this process's teammate name (scripts/lib/agent-id.sh)
-# Env seams (tests): DREAMTEAM_ROSTER_CMD replaces scripts/roster.sh.
+# Env seams (tests): DREAMTEAM_ROSTER_CMD replaces scripts/roster.sh;
+#   DREAMTEAM_ACTIVITY_CMD replaces scripts/agent-activity.sh (the pane read, TRUST-DIALOG only).
 set -uo pipefail
 
 ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -44,6 +50,7 @@ INTERVAL="${ROSTER_WATCH_INTERVAL:-60}"
 UNTIL=""
 POLLS=""
 ROSTER_CMD="${DREAMTEAM_ROSTER_CMD:-$ROOT/scripts/roster.sh}"
+ACTIVITY_CMD="${DREAMTEAM_ACTIVITY_CMD:-$ROOT/scripts/agent-activity.sh}"
 
 usage() { sed -n '/^# Usage:/,/^# Env seams/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 need() { [ -n "${2:-}" ] || { echo "roster-watch: $1 needs a value" >&2; exit 22; }; }
@@ -72,7 +79,7 @@ fi
 
 ts() { date +%H:%M:%S; }
 
-declare -A idlecnt idle_reported dead_reported
+declare -A idlecnt idle_reported dead_reported trust_reported
 prevnames=""; first=1; n=0
 
 while :; do
@@ -120,6 +127,21 @@ while :; do
       esac
     done <<< "$rows"
     first=0
+
+    # TRUST-DIALOG: the roster's status cannot see it (the process is alive, the pane shows no
+    # spinner), so read the panes. Once per agent; re-armed when the dialog is gone.
+    stuck="$("$ACTIVITY_CMD" ${TEAM:+--team "$TEAM"} --json 2>/dev/null \
+             | jq -r '.[]? | select(.pane_state == "TRUST-DIALOG") | "\(.name)\t\(.pane // "-")"' 2>/dev/null)"
+    for k in "${!trust_reported[@]}"; do
+      printf '%s\n' "$stuck" | cut -f1 | grep -qxF -- "$k" || unset "trust_reported[$k]"
+    done
+    while IFS=$'\t' read -r name pane; do
+      [ -n "$name" ] || continue
+      [ -n "$SELF" ] && [ "$name" = "$SELF" ] && continue
+      [ "${trust_reported[$name]:-0}" -eq 1 ] && continue
+      echo "TRUST-DIALOG @ $(ts): $name pane $pane shows Claude Code's 'Quick safety check': the lead's cwd is not trusted; it waits there silently. Answer it in the pane (tmux send-keys), or pre-set projects[<cwd>].hasTrustDialogAccepted in ~/.claude.json and respawn"
+      trust_reported[$name]=1
+    done <<< "$stuck"
   fi
 
   if [ -n "$POLLS" ] && [ "$n" -ge "$POLLS" ]; then
