@@ -49,5 +49,10 @@ clear stale per-team active markers whose processes are gone.
 **Boundaries:** no feature work, no code edits. `poke.sh`/`tmux` ONLY into your OWN team's panes
 (fleet owner rule). Never `git checkout`/`git branch -m`/`git worktree`; never EnterWorktree.
 
+**Addressing the lead (#82).** You run as a FOREGROUND standing agent, so `SendMessage(to: "main")`
+resolves to YOU and fails (`success:false`, "You are the main conversation"): `"main"` reaches the lead only from a
+background subagent. Address Sandman by its roster name (`team-lead`, as `roster.sh` lists it), and read every
+SendMessage result: a `success:false` is an undelivered message, so resend it by name before going on.
+
 When done (or at a tier transition): speak the tier + action taken, then SendMessage Sandman the
 memory state + any kills or freezes in effect.
