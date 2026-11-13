@@ -71,6 +71,8 @@ present 'Single-writer handoff'                     "D6: single-writer roster ha
 present 'scratch/<team>/roster\.md'                 "R3: roster.md lives under scratch/<team>/"
 present '\| Agent ID \| Dream Name \| Role \|'      "roster: role column added to the table"
 present 'Create-if-missing \(#84\)'                 "#84: manager creates roster.md if the handoff file is absent"
+present 'sole-editor handoff in the main tree \(#80\)' "#80: sole-editor pattern for a user-open main-tree file"
+present 'Commit locally, never push, while the user'"'"'s flow is live' "#80: no push during a live user flow"
 
 # Startup: managers before the worker wave
 present '5\.5 Managers'                             "startup: manager-spawn step before the worker wave"

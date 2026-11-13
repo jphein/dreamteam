@@ -345,6 +345,24 @@ When you spawn, DO NOT pass `isolation: "worktree"`. The harness will quietly dr
 
 After spawning, run `git worktree list` and `ls .claude/worktrees/`. If the harness has started creating per-agent worktrees automatically, you'll see entries you didn't create. Until that day, treat `isolation: "worktree"` as broken for team agents and create the worktrees yourself.
 
+### Exception — a file the user has OPEN: sole-editor handoff in the main tree (#80)
+
+Worktrees isolate agents that **mutate in parallel**. They are the wrong tool when the output
+is a file the user is watching in the **main** tree (a doc open via `file://`, a live preview,
+a page served from the checkout): the agent's edits land in its worktree and the user never
+sees them. For that case use **sole-editor handoff in the main tree**:
+
+- **Exactly one editor.** The orchestrator stops touching the file the moment it hands it off;
+  one named agent owns it until it hands it back. No second agent, and not the lead, edits it
+  meanwhile, so there is no concurrent `Edit` to collide with.
+- **Commit locally, never push, while the user's flow is live.** A push can start heavy CI (or
+  a deploy) mid-flow. Push once the flow ends, as a normal branch + PR.
+- **Record it in the roster** (Worktree column = `main (sole editor: <file>)`) so the
+  worktree-per-agent check in Step 4 does not flag it as a missing worktree.
+
+**Rule of thumb:** a worktree when agents mutate in parallel AND the output is not a file the
+user has open in the main tree; otherwise sole-editor handoff in the main tree.
+
 ### Step 6.5 — Write the roster file (the ASSIGNMENT layer — MANDATORY, survives compaction)
 
 > Learned 2026-06-29: context compaction wiped the orchestrator's agent roster — 15 agents running, orchestrator couldn't name or reach them. Had to reconstruct from `ps -p <pid> -o args=` on every tmux pane.
