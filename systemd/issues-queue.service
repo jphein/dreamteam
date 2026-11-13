@@ -1,0 +1,7 @@
+[Unit]
+Description=dreamteam: the fix machine's queue file (open issues, dream queue, what waits on JP)
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Projects/dreamteam
+ExecStart=/usr/bin/python3 -I %h/Projects/dreamteam/scripts/issues-queue.py
+Nice=10

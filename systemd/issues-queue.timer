@@ -1,0 +1,8 @@
+[Unit]
+Description=dreamteam: write issues-queue.json nightly at 21:50 (before the 23:30 sweep) and on boot
+[Timer]
+OnCalendar=*-*-* 21:50:00
+OnBootSec=4min
+Persistent=true
+[Install]
+WantedBy=timers.target
