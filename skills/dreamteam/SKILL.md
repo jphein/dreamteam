@@ -53,6 +53,15 @@ The orchestrator is **Sandman** — the one who brings the dreams. Uses Davis vo
   Source of truth is lexicon's `vocabularies/dreams.yaml` (`dreams.roster`); the gate's regex in `scripts/spawn-standards.sh` is a derived copy, and `tests/test-standards.sh` fails on drift. Add new names **there**, then regenerate.
 - **Hypnos** and **Nyx** are reserved fixed-role names — the two standing managers (see § Manager roles). Never hand them to a worker agent; Nyx is deliberately kept out of the worker pool above so she can't be assigned as a fixer.
 
+### Headless Chrome on a fleet host goes through `headless-chrome`
+
+Headless Chrome on a fleet host goes through `headless-chrome` (`scripts/headless-chrome`, installed as
+`~/.local/bin/headless-chrome`). It adds `--headless=new --disable-extensions --no-first-run` and a fresh,
+self-removing `--user-data-dir`, and passes every other argument through. Why: a managed
+`ExtensionInstallForcelist` (wakizashi, since 2026-10-03) installs Claude in Chrome into every profile, a
+fresh one included. Its first-run OAuth tab takes the foreground, the harness tab gets no rAF, and the run
+hangs (TOOLING-FRICTION 2026-11-13). A harness that launches Chrome itself passes `--disable-extensions`.
+
 ## Startup Sequence
 
 ```
