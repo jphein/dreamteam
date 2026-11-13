@@ -55,6 +55,8 @@ cat > "$TMP/ps.snap" <<'EOF'
  1011 node claude --agent-id aCtrl
  1012 node claude --agent-id aNopane
  1013 node claude --agent-id aFall
+ 1014 node claude --agent-id aTrust
+ 1015 node claude --agent-id aProse
 EOF
 cat > "$TMP/bin/ps" <<EOF
 #!/usr/bin/env bash
@@ -102,6 +104,8 @@ s:1.8 1008
 s:1.9 1009
 s:1.10 1010
 s:1.13 1113
+s:1.14 1014
+s:1.15 1015
 EOF
 cat > "$TMP/panes/dreamteam.panes" <<'EOF'
 w:1.0 1011
@@ -131,7 +135,9 @@ cat > "$TMP/teams/faketeam/config.json" <<'EOF'
   {"name":"esc-old","agentId":"aEscOld","isActive":false},
   {"name":"above-control","agentId":"aCtrl","isActive":false},
   {"name":"fallback-x","agentId":"aFall","isActive":false},
-  {"name":"dead-one","agentId":"aDead","isActive":false}
+  {"name":"dead-one","agentId":"aDead","isActive":false},
+  {"name":"trust-stuck","agentId":"aTrust","isActive":false,"joinedAt":1000000000000},
+  {"name":"trust-prose","agentId":"aProse","isActive":false}
 ]}
 EOF
 
@@ -209,6 +215,16 @@ cat > "$TMP/fix/s:1.13.body" <<'B'
 ❯
 B
 
+# trust-stuck: Claude Code's workspace-trust dialog, the REAL capture from a pane on 2.1.323
+# (2026-11-13; only the path is changed). No spinner, so before the check it read IDLE.
+cp "$ROOT/tests/fixtures/trust-dialog-pane.txt" "$TMP/fix/s:1.14.body"
+# trust-prose: an agent TALKING about the dialog (both phrases inline, not the dialog) ⇒ not stuck.
+cat > "$TMP/fix/s:1.15.body" <<'B'
+I added a check for the "Quick safety check" pane: it needs "Yes, I trust this folder" on its own line.
+✻ Wove for 1m
+❯
+B
+
 # ── run ───────────────────────────────────────────────────────────────────────
 run() { DREAMTEAM_TEAMS_DIR="$TMP/teams" DREAMTEAM_TMUX_DIR="$TMP/tmux" \
         DREAMTEAM_PROC="$TMP/proc" PATH="$TMP/bin:$PATH" bash "$SUT" "$@"; }
@@ -282,6 +298,11 @@ case "$(field nopane-idle verdict)" in *"no-pane"*) ok "(5) alive but unresolved
 [ "$(field dead-one team)" = "faketeam" ] && ok "#38-2: DEAD row carries team key (=faketeam)" || bad "#38-2: dead-one team=$(field dead-one team)"
 [ "$(field active-spin team)" = "faketeam" ] && ok "#38-2: alive row carries team key (parity)" || bad "#38-2: active-spin team=$(field active-spin team)"
 [ "$(field dead-one pid)" = "null" ] && ok "#38-2: DEAD row pid=null" || bad "#38-2: dead-one pid=$(field dead-one pid)"
+
+# ── trust dialog (2026-11-13 stall: five fixers sat at it 40 min, read as idle) ──────
+[ "$(field trust-stuck pane_state)" = "TRUST-DIALOG" ] && ok "trust: real 'Quick safety check' capture ⇒ pane TRUST-DIALOG" || bad "trust: trust-stuck pane_state=$(field trust-stuck pane_state)"
+case "$(field trust-stuck verdict)" in "STUCK ⚠trust-dialog"*"since spawn"*) ok "trust: verdict STUCK ⚠ with seconds since spawn";; *) bad "trust: trust-stuck verdict=$(field trust-stuck verdict)";; esac
+[ "$(field trust-prose pane_state)" = "IDLE" ] && ok "trust: prose naming the dialog ⇒ IDLE, not stuck (control)" || bad "trust: trust-prose pane_state=$(field trust-prose pane_state)"
 
 # ── human output ──────────────────────────────────────────────────────────────
 H="$(run --team faketeam)"

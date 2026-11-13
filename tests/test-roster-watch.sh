@@ -29,6 +29,15 @@ c=$(cat "$FIX/n" 2>/dev/null || echo 0); c=$((c + 1)); echo "$c" > "$FIX/n"
 exit 0
 SH
 chmod +x "$STUB"
+# agent-activity.sh stub (the TRUST-DIALOG pane read): serves $FIX/act.<poll>.json, else "[]".
+# Exported for every run below, so no test ever reads real panes or team configs.
+ASTUB="$TMP/activity-stub.sh"
+cat > "$ASTUB" <<'SH'
+#!/usr/bin/env bash
+c=$(cat "$FIX/n" 2>/dev/null || echo 0)
+if [ -f "$FIX/act.$c.json" ]; then cat "$FIX/act.$c.json"; else echo '[]'; fi
+SH
+chmod +x "$ASTUB"; export DREAMTEAM_ACTIVITY_CMD="$ASTUB"
 
 # polls "<spec poll 1>" "<spec poll 2>" …   spec = "name:status name:status", or ERR
 polls() {
@@ -160,6 +169,26 @@ for bad in "--debounce x" "--debounce 0" "--interval -1" "--polls" "--bogus"; do
   RC=0; DREAMTEAM_ROSTER_CMD="$STUB" bash "$W" $bad >/dev/null 2>&1 || RC=$?
   [ "$RC" -eq 22 ] && pass "rejects '$bad' with exit 22" || fail "'$bad' gave exit $RC, want 22"
 done
+
+# TRUST-DIALOG (2026-11-13: five fixers sat at Claude Code's trust dialog 40 min, read as idle).
+# Announced on the FIRST poll (no debounce, no baseline seed), once per agent, re-armed when gone.
+stuck() { printf '[{"name":"%s","pane_state":"TRUST-DIALOG","pane":"dreamteam@w:1.%s","verdict":"STUCK"}]' "$1" "$2" > "$FIX/act.$3.json"; }
+polls "a:idle b:active" "a:idle b:active" "a:idle b:active" "a:idle b:active"
+stuck a 1 1; stuck a 1 2
+watch --self hyp
+[ "$(count "TRUST-DIALOG @")" -eq 1 ] && pass "TRUST-DIALOG: announced once on the first poll (no baseline seed)" || fail "want 1 TRUST-DIALOG, got: $OUT"
+printf '%s\n' "$OUT" | grep "TRUST-DIALOG" | head -1 | grep -q "a pane dreamteam@w:1.1 .*Quick safety check.*hasTrustDialogAccepted" \
+  && pass "TRUST-DIALOG: names the agent, the pane and both fixes" || fail "TRUST-DIALOG text: $OUT"
+[ "$(count "SETTLED-IDLE")" -eq 0 ] && pass "TRUST-DIALOG: the stuck agent's idle status is baseline-seeded as before" || fail "unexpected SETTLED-IDLE: $OUT"
+rm -f "$FIX"/act.*.json; stuck a 1 1; stuck a 1 3
+watch --self hyp
+[ "$(count "TRUST-DIALOG @")" -eq 2 ] && pass "TRUST-DIALOG: re-armed after the dialog clears (polls 1 and 3)" || fail "want 2 TRUST-DIALOG, got: $OUT"
+rm -f "$FIX"/act.*.json; stuck hyp 1 1
+watch --self hyp
+[ "$(count "TRUST-DIALOG @")" -eq 0 ] && pass "TRUST-DIALOG: SELF is skipped" || fail "self flagged: $OUT"
+rm -f "$FIX"/act.*.json
+watch --self hyp
+[ "$(count "TRUST-DIALOG @")" -eq 0 ] && pass "TRUST-DIALOG: silent when no pane shows the dialog (control)" || fail "false TRUST-DIALOG: $OUT"
 
 echo "─────────────────────────────────────────────────────────────────"
 echo "SUMMARY: $PASS passed, $FAIL failed, $((PASS+FAIL)) total"

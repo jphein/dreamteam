@@ -68,7 +68,7 @@ if [ -z "$TEAM" ]; then
 fi
 
 python3 - "$TEAMS_DIR" "$TEAM" "$FMT" "$TMUXDIR" "$PROC" <<'PY'
-import json, os, sys, glob, re, subprocess
+import json, os, sys, glob, re, subprocess, time
 
 teams_dir, team, fmt, tmuxdir, proc = sys.argv[1:6]
 
@@ -169,6 +169,15 @@ def classify(body):
     # matching "any ellipsis in the window" (the original bug) false-reports IDLE as ACTIVE.
     lines = [l for l in body.splitlines() if l.strip()]
     queued = any("Press up to edit queued" in l for l in lines[-12:])
+    # Claude Code's workspace-trust dialog (2026-11-13 10:26-11:06: five teammates spawned from an
+    # untrusted lead cwd sat here 40 min, "No, exit" pre-selected). The pane has no spinner, so
+    # without this check it reads IDLE, which looks finished. Both strings, as captured from a real
+    # pane on 2.1.323 (tests/test-agent-activity.sh pins the capture). The option line must stand
+    # ALONE on its line ("❯ " cursor allowed): prose that merely mentions the dialog, e.g. an agent
+    # working on this very check, must not read as stuck.
+    if any("Quick safety check" in l for l in lines) and \
+       any(re.fullmatch(r"(❯\s*)?(\d+\.\s*)?Yes, I trust this folder", l.strip()) for l in lines):
+        return "TRUST-DIALOG", queued
     # "esc to interrupt" only counts if it's in the last few lines (current generation)
     if any("esc to interrupt" in l for l in lines[-4:]):
         return "ACTIVE", queued
@@ -213,7 +222,12 @@ for cfg in cfgs:
             pane_state, queued = classify(cap(sock, addr, -14))
         is_active = bool(m.get("isActive"))
         # verdict: trust the live pane; flag disagreement with config isActive
-        if pane_state is None:
+        if pane_state == "TRUST-DIALOG":
+            age = ""
+            try: age = " %ds since spawn" % max(0, int(time.time() - int(m.get("joinedAt")) / 1000))
+            except Exception: pass
+            verdict = "STUCK ⚠trust-dialog(lead cwd untrusted%s)" % ("," + age if age else "")
+        elif pane_state is None:
             verdict = ("ACTIVE" if is_active else "IDLE") + "?(no-pane)"
         elif pane_state == "ACTIVE" and not is_active:
             verdict = "ACTIVE ⚠stale-isActive(cfg=idle)"

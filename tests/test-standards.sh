@@ -48,6 +48,43 @@ printf '%s' '{"tool_name":"Agent","tool_input":{"name":"lucid-x1","team_name":"t
 printf '%s' '{"tool_name":"Agent","tool_input":{"prompt":"quick lookup no team"}}' | env -u TMUX DREAMTEAM_CONFIG="$ROOT/config.json" CLAUDE_PLUGIN_ROOT="$ROOT" bash "$SS" 2>"$TMP/err" \
   && ok "allow: non-team utility spawn outside tmux" || bad "utility outside tmux blocked"
 
+# Rule 0b — the lead's cwd must be a TRUSTED workspace (2026-11-13 10:26–11:06: five fixers
+# spawned from an untrusted cwd sat at Claude Code's "Quick safety check" for 40 min).
+# Fixture ~/.claude.json via DREAMTEAM_CLAUDE_JSON; real dirs, a real git repo and worktrees.
+TR="$TMP/trust"; mkdir -p "$TR/home/trusted/sub/deeper" "$TR/home/plain"
+G() { git -c user.name=t -c user.email=t@t -c init.defaultBranch=main "$@" >/dev/null 2>&1; }
+G init "$TR/home/trusted/repo" && G -C "$TR/home/trusted/repo" commit --allow-empty -m i
+mkdir -p "$TR/home/trusted/repo/src"
+G init "$TR/home/okrepo" && G -C "$TR/home/okrepo" commit --allow-empty -m i
+G -C "$TR/home/okrepo" worktree add -b wt1 "$TR/home/okrepo-wt"
+G -C "$TR/home/trusted/repo" worktree add -b wt2 "$TR/home/trusted/repo-wt"
+jq -n --arg t "$TR/home/trusted" --arg ok "$TR/home/okrepo" --arg no "$TR/home/plain" \
+  '{projects:{($t):{hasTrustDialogAccepted:true},($ok):{hasTrustDialogAccepted:true},($no):{hasTrustDialogAccepted:false}}}' > "$TR/claude.json"
+tspawn() {  # tspawn <cwd> [claude.json]  → a tmux teammate spawn from <cwd>
+  printf '{"tool_name":"Agent","cwd":"%s","tool_input":{"name":"lucid-x1","team_name":"t1","subagent_type":"dreamteam:lucid","prompt":"x"}}' "$1" \
+    | env TMUX=/tmp/fake,1,1 DREAMTEAM_CLAUDE_JSON="${2:-$TR/claude.json}" DREAMTEAM_CONFIG="$ROOT/config.json" CLAUDE_PLUGIN_ROOT="$ROOT" bash "$SS" 2>"$TMP/err"
+}
+tspawn "$TR/home/plain" && bad "trust: untrusted cwd allowed" || {
+  grep -q "not a TRUSTED workspace" "$TMP/err" && grep -qF "$TR/home/plain" "$TMP/err" \
+    && grep -q "cd into a trusted project" "$TMP/err" && grep -q "hasTrustDialogAccepted = true" "$TMP/err" \
+    && ok "trust: block untrusted cwd; message names the cwd and both fixes" || bad "trust: wrong message: $(cat "$TMP/err")"; }
+tspawn "$TR/home/trusted" && ok "trust: allow a trusted cwd (exact key)" || bad "trust: trusted cwd blocked: $(cat "$TMP/err")"
+tspawn "$TR/home/trusted/sub/deeper" && ok "trust: allow a non-git dir under a trusted ancestor" || bad "trust: inherited trust blocked: $(cat "$TMP/err")"
+tspawn "$TR/home/trusted/repo/src" && bad "trust: git repo under a trusted parent allowed (trust does not cross a repo root)" || {
+  grep -qF "projects[\"$TR/home/trusted/repo\"]" "$TMP/err" && ok "trust: block a git repo whose root is untrusted; fix names the REPO ROOT" || bad "trust: wrong key: $(cat "$TMP/err")"; }
+tspawn "$TR/home/okrepo" && ok "trust: allow a trusted repo root" || bad "trust: trusted repo blocked: $(cat "$TMP/err")"
+tspawn "$TR/home/okrepo-wt" && ok "trust: allow a worktree of a trusted repo" || bad "trust: worktree of trusted repo blocked: $(cat "$TMP/err")"
+tspawn "$TR/home/trusted/repo-wt" && bad "trust: worktree of an untrusted repo allowed" || ok "trust: block a worktree of an untrusted repo"
+tspawn "$TR/home/plain" "$TR/missing.json" && ok "trust: unreadable ~/.claude.json fails OPEN" || bad "trust: missing config blocked: $(cat "$TMP/err")"
+echo 'not json' > "$TR/bad.json"
+tspawn "$TR/home/plain" "$TR/bad.json" && ok "trust: corrupt ~/.claude.json fails OPEN" || bad "trust: corrupt config blocked"
+printf '{"tool_name":"Agent","cwd":"%s","tool_input":{"prompt":"lookup"}}' "$TR/home/plain" \
+  | env TMUX=/tmp/fake,1,1 DREAMTEAM_CLAUDE_JSON="$TR/claude.json" DREAMTEAM_CONFIG="$ROOT/config.json" CLAUDE_PLUGIN_ROOT="$ROOT" bash "$SS" 2>"$TMP/err" \
+  && ok "trust: non-team subagent from an untrusted cwd passes (no pane, no dialog)" || bad "trust: utility spawn blocked"
+printf '{"tool_name":"Agent","cwd":"%s","tool_input":{"name":"lucid-x1","team_name":"t1","subagent_type":"dreamteam:lucid","prompt":"STANDARDS-EXEMPT: test"}}' "$TR/home/plain" \
+  | env TMUX=/tmp/fake,1,1 DREAMTEAM_CLAUDE_JSON="$TR/claude.json" DREAMTEAM_CONFIG="$ROOT/config.json" CLAUDE_PLUGIN_ROOT="$ROOT" bash "$SS" 2>"$TMP/err" \
+  && ok "trust: STANDARDS-EXEMPT passes" || bad "trust: exempt blocked"
+
 # ALLOW: unnamed utility spawn (no team)
 run '{"tool_name":"Agent","tool_input":{"prompt":"quick lookup"}}' \
   && ok "allow: anonymous utility spawn (no team)" || bad "utility spawn blocked: $(cat "$TMP/err")"
