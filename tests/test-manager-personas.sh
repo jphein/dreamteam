@@ -64,6 +64,11 @@ for p in hypnos nyx; do
   fi
 done
 
+# --- #84: hypnos creates roster.md when the handoff file is missing ---
+grep -q 'Create-if-missing (#84)' "$AGENTS/hypnos.md" \
+  && ok "hypnos.md: create-if-missing roster.md at startup (#84)" \
+  || bad "hypnos.md: missing the #84 create-if-missing startup step"
+
 # --- Persona body sanity: each carries a DragonHD voice line ---
 for p in hypnos nyx; do
   grep -q "DragonHDLatestNeural" "$AGENTS/$p.md" \

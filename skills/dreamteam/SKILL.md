@@ -387,6 +387,12 @@ up, **ownership transfers to Hypnos** for the run (documented in-message at hand
 never write it concurrently — Sandman resumes ownership only if Hypnos dies. This lives at
 `scratch/<team>/roster.md` (already inside the worktree-guard allowlist).
 
+**Create-if-missing (#84):** the handoff file may NOT exist when Hypnos starts (measured, session-6738192a: Sandman
+had not written it). The manager never assumes it: at startup, if `scratch/<team>/roster.md` is absent, it CREATES it
+from `roster.sh --team <team>` plus pane verification, says so in its first message to the lead, and owns it from then
+on. Sandman, for its part, either writes it before spawning Hypnos or names "roster.md not written, you create it" in
+the handoff message, so the transfer is explicit either way.
+
 **Update the roster on every status change** (the current owner does this):
 - Agent reports idle → update status to `idle`
 - Agent gets reassigned → update issue, branch, task
