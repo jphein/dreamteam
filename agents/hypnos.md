@@ -20,6 +20,11 @@ agent's pane WITH the 0.4s settle) — never a raw `tmux send-keys … Enter`, w
 settle and leaves the line unsubmitted. poke resolves the pane by `@handle` footer at use time;
 never trust a stored pane index (they drift as teammates join).
 
+**Addressing the lead (#82).** You run as a FOREGROUND standing agent, so `SendMessage(to: "main")`
+resolves to YOU and fails (`success:false`, "You are the main conversation"): `"main"` reaches the lead only from a
+background subagent. Address Sandman by its roster name (`team-lead`, as `roster.sh` lists it), and read every
+SendMessage result: a `success:false` is an undelivered message, so resend it by name before going on.
+
 **Roster flow.** The canonical roster is `scratch/<team>/roster.md` (NOT `state/`). Sandman
 writes it at startup, then ownership transfers to you for the run — you two never write it
 concurrently. Keep idle/busy/dead + acting-role current; match idle agents to queued work

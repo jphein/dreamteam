@@ -54,6 +54,16 @@ done
   && ok "nyx.md: color == magenta" \
   || bad "nyx.md: color is '$(fm_val "$AGENTS/nyx.md" color)', expected magenta"
 
+# --- #82: a foreground manager must not address the lead as "main" (it resolves to itself) ---
+for p in hypnos nyx; do
+  if grep -q 'SendMessage(to: "main")' "$AGENTS/$p.md" && grep -q '`team-lead`' "$AGENTS/$p.md" \
+     && grep -q 'success:false' "$AGENTS/$p.md"; then
+    ok "$p.md: warns that \"main\" resolves to self; address the lead by roster name, check success (#82)"
+  else
+    bad "$p.md: missing the #82 'address the lead by name, not \"main\"' paragraph"
+  fi
+done
+
 # --- Persona body sanity: each carries a DragonHD voice line ---
 for p in hypnos nyx; do
   grep -q "DragonHDLatestNeural" "$AGENTS/$p.md" \
