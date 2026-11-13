@@ -1043,6 +1043,26 @@ VERIFY-FIRST prompt naming `pane-peek.sh`, never a conclusion), `AGENT-DEAD`,
 name (that would be a self-wake loop) and baseline-seeds agents already idle at launch.
 Stop it with `TaskStop` or `--until`; resume by re-arming it.
 
+**The scribe role (#77): a watcher that keeps one doc in sync with a live session.** Spawn as
+`<dreamname>-scribe` (e.g. `nebula-scribe`; a bare `scribe` is rejected by the roster gate).
+It follows the four-part contract above, plus:
+
+- **Source = the session transcript JSONL**, never `tmux capture-pane`. The pane is a lossy
+  render (ANSI codes, redraws, finite scrollback); the JSONL has every message, exact text, one
+  object per line. The pane is a fallback only.
+- **Offset-tracked reads.** The mark is a byte offset into the JSONL; each cycle reads only
+  past it, so a cycle is cheap and idempotent and survives the scribe's own compaction.
+- **Backfill first.** The first cycle reads the transcript from the start and brings the doc
+  up to date with everything already decided, so the scribe can join mid-flow.
+- **Sole editor, commit local, never push** while the user's flow is live (the #80 pattern):
+  in the origin case, any push to `main` would have started a full Android release build
+  in the middle of a Play Console publish.
+- **Mirror, never invent.** Copy the actual wording and the decided answer. A value still
+  being settled gets an explicit "confirm live" placeholder, and a contradiction between
+  transcript and doc goes back to the orchestrator.
+
+Not for one-shot doc generation (write it) or a doc no live transcript drives.
+
 ## Remote Build Lane (familiar) — heavy compiles leave the orchestrator's box
 
 **JP directive 2026-08-15, the day two 24G build scopes plus the desktop OOM-killed the

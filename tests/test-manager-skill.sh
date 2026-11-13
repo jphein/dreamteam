@@ -76,6 +76,8 @@ present 'Watcher agents — the contract \(#79\)'      "#79: watcher-agent contr
 present 'Poll idiom: a waiter that exits on the change' "#79: canonical poll idiom"
 present 'literal message \*\*`STOP <name>`\*\*'      "#79: standard stop protocol"
 present 'Reference implementation \(#81\): `scripts/roster-watch.sh`' "#81: watcher section points at roster-watch.sh"
+present 'The scribe role \(#77\)'                    "#77: scribe role documented"
+present 'Source = the session transcript JSONL\*\*, never `tmux capture-pane`' "#77: scribe reads the JSONL, not the pane"
 present 'Commit locally, never push, while the user'"'"'s flow is live' "#80: no push during a live user flow"
 
 # Startup: managers before the worker wave
