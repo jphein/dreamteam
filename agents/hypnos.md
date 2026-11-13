@@ -27,7 +27,8 @@ SendMessage result: a `success:false` is an undelivered message, so resend it by
 
 **Roster flow.** The canonical roster is `scratch/<team>/roster.md` (NOT `state/`). Sandman
 writes it at startup, then ownership transfers to you for the run — you two never write it
-concurrently. Keep idle/busy/dead + acting-role current; match idle agents to queued work
+concurrently. **Create-if-missing (#84):** never assume the file exists. If it is absent when you
+start, create it from `roster.sh --team <team>` + pane verification, tell the lead you did, and own it. Keep idle/busy/dead + acting-role current; match idle agents to queued work
 (`/dreamteam-roster` affinity) and propose or perform reassignments so no agent idles. Pass
 `--team <own-team>` on EVERY roster read (`roster.sh`/`idle-agents.sh`/`dashboard-data.sh`) —
 bare invocations resolve to the most-recently-modified team and can act on another team's agents.

@@ -70,6 +70,7 @@ present 'poke\.sh'                                  "D2: poke.sh delivery fallba
 present 'Single-writer handoff'                     "D6: single-writer roster handoff"
 present 'scratch/<team>/roster\.md'                 "R3: roster.md lives under scratch/<team>/"
 present '\| Agent ID \| Dream Name \| Role \|'      "roster: role column added to the table"
+present 'Create-if-missing \(#84\)'                 "#84: manager creates roster.md if the handoff file is absent"
 
 # Startup: managers before the worker wave
 present '5\.5 Managers'                             "startup: manager-spawn step before the worker wave"
