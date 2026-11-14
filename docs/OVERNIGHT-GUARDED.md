@@ -53,8 +53,11 @@ before any merge; costs about 50 seat-points a night". This page is the contract
      - `auth status`
      - `label list`
      - `api` with GET only. Only an exact set of flags is accepted (`-H`, `--jq`, `--paginate`, `-X GET`, and
-       `-f`/`-F` fields without `@` and only with an explicit `-X GET`). GraphQL is refused, and so are the
-       comment and timeline endpoints.
+       `-f`/`-F` fields without `@` and only with an explicit `-X GET`). The endpoint must match a read
+       allowlist of `repos/{o}/{r}/…` paths: pulls, issues/N, commits and check-runs, actions runs, contents,
+       branches and labels. `%`, `//`, `..` and other hosts are refused, and so is GraphQL.
+     - `pr`/`issue` `view`/`list` refuse anything that names comments or reviews, in any spelling (flags,
+       `--json` fields, grouped short flags).
 
      The action word must come right after the subcommand. The shim never guesses flag arity, and nothing else
      is accepted, every merge spelling included. The clone also gets a `pre-push` hook that refuses

@@ -296,11 +296,17 @@ R=$(printf '%s,' "$(sh_rc api --method PUT 'repos/o/r/pulls/1/merge?audit=nightl
     "$(sh_rc pr edit 5 --base main)" "$(sh_rc api repos/o/r/issues/5/comments -f body=x)" "$(sh_rc workflow run deploy)" "$(sh_rc secret list)" \
     "$(sh_rc pr -R o/r diff 5)" "$(sh_rc pr --repo o/r merge 5)" "$(sh_rc api -XPOST repos/o/r/pulls/1/merge)" "$(sh_rc api --method=POST repos/o/r/x)" \
     "$(sh_rc api -iX POST repos/o/r/x)" "$(sh_rc api -X GET repos/o/r/issues/7/comments)" "$(sh_rc api -X GET repos/o/r/issues/7/timeline)" \
-    "$(sh_rc issue view 7 --comments)" "$(sh_rc issue comment 7 --body hi)" "$(sh_rc api -X GET repos/o/r/x -f q=@f)")
-[ "$R" = "77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77," ] && pass "allowlist shim refuses merge in every spelling, any graphql, non-GET or bodied api, pr close/edit, workflow, secret, alias" || fail "shim refusals: $R"
+    "$(sh_rc issue view 7 --comments)" "$(sh_rc issue comment 7 --body hi)" "$(sh_rc api -X GET repos/o/r/x -f q=@f)" \
+    "$(sh_rc issue view 7 --json comments)" "$(sh_rc issue view 7 --comments=true)" "$(sh_rc pr view 5 --json title,comments)" \
+    "$(sh_rc pr view 5 --json reviews)" "$(sh_rc pr view 5 -c)" "$(sh_rc pr list --json latestReviews)" \
+    "$(sh_rc issue view 7 -wc)" "$(sh_rc api repos/o/r/issues/7/c%6fmments)" "$(sh_rc api repos/o/r//issues/7/comments)" \
+    "$(sh_rc api repos/o/r/issues/7/../7/comments)" "$(sh_rc api user)" "$(sh_rc api https://evil.example/x)" "$(sh_rc api REPOS/o/r/issues/7/COMMENTS)" \
+    "$(sh_rc api repos/o/r/contents/../issues/7/comments)" "$(sh_rc api repos/o/r/contents/a//b)" "$(sh_rc api repos/o/r/contents/%2e%2e/x)")
+[ "$R" = "77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77," ] && pass "allowlist shim refuses merge in every spelling, any graphql, non-GET or bodied api, pr close/edit, workflow, secret, alias" || fail "shim refusals: $R"
 R=$(printf '%s,' "$(sh_rc pr create --title 'merge two lists' --fill)" "$(sh_rc api repos/o/r/pulls/1)" "$(sh_rc api -X GET repos/o/r/issues -f state=open)" "$(sh_rc pr view 5 --json state)" \
-    "$(sh_rc pr diff 5 -R o/r)" "$(sh_rc issue view 7 --repo o/r --json title,body)" "$(sh_rc pr comment 5 --body 'merge later')" "$(sh_rc api --paginate -H 'Accept: x' --jq .x repos/o/r/pulls)")
-[ "$R" = "0,0,0,0,0,0,0,0," ] && grep -q '^gh api --paginate -H Accept: x --jq .x repos/o/r/pulls$' "$TMP/gh.log" && pass "allowlist passes reads, explicit-GET api with fields, pr create/diff/comment, and hands the real gh the exact argv" || fail "shim false refusals: $R"
+    "$(sh_rc pr diff 5 -R o/r)" "$(sh_rc issue view 7 --repo o/r --json title,body)" "$(sh_rc pr comment 5 --body 'merge later')" "$(sh_rc api --paginate -H 'Accept: x' --jq .x repos/o/r/pulls)" \
+    "$(sh_rc api https://api.github.com/repos/o/r/commits/abc123/check-runs)" "$(sh_rc api /repos/o/r/pulls/5/files)" "$(sh_rc api repos/o/r/contents/src/a.py?ref=x)")
+[ "$R" = "0,0,0,0,0,0,0,0,0,0,0," ] && grep -q '^gh api --paginate -H Accept: x --jq .x repos/o/r/pulls$' "$TMP/gh.log" && pass "allowlist passes reads, explicit-GET api with fields, pr create/diff/comment, and hands the real gh the exact argv" || fail "shim false refusals: $R"
 # r3: duplicate detection precedes every record — a held-quota or no-work restart leaves the started run's record
 reset; mkqueue jphein/realmwatch:2
 FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 run_g >/dev/null; RID1=$(gj .run_id); SW1=$(cat "$TMP/plan-data/sweep-results.json")

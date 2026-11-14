@@ -126,8 +126,7 @@ sub="${1:-}"; act="${2:-}"
 [ "$sub" = api ] || case "$act" in -*|"") refuse "$sub $act (the action must come right after '$sub')";; esac
 case "$sub" in
   pr)    case "$act" in create|view|list|checks|diff|comment|status) ;; *) refuse "$sub" "$act";; esac;;
-  issue) case "$act" in view|list) ;; *) refuse "$sub" "$act";; esac
-         for a in "$@"; do case "$a" in --comments|-c) refuse "issue $act --comments (comments are unvetted input)";; esac; done;;
+  issue) case "$act" in view|list) ;; *) refuse "$sub" "$act";; esac;;
   repo)  case "$act" in view|clone) ;; *) refuse "$sub" "$act";; esac;;
   run)   case "$act" in view|list) ;; *) refuse "$sub" "$act";; esac;;
   auth)  case "$act" in status) ;; *) refuse "$sub" "$act";; esac;;
@@ -147,11 +146,20 @@ case "$sub" in
          done
          [ "$method" = GET ] || refuse "api -X $method"
          { [ "$fields" = 1 ] && [ "$explicit" = 0 ]; } && refuse "api fields without -X GET (gh would POST)"
-         e="${ep%%[?#]*}"; e="${e%/}"
-         case "$e" in ""|graphql|*/graphql) refuse "api graphql or no endpoint";; esac
-         case "$e" in */comments|*/comments/*|*/timeline) refuse "api $e (comments are unvetted input)";; esac;;
+         # endpoint ALLOWLIST (security review: a denylist of paths is a parser differential): only the
+         # read paths a fixer needs, as plain ASCII path segments; no %-encoding, //, .., or other hosts
+         e="${ep#https://api.github.com/}"; e="${e#/}"; e="${e%%[?#]*}"; e="${e%/}"
+         case "$e" in *%*|*//*|*..*|*://*|"") refuse "api endpoint '$ep'";; esac
+         seg='[A-Za-z0-9._-]+'
+         [[ "$e" =~ ^repos/$seg/$seg(/(pulls(/[0-9]+(/(files|commits))?)?|issues(/[0-9]+)?|commits/[0-9a-fA-F]+(/(check-runs|status))?|check-runs/[0-9]+|actions/runs(/[0-9]+(/jobs)?)?|contents(/[A-Za-z0-9._/-]*)?|branches(/[A-Za-z0-9._/-]+)?|labels))?$ ]] \
+           || refuse "api endpoint '$ep' (not on the read allowlist)";;
   --version|version) ;;
   *) refuse "$sub";;
+esac
+# view/list never read comments or reviews, in any spelling (xreview r8: --comments=true, --json comments,
+# pr view --json reviews). These actions take no free text that would need those words.
+case "$sub $act" in "pr view"|"pr list"|"issue view"|"issue list")
+  for a in "${@:3}"; do case "$a" in -c|*omment*|*eview*|-[!-]?*) refuse "$sub $act $a (comments and reviews are unvetted input; no grouped short flags)";; esac; done;;
 esac
 exec "$REAL_GH" "$@"
 SHIM
