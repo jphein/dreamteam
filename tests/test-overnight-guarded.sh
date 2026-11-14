@@ -367,7 +367,7 @@ FAKE_GH_realmwatch='[]' FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 run_g >/dev/null
 reset; mkqueue jphein/realmwatch:3
 FAKE_GH_realmwatch='[{"number":7,"title":"mine","user":{"login":"jphein"}},{"number":8,"title":"outsider","user":{"login":"stranger"}}]' \
   FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 run_g >/dev/null
-{ grep -q '"number":7' "$TMP/claude.log" && ! grep -q '"number":8' "$TMP/claude.log" && grep -q "realmwatch#8 skipped — author 'stranger'" "$TMP/state/dreamteam.log"; } \
+{ grep -q '"number":7' "$TMP/claude.log" && ! grep -q '"number":8' "$TMP/claude.log" && grep -q "realmwatch#8 skipped — author 'stranger' lacks write access" "$TMP/state/dreamteam.log" && ! grep -q "labeller 'jphein'" "$TMP/state/dreamteam.log"; } \
   && pass "an outsider-authored dream issue is skipped as untrusted input (a maintainer's is worked)" || fail "author provenance: $(grep -o '"number":[0-9]*' "$TMP/claude.log" | tr '\n' ' ')"
 reset; mkqueue jphein/realmwatch:2
 FAKE_EVENTS='[{"event":"labeled","label":{"name":"dream"},"actor":{"login":"jphein"}},{"event":"labeled","label":{"name":"dream"},"actor":{"login":"helper"}}]' \

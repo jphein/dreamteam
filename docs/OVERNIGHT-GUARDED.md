@@ -12,7 +12,7 @@ before any merge; costs about 50 seat-points a night". This page is the contract
 | Per-repo loop (with `issues`, `prOnly` and `prGate` args) | `workflows/overnight.js` |
 | Tunables, production list | `config.json` → `.overnight` |
 | Install, status, uninstall (an install retires the 02:11 pilot pair, so only one nightly start exists) | `scripts/timers-ctl.sh` |
-| Tests | `tests/test-overnight-guarded.sh` (89 checks), `tests/test-overnight-workflow.sh` (12 checks) |
+| Tests | `tests/test-overnight-guarded.sh` (89 checks), `tests/test-overnight-workflow.sh` (13 checks) |
 
 ## What happens at 23:30
 

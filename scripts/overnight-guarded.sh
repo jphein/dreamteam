@@ -416,8 +416,12 @@ for full in $CANDS; do
         while IFS= read -r c; do trusted "$full" "$c" || bad_c="${bad_c:-commenter $c}"; done < <(jq -rs 'add // [] | [.[]?.user.login // ""] | unique | .[]' <<<"$cm" 2>/dev/null)
       else bad_c="(unreadable comments)"; fi
     fi
-    if trusted "$full" "$au" && trusted "$full" "$lb" && [ -z "$bad_c" ]; then iss=$(jq -c --argjson it "$it" '. + [$it | del(.author, .comments)]' <<<"$iss")
-    else log "work: $full#$n skipped — author '${au:-?}' / dream labeller '${lb:-?}'${bad_c:+ / '$bad_c'} lacks write access (untrusted input)"; fi
+    why=""   # name only the parts that failed
+    trusted "$full" "$au" || why="author '${au:-?}'"
+    trusted "$full" "$lb" || why="${why:+$why / }dream labeller '${lb:-?}'"
+    [ -z "$bad_c" ] || why="${why:+$why / }'$bad_c'"
+    if [ -z "$why" ]; then iss=$(jq -c --argjson it "$it" '. + [$it | del(.author, .comments)]' <<<"$iss")
+    else log "work: $full#$n skipped — $why lacks write access (untrusted input)"; fi
   done < <(jq -c '.[]' <<<"$cand")
   k=$(jq length <<<"$iss"); [ "${k:-0}" -gt 0 ] || continue
   name="${full#*/}"

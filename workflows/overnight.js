@@ -34,7 +34,11 @@ const CI_TIMEOUT = A.ciTimeoutMin || 25
 const FOCUS = A.focus || '' // optional: narrow scouting, e.g. "wear module" or "playback"
 // Guarded nightly (scripts/overnight-guarded.sh, JP 2026-11-14): the timer hands over the
 // dream-labelled issues it confirmed live, so Scout is skipped and only those are worked.
-const GIVEN = Array.isArray(A.issues) ? A.issues.filter(i => i && Number.isInteger(i.number)) : null
+// Issue text is fenced as data below; a ``` inside it would end the fence early, so fence markers are
+// neutralised (security review 2026-11-14).
+const unfence = t => (typeof t === 'string' ? t : '').replace(/`{3,}/g, "'''")
+const GIVEN = Array.isArray(A.issues) ? A.issues.filter(i => i && Number.isInteger(i.number))
+  .map(i => ({ ...i, title: unfence(i.title), body: unfence(i.body) })) : null
 // prOnly: a production repo. PRs are opened and reviewed, and Ship never runs (nothing merges).
 const PR_ONLY = A.prOnly === true
 // prGate: path to dreamteam's scripts/pr-gate.sh. When set, Ship gates on EVERY check run of the
