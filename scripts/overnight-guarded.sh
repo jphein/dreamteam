@@ -324,7 +324,9 @@ for full in $CANDS; do
   while IFS= read -r it; do
     [ "$(jq length <<<"$iss")" -ge "$MAX_ISSUES" ] && break
     n=$(jq -r .number <<<"$it"); au=$(jq -r .author <<<"$it")
-    lb=$(gh api "repos/$full/issues/$n/events?per_page=100" 2>/dev/null | jq -r '[.[]? | select(.event=="labeled" and .label.name=="dream")] | last | .actor.login // ""' 2>/dev/null)
+    # every page (xreview r6: a relabel past event 100 must be seen); an unreadable history = untrusted
+    lb=""; ev=$(gh api --paginate "repos/$full/issues/$n/events?per_page=100" 2>/dev/null) \
+      && lb=$(jq -rs 'add // [] | [.[]? | select(.event=="labeled" and .label.name=="dream")] | last | .actor.login // ""' <<<"$ev" 2>/dev/null)
     if trusted "$full" "$au" && trusted "$full" "$lb"; then iss=$(jq -c --argjson it "$it" '. + [$it | del(.author)]' <<<"$iss")
     else log "work: $full#$n skipped — author '${au:-?}' / dream labeller '${lb:-?}' lacks write access (untrusted input)"; fi
   done < <(jq -c '.[]' <<<"$cand")

@@ -12,7 +12,7 @@ before any merge; costs about 50 seat-points a night". This page is the contract
 | Per-repo loop (with `issues`, `prOnly` and `prGate` args) | `workflows/overnight.js` |
 | Tunables, production list | `config.json` → `.overnight` |
 | Install, status, uninstall (an install retires the 02:11 pilot pair, so only one nightly start exists) | `scripts/timers-ctl.sh` |
-| Tests | `tests/test-overnight-guarded.sh` (71 checks), `tests/test-overnight-workflow.sh` (12 checks) |
+| Tests | `tests/test-overnight-guarded.sh` (73 checks), `tests/test-overnight-workflow.sh` (12 checks) |
 
 ## What happens at 23:30
 
@@ -31,7 +31,8 @@ before any merge; costs about 50 seat-points a night". This page is the contract
    first (`state/overnight-rotation.json`), then the most dream issues. It re-reads each repo's open `dream` issues
    live over REST and drops pull requests. **Provenance:** an issue is worked only when its author AND the account
    that last added the `dream` label both hold write, maintain or admin on that repo (checked through the
-   collaborators-permission API, cached per login). An outsider's issue on a public repo, or a label added by a
+   collaborators-permission API, cached per login; the label history is read across every page, and an unreadable
+   history counts as untrusted). An outsider's issue on a public repo, or a label added by a
    read-only account, is skipped and logged, because issue text is input to an unattended agent. Limits: up to `max_repos_per_night` (3) repos and `max_issues_per_repo`
    (5) issues each. If no work is left, the decision is `no-work`, exit 0, and nothing is spoken or published.
 3. **PR-only in production.** Repos are matched by name, so an owner transfer doesn't matter.

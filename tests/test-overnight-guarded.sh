@@ -36,7 +36,9 @@ cat > "$BIN/gh" <<'S'
 echo "gh $*" >> "$GH_LOG"
 for a in "$@"; do
   case "$a" in
-    repos/*/issues/*/events*) def='[{"event":"labeled","label":{"name":"dream"},"actor":{"login":"jphein"}}]'; echo "${FAKE_EVENTS:-$def}"; exit 0;;
+    repos/*/issues/*/events*) def='[{"event":"labeled","label":{"name":"dream"},"actor":{"login":"jphein"}}]'
+      [ "${FAKE_EVENTS_FAIL:-0}" = 1 ] && exit 1
+      echo "${FAKE_EVENTS:-$def}"; [ -n "${FAKE_EVENTS_P2:-}" ] && case " $* " in *" --paginate "*) echo "$FAKE_EVENTS_P2";; esac; exit 0;;
     repos/*/collaborators/*/permission) l="${a#*/collaborators/}"; l="${l%%/permission}"; v="FAKE_PERM_${l//[^A-Za-z0-9]/_}"
       d=read; [ "$l" = jphein ] && d=admin; echo "{\"permission\":\"${!v:-$d}\"}"; exit 0;;
     repos/*/issues*) r="${a#repos/}"; r="${r%%/issues*}"; n="${r#*/}"; v="FAKE_GH_${n//[^A-Za-z0-9]/_}"; echo "${!v:-[]}"; exit 0;;
@@ -314,6 +316,13 @@ FAKE_EVENTS='[{"event":"labeled","label":{"name":"dream"},"actor":{"login":"jphe
   FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 run_g >/dev/null
 { [ "$(gj .decision)" = "no-work" ] && grep -q "labeller 'helper' lacks write" "$TMP/state/dreamteam.log"; } \
   && pass "a dream label last added by a read-only account → not worked" || fail "labeller provenance: $(gj .decision)"
+reset; mkqueue jphein/realmwatch:2
+FAKE_EVENTS_P2='[{"event":"unlabeled","label":{"name":"dream"},"actor":{"login":"helper"}},{"event":"labeled","label":{"name":"dream"},"actor":{"login":"helper"}}]' \
+  FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 run_g >/dev/null
+[ "$(gj .decision)" = "no-work" ] && pass "a read-only relabel on the SECOND events page is seen (paginated) → not worked" || fail "page-2 relabel missed: $(gj .decision)"
+reset; mkqueue jphein/realmwatch:2
+FAKE_EVENTS_FAIL=1 FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 run_g >/dev/null
+[ "$(gj .decision)" = "no-work" ] && pass "an unreadable label history → untrusted (fail closed)" || fail "events failure trusted: $(gj .decision)"
 reset; mkqueue jphein/realmwatch:2
 FAKE_PERM_helper=write FAKE_EVENTS='[{"event":"labeled","label":{"name":"dream"},"actor":{"login":"helper"}}]' \
   FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 run_g >/dev/null
