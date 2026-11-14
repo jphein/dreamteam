@@ -12,7 +12,7 @@ before any merge; costs about 50 seat-points a night". This page is the contract
 | Per-repo loop (with `issues`, `prOnly` and `prGate` args) | `workflows/overnight.js` |
 | Tunables, production list | `config.json` → `.overnight` |
 | Install, status, uninstall (an install retires the 02:11 pilot pair, so only one nightly start exists) | `scripts/timers-ctl.sh` |
-| Tests | `tests/test-overnight-guarded.sh` (78 checks), `tests/test-overnight-workflow.sh` (12 checks) |
+| Tests | `tests/test-overnight-guarded.sh` (81 checks), `tests/test-overnight-workflow.sh` (12 checks) |
 
 ## What happens at 23:30
 
@@ -46,7 +46,12 @@ before any merge; costs about 50 seat-points a night". This page is the contract
      merge there.
    - **Guardrails in PR-only repos (not a security boundary).** The coordinator's PATH starts with an ALLOWLIST
      `gh` shim, and every read is bound to a known number:
-     - `pr create` runs, and the shim records the PR number it returns.
+     - Every call is bound to this repo:
+       - a `--repo`, `-R`, `--repo=` or `GH_REPO` naming another repo is refused;
+       - `--repo <this repo>` is appended when none is given;
+       - api `repos/{o}/{r}` must be this repo.
+     - `pr create` runs, and the shim records a PR only from a successful create whose last line is exactly
+       this repo's PR URL. `--dry-run` and `--web` are refused.
      - `pr diff|checks|comment N` work only for a PR this run opened.
      - `issue view N` works only for this night's vetted issues.
      - `repo view|clone`, `run view|list`, `auth status` and `label list` are allowed.

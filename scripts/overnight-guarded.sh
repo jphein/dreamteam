@@ -115,10 +115,10 @@ write_sweep() { # $1 = json doc
 # PR-only guardrails for one clone: a gh shim dir (prepended to PATH for that coordinator) and a
 # pre-push hook. They stop an obedient-but-misled agent (an issue body that says "merge it"); they do not
 # stop a hostile one (it could call the real gh by path or --no-verify). The boundary is branch protection.
-make_pr_only_guards() { # $1 = shim dir, $2 = clone dir, $3 = real gh path, $4 = vetted issue numbers
+make_pr_only_guards() { # $1 = shim dir, $2 = clone dir, $3 = real gh path, $4 = vetted issue numbers, $5 = owner/repo
   mkdir -p "$1"
   : > "$1/prs"
-  { printf '#!/usr/bin/env bash\nREAL_GH=%q\nISSUES=%q\nPRS_FILE=%q\n' "$3" " $4 " "$1/prs"; cat <<'SHIM'; } > "$1/gh"
+  { printf '#!/usr/bin/env bash\nREAL_GH=%q\nISSUES=%q\nPRS_FILE=%q\nREPO=%q\n' "$3" " $4 " "$1/prs" "$5"; cat <<'SHIM'; } > "$1/gh"
 # overnight-guarded PR-only shim: an ALLOWLIST with no flag-arity guessing (security review 2026-11-14:
 # inferring the action past flags is a parser differential). The action must be the word right after the
 # subcommand; in api mode only an exact flag set is accepted, each flag as its own word.
@@ -130,16 +130,38 @@ sub="${1:-}"; act="${2:-}"; num="${3:-}"
 mine_pr() { [[ "$1" =~ ^[0-9]+$ ]] && grep -qx "$1" "$PRS_FILE" 2>/dev/null; }
 vetted()  { [[ "$1" =~ ^[0-9]+$ ]] && [[ "$ISSUES" == *" $1 "* ]]; }
 [ "$sub" = api ] || case "$act" in -*|"") refuse "$sub $act (the action must come right after '$sub')";; esac
+# Every number is THIS repo's number (xreview r10): a --repo / GH_REPO naming another repo is refused, and
+# a pr/issue/run/label call without one gets --repo "$REPO" appended, so cwd cannot pick another repo.
+lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+same_repo() { [ "$(lc "${1#https://github.com/}")" = "$(lc "$REPO")" ]; }
+[ -z "${GH_REPO:-}" ] || same_repo "$GH_REPO" || refuse "GH_REPO=$GH_REPO (only $REPO)"
+inject=0
+case "$sub" in pr|issue|run|label)
+  inject=1; prev=""
+  for a in "${@:3}"; do
+    case "$prev" in -R|--repo) same_repo "$a" || refuse "$sub $act --repo $a (only $REPO)"; inject=0;; esac
+    case "$a" in --repo=*) same_repo "${a#--repo=}" || refuse "$sub $act $a (only $REPO)"; inject=0;; esac
+    prev="$a"
+  done;;
+esac
 case "$sub" in
   pr)    case "$act" in
-           create) out=$("$REAL_GH" "$@"); rc=$?; printf '%s\n' "$out"
-                   printf '%s\n' "$out" | grep -oE '/pull/[0-9]+' | grep -oE '[0-9]+$' >> "$PRS_FILE"; exit "$rc";;
+           create) for a in "${@:3}"; do case "$a" in --dry-run|--web|-w|--dry-run=*|--web=*) refuse "pr create $a";; esac; done
+                   [ "$inject" = 1 ] && set -- "$@" --repo "$REPO"; out=$("$REAL_GH" "$@"); rc=$?; printf '%s\n' "$out"
+                   # record a PR only from a successful create whose LAST line is exactly this repo's PR URL
+                   # (security review: a dry run, or an "already exists: <url>" error, must not poison the ledger)
+                   last=$(printf '%s\n' "$out" | tail -n1)
+                   if [ "$rc" -eq 0 ] && [[ "$(lc "$last")" =~ ^https://github\.com/$(lc "$REPO" | sed 's/[.]/\\./g')/pull/([0-9]+)$ ]]; then
+                     echo "${BASH_REMATCH[1]}" >> "$PRS_FILE"
+                   fi
+                   exit "$rc";;
            diff|checks|comment) mine_pr "$num" || refuse "pr $act $num (only PRs this run opened)";;
            *) refuse "$sub" "$act";;
          esac;;
   issue) [ "$act" = view ] || refuse "$sub" "$act"
          vetted "$num" || refuse "issue view $num (only this night's vetted issues)";;
-  repo)  case "$act" in view|clone) ;; *) refuse "$sub" "$act";; esac;;
+  repo)  case "$act" in view|clone) ;; *) refuse "$sub" "$act";; esac
+         [ -z "$num" ] || case "$num" in -*) ;; *) same_repo "$num" || refuse "repo $act $num (only $REPO)";; esac;;
   run)   case "$act" in view|list) ;; *) refuse "$sub" "$act";; esac;;
   auth)  case "$act" in status) ;; *) refuse "$sub" "$act";; esac;;
   label) case "$act" in list) ;; *) refuse "$sub" "$act";; esac;;
@@ -163,6 +185,7 @@ case "$sub" in
          e="${ep#https://api.github.com/}"; e="${e#/}"; e="${e%%[?#]*}"; e="${e%/}"
          case "$e" in *%*|*//*|*..*|*://*|"") refuse "api endpoint '$ep'";; esac
          seg='[A-Za-z0-9._-]+'
+         [[ "$e" =~ ^repos/($seg/$seg)(/|$) ]] && same_repo "${BASH_REMATCH[1]}" || refuse "api $e (only repos/$REPO)"
          if [[ "$e" =~ ^repos/$seg/$seg/issues/([0-9]+)$ ]]; then vetted "${BASH_REMATCH[1]}" || refuse "api $e (not a vetted issue)"
          elif [[ "$e" =~ ^repos/$seg/$seg/pulls/([0-9]+)/(files|commits)$ ]]; then mine_pr "${BASH_REMATCH[1]}" || refuse "api $e (not a PR this run opened)"
          elif [[ "$e" =~ ^repos/$seg/$seg(/(commits/[0-9a-fA-F]+(/(check-runs|status))?|check-runs/[0-9]+|actions/runs(/[0-9]+(/jobs)?)?|contents(/[A-Za-z0-9._/-]*)?|branches(/[A-Za-z0-9._/-]+)?|labels))?$ ]]; then :
@@ -175,6 +198,7 @@ esac
 case "$sub $act" in "issue view"|"pr checks"|"pr diff")
   for a in "${@:3}"; do case "$a" in -c|*omment*|*eview*|-[!-]?*) refuse "$sub $act $a (comments and reviews are unvetted input; no grouped short flags)";; esac; done;;
 esac
+[ "$inject" = 1 ] && set -- "$@" --repo "$REPO"
 exec "$REAL_GH" "$@"
 SHIM
   chmod +x "$1/gh"
@@ -228,7 +252,7 @@ run_runner() {
     left=$(( deadline - $(date +%s) - 60 ))   # the clone took time; keep a minute for timeout's kill
     if [ "$left" -lt 300 ]; then log "runner $rid: stop at $name — the clone left ${left}s to the cap"; break; fi
     local cpath="$PATH"
-    if [ "$pr_only" = "true" ]; then make_pr_only_guards "$dir/bin-$name" "$clone" "$real_gh" "$(jq -r '[.issues[].number] | join(" ")' <<<"$r")"; cpath="$dir/bin-$name:$PATH"; fi
+    if [ "$pr_only" = "true" ]; then make_pr_only_guards "$dir/bin-$name" "$clone" "$real_gh" "$(jq -r '[.issues[].number] | join(" ")' <<<"$r")" "$(jq -r .repo <<<"$r")"; cpath="$dir/bin-$name:$PATH"; fi
     # the night's FIRST coordinator needs the full start guard (the guard's probe is minutes old by now),
     # later ones the continuation floor; probed AFTER the clone, right before anything spends (xreview r2)
     local need="$CONT_MIN"; [ "$done_n" -eq 0 ] && need="$FIVE_MIN"
