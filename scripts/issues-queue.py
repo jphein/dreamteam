@@ -45,6 +45,33 @@ def lane_map():
     p = ROOT / "config" / "lane-map.json"
     return json.loads(p.read_text()) if p.exists() else {}
 
+def _next_elapse(unit):
+    r = subprocess.run(["systemctl", "--user", "show", "-p", "NextElapseUSecRealtime", "--value", unit], capture_output=True, text=True)
+    v = r.stdout.strip()
+    if r.returncode != 0 or not v or v == "n/a":
+        return None
+    try:
+        return datetime.datetime.strptime(v, "%a %Y-%m-%d %H:%M:%S %Z").astimezone()
+    except ValueError:
+        return None
+
+def next_sweep(now):
+    """(mode, at). Guarded wins when its timer is active: there is ONE nightly start (timers-ctl.sh retires
+    the pilot pair on install), and the plan should name the one that will actually fire."""
+    g = subprocess.run(["systemctl", "--user", "is-active", "dreamteam-nightly-guarded.timer"], capture_output=True, text=True)
+    if g.returncode == 0 and g.stdout.strip() == "active":
+        at = _next_elapse("dreamteam-nightly-guarded.timer")
+        if at:
+            return "guarded", at
+    mode, at = "pilot", now.replace(hour=23, minute=30, second=0, microsecond=0)
+    if at < now:
+        at += datetime.timedelta(days=1)
+    at = _next_elapse("dreamteam-nightly.timer") or at
+    svc = subprocess.run(["systemctl", "--user", "cat", "dreamteam-nightly.service"], capture_output=True, text=True)
+    if svc.returncode == 0 and "launch-dreamteam.sh" in svc.stdout:
+        mode = "active"
+    return mode, at
+
 def main():
     now = datetime.datetime.now().astimezone()
     lanes = lane_map()
@@ -79,18 +106,9 @@ def main():
                 tot["fixed_last_night"] = len(s.get("fixed", []))
         except Exception:
             bad += 1
-    # next sweep: the nightly timer if installed, else tonight 23:30 pilot
-    mode, at = "pilot", now.replace(hour=23, minute=30, second=0, microsecond=0)
-    if at < now: at += datetime.timedelta(days=1)
-    r = subprocess.run(["systemctl", "--user", "show", "-p", "NextElapseUSecRealtime", "--value", "dreamteam-nightly.timer"], capture_output=True, text=True)
-    if r.returncode == 0 and r.stdout.strip() and r.stdout.strip() != "n/a":
-        try:
-            at = datetime.datetime.strptime(r.stdout.strip(), "%a %Y-%m-%d %H:%M:%S %Z").astimezone()
-        except ValueError:
-            pass
-    svc = subprocess.run(["systemctl", "--user", "cat", "dreamteam-nightly.service"], capture_output=True, text=True)
-    if svc.returncode == 0 and "launch-dreamteam.sh" in svc.stdout:
-        mode = "active"
+    # next sweep: the GUARDED 23:30 timer when active (mode "guarded"), else the old 02:11 PILOT timer
+    # (mode "active" only if its service runs launch-dreamteam.sh), else tonight 23:30 "pilot".
+    mode, at = next_sweep(now)
     doc = {"generated": now.isoformat(timespec="seconds"), "repos": out_repos, "totals": tot,
            "next_sweep": {"at": at.isoformat(timespec="seconds"), "mode": mode}, "bad_rows": bad}
     STATE.mkdir(exist_ok=True)

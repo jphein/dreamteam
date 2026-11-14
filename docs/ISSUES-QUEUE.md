@@ -16,7 +16,8 @@ and to `PLAN_DATA/issues-queue.json` (default `~/srv/plan.realm.watch/data`). Re
 - `design`: `epic`, `matrix`, `design`. `fleetwatch`: `fleetwatch-fix` rows (they close themselves).
 - `lane`: from `config/lane-map.json` (repo → owning lane), `none` when no lane runs it.
 - `fixed_last_night`: from `state/sweep-results.json` when its `night` is yesterday; the sweep writes that file (see `sweep-results.json` in the plan contract).
-- `next_sweep`: `dreamteam-nightly.timer`'s next elapse when installed (mode `active` only when the service runs `launch-dreamteam.sh`), else tonight 23:30 in `pilot`.
+- `next_sweep`: `dreamteam-nightly-guarded.timer`'s next elapse with mode `guarded` when that timer is active (the 23:30 guarded sweep, docs/OVERNIGHT-GUARDED.md); else the retired 02:11 `dreamteam-nightly.timer` if still installed (mode `active` only when its service runs `launch-dreamteam.sh`); else tonight 23:30 in `pilot`.
+- `sweep-results.json` (plan contract `{night, mode, armed_at, fleet, quota_guard: {skipped, reason}, fixed, reviewed_not_merged, too_large}`) is written by `scripts/overnight-guarded.sh`: at start (fleet = repos, nothing held back), on a held night (`skipped` = fixes held back + the reason), and filled from each coordinator's `SWEEP-RESULT` line when the run ends.
 
 ## Freshness (2026-11-13)
 

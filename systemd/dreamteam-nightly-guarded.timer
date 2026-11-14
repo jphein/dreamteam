@@ -1,0 +1,14 @@
+[Unit]
+Description=dreamteam GUARDED nightly sweep — 23:30 daily (quota guard, PR-only in production repos)
+Documentation=https://github.com/jphein/dreamteam/blob/main/docs/OVERNIGHT-GUARDED.md
+
+[Timer]
+# 23:30 sharp: the sweep needs the night (cap 06:30, before the 07:03 briefing) and the
+# 21:50 issues-queue refresh before it. Persistent=false: a missed night is a missed night,
+# never a sweep started at a random hour after a wake or reboot. No RandomizedDelaySec.
+OnCalendar=*-*-* 23:30:00
+Persistent=false
+AccuracySec=2min
+
+[Install]
+WantedBy=timers.target

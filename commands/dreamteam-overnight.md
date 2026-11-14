@@ -10,26 +10,30 @@ explanation + arming doc; the actual loop is `workflows/overnight.js`, and the n
 is a **systemd user timer** (`dreamteam-nightly.timer`) — durable across sessions and reboots,
 unlike the session-only CronCreate it replaces.
 
-## The nightly gate (PILOT)
+## The nightly sweep (GUARDED, armed by JP 2026-11-14)
 
-`dreamteam-nightly.timer` fires **~02:11 daily** and runs `scripts/overnight-launch.sh`, which
-checks for open work:
+`dreamteam-nightly-guarded.timer` fires **23:30 daily** (`Persistent=false`: a missed night is
+missed, never started late) and runs `scripts/overnight-guarded.sh`. Contract and every number:
+`docs/OVERNIGHT-GUARDED.md`. In short:
 
-```bash
-gh issue list -R jphein/dreamteam --label dream --state open --json number,title
-```
+- **70 % quota guard**: starts only if the teamclaude proxy reports the 5-hour pool ≥ 70 % and the
+  7-day pool ≥ 30 %; a proxy that does not answer = no start (fail closed). Re-checked before each
+  repo (floor 40 %).
+- **Work**: open `dream`-labelled issues across every repo in `state/issues-queue.json`, confirmed
+  live; none → silent exit. Up to 3 repos × 5 issues a night, least recently swept first.
+- **PR-only in production** (`config.json .overnight.production_repos`; unlisted = PR-only too);
+  in `merge_repos` a PR merges only after the read-only oracle approves and `pr-gate.sh` is green,
+  one at a time.
+- **Contained**: one memory-capped `systemd-run --user --scope` with `RuntimeMaxSec` to 06:30, its own
+  `tmux -L dreamteam-nightly` server, one headless `claude -p` per repo in a fresh clone under
+  `~/srv/wt/overnight/`.
+- **Reported**: `state/overnight-guard.json`, `state/overnight-pending.md` (STARTED/FINISHED), the
+  plan's `/hearth/issues` (`sweep-results.json`), and the 07:03 briefing's "Nightly sweep" line.
 
-- **None** → one log line, exit 0 (silent when idle).
-- **Some** → writes `state/overnight-pending.md` listing them + speaks one line. **PILOT mode:
-  it does NOT auto-start a coordinator or spend tokens** — it only *surfaces* the queued work.
+So the switch that queues a night's work is still **whether any `dream`-labelled issue is open**.
 
-So the switch that queues a night's work is simply **whether any `dream`-labelled issue is
-open** — label an issue `dream` to queue it; close/unlabel to skip.
-
-**Full activation** (JP's explicit opt-in, after watching a dry cycle): swap `overnight-launch.sh`
-for `launch-dreamteam.sh` in `dreamteam-nightly.service` so the timer actually starts the sweep.
-Legitimate from a timer — a timer start is an out-of-session launch, so the nested-coordinator
-guard (`/dreamteam`) doesn't apply.
+The 02:11 PILOT pair (`dreamteam-nightly.*` → `overnight-launch.sh`, surface-only) stays in the
+repo but is no longer installed: `timers-ctl.sh install` retires it so there is ONE nightly start.
 
 ## Safety posture (all on by default)
 
@@ -58,7 +62,7 @@ Installed as systemd user units (source of truth in `systemd/`, installed via
 Install / inspect the pack:
 
 ```bash
-bash scripts/timers-ctl.sh install     # link the units, enable --now the three timers
+bash scripts/timers-ctl.sh install     # link the units, enable --now the three timers (retires the pilot)
 bash scripts/timers-ctl.sh status      # systemctl --user list-timers 'dreamteam-*' + unit state
 ```
 
@@ -67,8 +71,8 @@ bash scripts/timers-ctl.sh status      # systemctl --user list-timers 'dreamteam
 Two levers:
 
 1. **Stop queuing work** (soft) — ensure no open `dream`-labelled issues; the nightly timer
-   still fires but overnight-launch.sh exits immediately (and stays inert in PILOT mode anyway).
-2. **Stop the timers** (hard) — `systemctl --user disable --now dreamteam-nightly.timer`
+   still fires but overnight-guarded.sh exits with decision `no-work`.
+2. **Stop the timers** (hard) — `systemctl --user disable --now dreamteam-nightly-guarded.timer`
    (and `dreamteam-briefing.timer` / `dreamteam-audit.timer`), or `bash scripts/timers-ctl.sh
    uninstall` to disable + unlink the whole pack.
 

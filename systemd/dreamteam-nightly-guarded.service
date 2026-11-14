@@ -1,0 +1,19 @@
+[Unit]
+Description=dreamteam GUARDED nightly sweep (70 % quota guard → contained headless coordinator)
+Documentation=https://github.com/jphein/dreamteam/blob/main/docs/OVERNIGHT-GUARDED.md
+After=network-online.target teamclaude-forwarder.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Projects/dreamteam
+Environment=CLAUDE_PLUGIN_ROOT=%h/Projects/dreamteam
+# The systemd user PATH has no ~/.cargo/bin (the teamclaude claude wrapper) or ~/.local/bin (gh, jq live in /usr/bin).
+Environment=PATH=%h/.cargo/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/bash %h/Projects/dreamteam/scripts/overnight-guarded.sh
+# The guard itself is quick (one quota GET + a few REST reads). The sweep runs in its own
+# systemd-run scope (MemoryHigh/Max from config.json .scope, RuntimeMaxSec to 06:30), not here.
+TimeoutStartSec=5min
+MemoryMax=512M
+NoNewPrivileges=yes
+# Triggered by dreamteam-nightly-guarded.timer — no [Install]; the timer owns activation.
