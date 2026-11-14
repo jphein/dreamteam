@@ -12,7 +12,7 @@ before any merge; costs about 50 seat-points a night". This page is the contract
 | Per-repo loop (with `issues`, `prOnly` and `prGate` args) | `workflows/overnight.js` |
 | Tunables, production list | `config.json` → `.overnight` |
 | Install, status, uninstall (an install retires the 02:11 pilot pair, so only one nightly start exists) | `scripts/timers-ctl.sh` |
-| Tests | `tests/test-overnight-guarded.sh` (89 checks), `tests/test-overnight-workflow.sh` (13 checks) |
+| Tests | `tests/test-overnight-guarded.sh` (98 checks), `tests/test-overnight-workflow.sh` (13 checks) |
 
 ## What happens at 23:30
 
@@ -102,7 +102,9 @@ the clone's real default branch (`origin/HEAD`) and main/master/trunk/production
    - later ones need the continuation floor (5-hour ≥ `continue_five_hour_min` 0.40);
    - every coordinator needs 7-day ≥ 0.30.
 
-   It then runs one headless `claude -p` under `timeout`. While that coordinator runs, a watchdog re-reads the
+   It then runs one headless `claude -p` under `timeout`. If `claude` exits 69 (the wrapper's "teamclaude proxy
+   down", teamclaude #66), the night stops with no retry: that repo is `stopped` (proxy-down), the rest are
+   `skipped`, and the aborted repo is not marked swept, so it goes first next time. While that coordinator runs, a watchdog re-reads the
    quota every 600 s and stops the coordinator if the pool drops below the floor. The prompt opts in to the workflow ("use a workflow"), points the Workflow tool at
    `workflows/overnight.js` with `{repo, issues, prOnly, prGate, maxHours}`, and states the merge rule, the stop time
    and "no speech, no asks". Before starting it, the runner exports the proxy env the wrapper uses
@@ -110,14 +112,19 @@ the clone's real default branch (`origin/HEAD`) and main/master/trunk/production
    `ANTHROPIC_BASE_URL`). No key is involved, because the proxy presents as API auth.
 7. **Records.**
    - `state/overnight-guard.json` holds `{at, quota_remaining: {five_hour, seven_day}, decision, reason, issues,
-     repos, run_id}`. `decision` is one of `started`, `no-start`, `no-work` or `dry-run`.
+     repos, run_id, runs}`. `decision` is one of `started`, `no-start`, `no-work` or `dry-run`. `runs` has one line per
+     planned repo: `{repo, run_id "<run>/<name>", status started|finished|stopped|skipped, reason, started_at,
+     finished_at, rc, prs_opened, prs_reviewed, merged}`. `prs_opened` needs creation evidence: the shim's
+     verified ledger in a PR-only repo, or the coordinator's `opened` list in a merge repo. Reviewed PRs are kept
+     apart in `prs_reviewed`. A repo the night never reached is `skipped`, with the reason the night stopped.
    - Every step is logged to `state/dreamteam.log`.
    - `state/overnight-pending.md` gets "STARTED <run_id> at <time>" with the issue list, and the runner appends
      "FINISHED <run_id> …".
    - `sweep-results.json` goes to `state/` and to the plan's data folder (the `/hearth/issues` contract):
      - a held night publishes `quota_guard.skipped` (the number of fixes held back) with the reason;
      - each coordinator's closing `SWEEP-RESULT {…}` line fills `fixed`, `reviewed_not_merged` and `too_large`.
-   - The 07:03 `morning-briefing.sh` adds a "Nightly sweep" line, and a started run counts as overnight activity.
+   - The 07:03 `morning-briefing.sh` adds a "Nightly sweep" line with one clause per repo (status, PRs opened,
+     merged, reason), and a started run counts as overnight activity.
 
 ## Running it by hand
 

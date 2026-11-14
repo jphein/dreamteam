@@ -68,8 +68,10 @@ echo claude >> "${SEQ_LOG:-/dev/null}"
   echo "ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-unset}"; echo "SCOPE=${DREAMTEAM_SCOPE_NAME:-unset}"; echo "DIRECT=${TEAMCLAUDE_ALLOW_DIRECT:-unset}${TEAMCLAUDE_BYPASS:-}"; echo "PATH1=${PATH%%:*}"
   printf 'ARG=%s\n' "$@"; echo "---"; } >> "$CLAUDE_LOG"
 if [ -n "${FAKE_CLAUDE_SLEEP:-}" ]; then sleep "$FAKE_CLAUDE_SLEEP"; echo "END-NOT-KILLED" >> "$CLAUDE_LOG"; fi
+# like a real fixer: open a PR through whatever gh is first on PATH (the shim in a PR-only repo)
+gh pr create --fill --head fix/x >/dev/null 2>&1 || true
 if [ -n "${FAKE_CLAUDE_RC:-}" ]; then echo "[claude] teamclaude proxy :3456 down" >&2; exit "$FAKE_CLAUDE_RC"; fi
-echo '{"type":"result","result":"done\nSWEEP-RESULT {\"fixed\":[{\"repo\":\"jphein/realmwatch\",\"number\":7,\"pr\":12,\"sha\":\"\"}],\"reviewed_not_merged\":[],\"too_large\":[]}"}'
+echo '{"type":"result","result":"done\nSWEEP-RESULT {\"fixed\":[{\"repo\":\"jphein/realmwatch\",\"number\":7,\"pr\":12,\"sha\":\"\"}],\"reviewed_not_merged\":[{\"repo\":\"jphein/realmwatch\",\"pr\":42}],\"too_large\":[]}"}'
 S
 chmod +x "$BIN"/*
 
@@ -448,8 +450,10 @@ jq -e '[.runs[] | select(.status=="finished")] | length == 2 and all(.started_at
   && pass "finished repos carry started/finished times, prs_opened and merged" || fail "finished rows: $(jq -c '[.runs[]|select(.status=="finished")]' "$TMP/state/overnight-guard.json" 2>/dev/null)"
 jq -e '[.runs[] | select(.status=="skipped")] | length == 1 and (.[0].reason | test("floor"))' "$TMP/state/overnight-guard.json" >/dev/null 2>&1 \
   && pass "the repo the floor stopped is a skipped line with its reason" || fail "skipped row: $(jq -c '[.runs[]|select(.status=="skipped")]' "$TMP/state/overnight-guard.json" 2>/dev/null)"
-jq -e '[.runs[] | select(.repo=="jphein/realmwatch")][0].prs_opened == [12]' "$TMP/state/overnight-guard.json" >/dev/null 2>&1 \
-  && pass "PRs opened come from the coordinator's SWEEP-RESULT (#12 for realmwatch)" || fail "prs_opened: $(jq -c '.runs' "$TMP/state/overnight-guard.json" 2>/dev/null)"
+jq -e '[.runs[] | select(.repo=="jphein/realmwatch")][0] | .prs_opened == [12] and .prs_reviewed == [42]' "$TMP/state/overnight-guard.json" >/dev/null 2>&1 \
+  && pass "PR-only: prs_opened is the shim's verified ledger (#12); a reviewed PR (#42) is not counted as opened" || fail "prs_opened: $(jq -c '.runs' "$TMP/state/overnight-guard.json" 2>/dev/null)"
+jq -e '[.runs[] | select(.repo=="techempower-org/starcharts")][0].prs_opened == []' "$TMP/state/overnight-guard.json" >/dev/null 2>&1 \
+  && pass "merge repo: no 'opened' list from the coordinator → no PRs counted as opened (fixed/reviewed are not creation evidence)" || fail "merge-repo prs_opened: $(jq -c '.runs' "$TMP/state/overnight-guard.json")"
 reset; mkqueue jphein/realmwatch:2
 FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 run_g >/dev/null
 b=$(brief); echo "$b" | grep -q 'realmwatch finished (PRs 1, merged 0)' && pass "the 07:03 briefing lists each repo's outcome" || fail "briefing per-repo: $b"
