@@ -68,7 +68,10 @@ echo claude >> "${SEQ_LOG:-/dev/null}"
   echo "ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-unset}"; echo "SCOPE=${DREAMTEAM_SCOPE_NAME:-unset}"; echo "DIRECT=${TEAMCLAUDE_ALLOW_DIRECT:-unset}${TEAMCLAUDE_BYPASS:-}"; echo "PATH1=${PATH%%:*}"
   printf 'ARG=%s\n' "$@"; echo "---"; } >> "$CLAUDE_LOG"
 if [ -n "${FAKE_CLAUDE_SLEEP:-}" ]; then sleep "$FAKE_CLAUDE_SLEEP"; echo "END-NOT-KILLED" >> "$CLAUDE_LOG"; fi
-echo '{"type":"result","result":"done\nSWEEP-RESULT {\"fixed\":[{\"repo\":\"jphein/realmwatch\",\"number\":7,\"pr\":12,\"sha\":\"\"}],\"reviewed_not_merged\":[],\"too_large\":[]}"}'
+# like a real fixer: open a PR through whatever gh is first on PATH (the shim in a PR-only repo)
+gh pr create --fill --head fix/x >/dev/null 2>&1 || true
+if [ -n "${FAKE_CLAUDE_RC:-}" ]; then echo "[claude] teamclaude proxy :3456 down" >&2; exit "$FAKE_CLAUDE_RC"; fi
+echo '{"type":"result","result":"done\nSWEEP-RESULT {\"fixed\":[{\"repo\":\"jphein/realmwatch\",\"number\":7,\"pr\":12,\"sha\":\"\"}],\"reviewed_not_merged\":[{\"repo\":\"jphein/realmwatch\",\"pr\":42}],\"too_large\":[]}"}'
 S
 chmod +x "$BIN"/*
 
@@ -81,7 +84,7 @@ I2='[{"number":7,"title":"fix seven","body":"BODY-SEVEN steps","user":{"login":"
 mkcfg(){ cat > "$TMP/config.json" <<'J'
 {"scope":{"memoryHigh":"20G","memoryMax":"24G","memorySwapMax":"8G"},
  "overnight":{"five_hour_min":0.70,"seven_day_min":0.30,"continue_five_hour_min":0.40,
-   "max_repos_per_night":3,"max_issues_per_repo":5,"stop_at":"06:30",
+   "max_repos":3,"max_issues_per_repo":5,"stop_at":"06:30",
    "production_repos":["realmwatch","dreamteam"],"merge_repos":["starcharts"],"never_sweep":["plan.realm.watch"]}}
 J
 }
@@ -436,6 +439,40 @@ reset; mkqueue jphein/realmwatch:2
 FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_LOW5" run_g >/dev/null
 b=$(brief); echo "$b" | grep -q 'Nightly sweep\*\*: no-start: 5-hour pool at 0.69' \
   && pass "briefing: a held night says why" || fail "briefing on hold: $b"
+
+echo "── per-repo records in the guard JSON (Sen's note 2) ────────────"
+reset; mkqueue jphein/realmwatch:2 techempower-org/starcharts:2 jphein/unknownrepo:2
+FAKE_GH_realmwatch="$I2" FAKE_GH_starcharts="$I2" FAKE_GH_unknownrepo="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 DREAMTEAM_QUOTA_SEQ="0.92 0.92 0.92 0.35" run_g >/dev/null
+RID=$(gj .run_id)
+jq -e --arg rid "$RID" '(.runs|length)==3 and ([.runs[].run_id] | all(startswith($rid + "/")))' "$TMP/state/overnight-guard.json" >/dev/null 2>&1 \
+  && pass "every planned repo has its own run_id line under .runs" || fail "runs: $(jq -c .runs "$TMP/state/overnight-guard.json" 2>/dev/null)"
+jq -e '[.runs[] | select(.status=="finished")] | length == 2 and all(.started_at and .finished_at and (.prs_opened|type=="array") and (.merged|type=="array"))' "$TMP/state/overnight-guard.json" >/dev/null 2>&1 \
+  && pass "finished repos carry started/finished times, prs_opened and merged" || fail "finished rows: $(jq -c '[.runs[]|select(.status=="finished")]' "$TMP/state/overnight-guard.json" 2>/dev/null)"
+jq -e '[.runs[] | select(.status=="skipped")] | length == 1 and (.[0].reason | test("floor"))' "$TMP/state/overnight-guard.json" >/dev/null 2>&1 \
+  && pass "the repo the floor stopped is a skipped line with its reason" || fail "skipped row: $(jq -c '[.runs[]|select(.status=="skipped")]' "$TMP/state/overnight-guard.json" 2>/dev/null)"
+jq -e '[.runs[] | select(.repo=="jphein/realmwatch")][0] | .prs_opened == [12] and .prs_reviewed == [42]' "$TMP/state/overnight-guard.json" >/dev/null 2>&1 \
+  && pass "PR-only: prs_opened is the shim's verified ledger (#12); a reviewed PR (#42) is not counted as opened" || fail "prs_opened: $(jq -c '.runs' "$TMP/state/overnight-guard.json" 2>/dev/null)"
+jq -e '[.runs[] | select(.repo=="techempower-org/starcharts")][0].prs_opened == []' "$TMP/state/overnight-guard.json" >/dev/null 2>&1 \
+  && pass "merge repo: no 'opened' list from the coordinator → no PRs counted as opened (fixed/reviewed are not creation evidence)" || fail "merge-repo prs_opened: $(jq -c '.runs' "$TMP/state/overnight-guard.json")"
+reset; mkqueue jphein/realmwatch:2
+FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 run_g >/dev/null
+b=$(brief); echo "$b" | grep -q 'realmwatch finished (PRs 1, merged 0)' && pass "the 07:03 briefing lists each repo's outcome" || fail "briefing per-repo: $b"
+
+echo "── exit 69 (wrapper: proxy down) stops the night, no retry ──────"
+reset; mkqueue jphein/realmwatch:2 techempower-org/starcharts:2
+FAKE_CLAUDE_RC=69 FAKE_GH_realmwatch="$I2" FAKE_GH_starcharts="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 run_g >/dev/null
+{ [ "$(grep -c '^---$' "$TMP/claude.log")" -eq 1 ] \
+  && jq -e '[.runs[] | select(.status=="stopped")] | length==1 and (.[0].reason|test("proxy-down"))' "$TMP/state/overnight-guard.json" >/dev/null \
+  && jq -e '[.runs[] | select(.status=="skipped")] | length==1 and (.[0].reason|test("proxy-down"))' "$TMP/state/overnight-guard.json" >/dev/null \
+  && grep -q 'FINISHED .*proxy-down' "$TMP/state/overnight-pending.md"; } \
+  && pass "claude exit 69 → that repo stopped, the rest skipped (proxy-down), one coordinator only" || fail "exit 69: runs=$(grep -c '^---$' "$TMP/claude.log") $(jq -c .runs "$TMP/state/overnight-guard.json" 2>/dev/null)"
+[ ! -f "$TMP/state/overnight-rotation.json" ] || ! jq -e '.["jphein/realmwatch"]' "$TMP/state/overnight-rotation.json" >/dev/null 2>&1 \
+  && pass "an aborted repo is not marked swept (it goes first next night)" || fail "rotation advanced on exit 69"
+
+echo "── max_repos (Sen's key) caps the night ─────────────────────────"
+reset; mkqueue jphein/realmwatch:2 techempower-org/starcharts:2 jphein/unknownrepo:2; jq '.overnight.max_repos=2' "$TMP/config.json" > "$TMP/c2" && mv "$TMP/c2" "$TMP/config.json"
+FAKE_GH_realmwatch="$I2" FAKE_GH_starcharts="$I2" FAKE_GH_unknownrepo="$I2" FAKE_QUOTA="$Q_OK" DRY_RUN=1 run_g >/dev/null
+[ "$(gj '.repos|length')" = "2" ] && pass "overnight.max_repos=2 → two repos planned" || fail "max_repos: $(gj .repos)"
 
 echo "── issues-queue.py next_sweep: guarded timer → mode guarded ─────"
 mkdir -p "$TMP/sysd"
