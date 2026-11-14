@@ -65,7 +65,7 @@ isnum() { [[ "$1" =~ ^[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?$ ]]; }
 
 FIVE_MIN=$(oc five_hour_min 0.70); SEVEN_MIN=$(oc seven_day_min 0.30)
 CONT_MIN=$(oc continue_five_hour_min 0.40)
-MAX_REPOS=$(oc max_repos_per_night 3); MAX_ISSUES=$(oc max_issues_per_repo 5)
+MAX_REPOS=$(oc max_repos "$(oc max_repos_per_night 3)"); MAX_ISSUES=$(oc max_issues_per_repo 5)
 STOP_AT=$(oc stop_at 06:30); MAX_HOURS=$(oc max_hours 7.5); MIN_START_MIN=$(oc min_start_minutes 60); MIN_REPO_MIN=$(oc min_repo_minutes 30)
 
 # ── quota probe → FIVE, WEEK (strings; "" = unreported). rc 1 = proxy did not answer ──
@@ -246,6 +246,18 @@ HOOK
   chmod +x "$2/.git/hooks/pre-push"
 }
 
+# One line per planned repo under .runs of the night's guard record (Sen 2026-11-14: the briefing and
+# /hearth/issues show each repo): {repo, run_id "<night run>/<name>", status started|finished|stopped|skipped,
+# reason, started_at, finished_at, rc, prs_opened, merged}. Upserted by repo; only into THIS run's record.
+repo_rec() { # rid repo json-patch
+  local g="$STATE/overnight-guard.json" out
+  out=$(jq -c --arg rid "$1" --arg repo "$2" --argjson p "$3" '
+      if .run_id != $rid then . else
+        .runs = (((.runs // []) | map(select(.repo != $repo)))
+                 + [(((.runs // []) | map(select(.repo == $repo)) | .[0]) // {repo: $repo, run_id: ($rid + "/" + ($repo | split("/")[1]))}) + $p])
+      end' "$g" 2>/dev/null) && [ -n "$out" ] && printf '%s\n' "$out" > "$g.tmp" && mv -f "$g.tmp" "$g"
+}
+
 run_runner() {
   local dir="$1" plan="$1/plan.json"
   [ -f "$plan" ] || { log "runner: no plan at $plan"; return 0; }
@@ -267,25 +279,25 @@ run_runner() {
   export DREAMTEAM_SCOPE_NAME="dreamteam-$rid"
   local real_gh; real_gh=$(command -v gh 2>/dev/null || echo /usr/bin/gh)
   local watch="${DREAMTEAM_WATCH_SEC:-600}"
-  local done_n=0 results='[]'
+  local done_n=0 results='[]' stop_reason="" i
   for ((i=0; i<n; i++)); do
     local r name pr_only issues left
     r=$(jq -c ".repos[$i]" "$plan"); name=$(jq -r .name <<<"$r"); pr_only=$(jq -r .pr_only <<<"$r")
     left=$(( deadline - $(date +%s) ))
-    if [ "$left" -lt $(( MIN_REPO_MIN * 60 )) ]; then log "runner $rid: stop before $name — ${left}s left to the $stop_words cap"; break; fi
+    if [ "$left" -lt $(( MIN_REPO_MIN * 60 )) ]; then stop_reason="the $stop_words cap: ${left}s left"; log "runner $rid: stop before $name — $stop_reason"; break; fi
     local clone="$wt/$night/$name"; [ -e "$clone" ] && clone="$clone-$rid"
     mkdir -p "$wt/$night"
     if ! git clone -q "https://github.com/$(jq -r .repo <<<"$r").git" "$clone" >/dev/null 2>&1; then
-      log "runner $rid: clone of $name failed — skipped"; continue
+      log "runner $rid: clone of $name failed — skipped"; repo_rec "$rid" "$(jq -r .repo <<<"$r")" '{"status":"skipped","reason":"clone failed"}'; continue
     fi
     left=$(( deadline - $(date +%s) - 60 ))   # the clone took time; keep a minute for timeout's kill
-    if [ "$left" -lt 300 ]; then log "runner $rid: stop at $name — the clone left ${left}s to the cap"; break; fi
+    if [ "$left" -lt 300 ]; then stop_reason="the $stop_words cap: the clone left ${left}s"; log "runner $rid: stop at $name — $stop_reason"; break; fi
     local cpath="$PATH"
     if [ "$pr_only" = "true" ]; then make_pr_only_guards "$dir/bin-$name" "$clone" "$real_gh" "$(jq -r '[.issues[].number] | join(" ")' <<<"$r")" "$(jq -r .repo <<<"$r")"; cpath="$dir/bin-$name:$PATH"; fi
     # the night's FIRST coordinator needs the full start guard (the guard's probe is minutes old by now),
     # later ones the continuation floor; probed AFTER the clone, right before anything spends (xreview r2)
     local need="$CONT_MIN"; [ "$done_n" -eq 0 ] && need="$FIVE_MIN"
-    if ! quota_ok "$need"; then log "runner $rid: stop before $name — quota under the floor ($QREASON)"; break; fi
+    if ! quota_ok "$need"; then stop_reason="quota under the floor ($QREASON)"; log "runner $rid: stop before $name — $stop_reason"; break; fi
     issues=$(jq -c '.issues' <<<"$r")
     local args; args=$(jq -c --argjson po "$pr_only" --argjson is "$issues" --arg gate "$ROOT/scripts/pr-gate.sh" \
       --argjson h $(( left / 3600 > 0 ? left / 3600 : 1 )) \
@@ -303,31 +315,60 @@ $rules
 Stop by $stop_words (the 07:03 briefing reads what you leave). Do not speak aloud, do not message JP, do not file asks; design, secrets or destructive changes are reported as too-large, never forced.
 End your reply with ONE line: SWEEP-RESULT {\"fixed\":[{\"repo\":\"owner/name\",\"number\":N,\"pr\":N,\"sha\":\"<merge sha or empty>\"}],\"reviewed_not_merged\":[{\"repo\":\"owner/name\",\"pr\":N}],\"too_large\":[{\"repo\":\"owner/name\",\"number\":N}]}"
     log "runner $rid: start $name (pr_only=$pr_only, $(jq length <<<"$issues") issue(s), ${left}s to cap)"
+    repo_rec "$rid" "$(jq -r .repo <<<"$r")" "$(jq -nc --arg t "$(date -Iseconds)" '{status:"started", started_at:$t}')"
     ( cd "$clone" && PATH="$cpath" exec timeout -k 60 "$left" "$claude_bin" -p "$prompt" --dangerously-skip-permissions --output-format json ) \
       > "$dir/$name.json" 2> "$dir/$name.err" &
-    local cpid=$! tick=0
+    local cpid=$! tick=0 killed=""
     # watchdog: re-probe the pool while the coordinator spends from it; under the floor → TERM it
     # (timeout forwards TERM to claude). One-second ticks so a finished run is noticed at once.
     while kill -0 "$cpid" 2>/dev/null; do
       sleep 1; tick=$((tick+1))
       if [ $((tick % watch)) -eq 0 ] && kill -0 "$cpid" 2>/dev/null && ! quota_ok "$CONT_MIN"; then
-        log "runner $rid: stopping $name mid-run — $QREASON"; kill -TERM "$cpid" 2>/dev/null; break
+        log "runner $rid: stopping $name mid-run — $QREASON"; killed="$QREASON"; kill -TERM "$cpid" 2>/dev/null; break
       fi
     done
     wait "$cpid"; local rc=$?
     log "runner $rid: $name finished rc=$rc"
+    local repo_full; repo_full=$(jq -r .repo <<<"$r")
+    local line; line=$(jq -r '.result // empty' "$dir/$name.json" 2>/dev/null | grep -o 'SWEEP-RESULT {.*}' | tail -n1 | sed 's/^SWEEP-RESULT //')
+    jq -e 'type=="object"' <<<"${line:-x}" >/dev/null 2>&1 || line='{}'
+    # PRs opened: the coordinator's own report plus, in a PR-only repo, the shim's verified ledger
+    local prs merged
+    prs=$(jq -c --argjson x "$line" --arg repo "$repo_full" -n '[($x.fixed // [])[], ($x.reviewed_not_merged // [])[] | select((.repo // $repo) == $repo) | .pr | select(type=="number")]')
+    [ -s "$dir/bin-$name/prs" ] && prs=$(jq -c --argjson a "$prs" -n '$a + [inputs]' < "$dir/bin-$name/prs")
+    prs=$(jq -c 'unique' <<<"$prs")
+    merged=$(jq -c --argjson x "$line" --arg repo "$repo_full" -n '[($x.fixed // [])[] | select((.repo // $repo) == $repo) | select((.sha // "") != "") | .pr | select(type=="number")] | unique')
+    if [ "$rc" -eq 69 ]; then
+      # the wrapper (teamclaude #66) refuses to start when the pool's proxy is gone: stop the night, no retry
+      stop_reason="proxy-down: the teamclaude proxy went away (claude exit 69); no retry"
+      log "runner $rid: $name — $stop_reason"
+      repo_rec "$rid" "$repo_full" "$(jq -nc --arg t "$(date -Iseconds)" --arg why "$stop_reason" --argjson p "$prs" --argjson m "$merged" '{status:"stopped", reason:$why, finished_at:$t, rc:69, prs_opened:$p, merged:$m}')"
+      i=$((i+1)); break
+    fi
+    local st=finished why=""
+    [ -n "$killed" ] && { st=stopped; why="watchdog: $killed"; }
+    [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] && [ -z "$killed" ] && { st=stopped; why="the $stop_words cap (timeout)"; }
+    repo_rec "$rid" "$repo_full" "$(jq -nc --arg t "$(date -Iseconds)" --arg s "$st" --arg why "$why" --argjson rc "$rc" --argjson p "$prs" --argjson m "$merged" '{status:$s, reason:$why, finished_at:$t, rc:$rc, prs_opened:$p, merged:$m}')"
     done_n=$((done_n+1))
     jq --arg r "$(jq -r .repo <<<"$r")" --arg t "$(date -Iseconds)" '.[$r]=$t' "$STATE/overnight-rotation.json" 2>/dev/null > "$STATE/overnight-rotation.json.tmp" \
       || jq -n --arg r "$(jq -r .repo <<<"$r")" --arg t "$(date -Iseconds)" '{($r):$t}' > "$STATE/overnight-rotation.json.tmp"
     mv -f "$STATE/overnight-rotation.json.tmp" "$STATE/overnight-rotation.json"
-    local line; line=$(jq -r '.result // empty' "$dir/$name.json" 2>/dev/null | grep -o 'SWEEP-RESULT {.*}' | tail -n1 | sed 's/^SWEEP-RESULT //')
-    if [ -n "$line" ] && jq -e 'type=="object"' <<<"$line" >/dev/null 2>&1; then results=$(jq -c --argjson x "$line" '. + [$x]' <<<"$results"); fi
+    [ "$line" = '{}' ] || results=$(jq -c --argjson x "$line" '. + [$x]' <<<"$results")
   done
+  # repos never reached: a skipped line each, with the reason the night stopped
+  if [ -n "$stop_reason" ]; then
+    local j
+    for ((j=i; j<n; j++)); do
+      local rj; rj=$(jq -r ".repos[$j].repo" "$plan")
+      jq -e --arg r "$rj" '(.runs // []) | any(.repo == $r and .status != "started")' "$STATE/overnight-guard.json" >/dev/null 2>&1 && continue
+      repo_rec "$rid" "$rj" "$(jq -nc --arg why "$stop_reason" '{status:"skipped", reason:$why}')"
+    done
+  fi
   # fold the per-repo results into the night's sweep-results.json
   local sw; sw=$(jq -c --argjson rs "$results" '
       .fixed = ([$rs[].fixed // [] | .[]]) | .reviewed_not_merged = ([$rs[].reviewed_not_merged // [] | .[]])
       | .too_large = ([$rs[].too_large // [] | .[]])' "$STATE/sweep-results.json" 2>/dev/null) && [ -n "$sw" ] && write_sweep "$sw"
-  echo "FINISHED $rid at $(date '+%F %H:%M %Z'): $done_n of $n repo(s) swept." >> "$STATE/overnight-pending.md"
+  echo "FINISHED $rid at $(date '+%F %H:%M %Z'): $done_n of $n repo(s) swept.${stop_reason:+ Stopped: $stop_reason.}" >> "$STATE/overnight-pending.md"
   log "runner $rid: finished $done_n of $n repo(s)"
 }
 

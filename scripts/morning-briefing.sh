@@ -89,6 +89,11 @@ if [ -f "$GREC" ]; then
                      else "\(.decision): \(.reason)" end' "$GREC" 2>/dev/null || true)
     FIN=$(grep -m1 '^FINISHED' "$STATE/overnight-pending.md" 2>/dev/null || true)
     [ -n "$FIN" ] && NIGHTLY="$NIGHTLY; ${FIN%%:*}"
+    # one clause per repo from the guard record's .runs lines
+    PER=$(jq -r '[(.runs // [])[] | (.repo | split("/")[1]) + " " + .status
+           + (if .status == "finished" or .status == "stopped" then " (PRs \((.prs_opened // []) | length), merged \((.merged // []) | length))" else "" end)
+           + (if (.reason // "") != "" then ": " + .reason else "" end)] | join("; ")' "$GREC" 2>/dev/null || true)
+    [ -n "$PER" ] && NIGHTLY="$NIGHTLY — $PER"
   fi
 fi
 

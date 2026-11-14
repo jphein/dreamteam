@@ -37,7 +37,7 @@ before any merge; costs about 50 seat-points a night". This page is the contract
    unreadable comment list counts as untrusted. The vetted title and body (capped at 4,000 characters) are
    frozen into the plan at that moment, and the agents work from that snapshot. Nothing reads the issue live
    during the run, so a later retitle or comment cannot reach them. An outsider's issue on a public repo, or a label added by a
-   read-only account, is skipped and logged, because issue text is input to an unattended agent. Limits: up to `max_repos_per_night` (3) repos and `max_issues_per_repo`
+   read-only account, is skipped and logged, because issue text is input to an unattended agent. Limits: up to `max_repos` (3; the older key `max_repos_per_night` is still read) repos and `max_issues_per_repo`
    (5) issues each. If no work is left, the decision is `no-work`, exit 0, and nothing is spoken or published.
 3. **PR-only in production.** Repos are matched by name, so an owner transfer doesn't matter.
    - A repo in `production_repos` is PR-only: the sweep opens PRs and the oracle reviews them, but it never merges.
