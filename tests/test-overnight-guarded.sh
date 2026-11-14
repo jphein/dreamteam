@@ -380,11 +380,21 @@ reset; mkqueue jphein/realmwatch:2
 FAKE_PERM_helper=write FAKE_EVENTS='[{"event":"labeled","label":{"name":"dream"},"actor":{"login":"helper"}}]' \
   FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 run_g >/dev/null
 [ "$(gj .decision)" = "started" ] && pass "a labeller with write access is trusted (control)" || fail "write labeller rejected: $(gj .reason)"
+# xreview r14: a title renamed by a non-writer (triage role) → issue skipped; a writer's rename is fine
+reset; mkqueue jphein/realmwatch:2
+FAKE_EVENTS='[{"event":"labeled","label":{"name":"dream"},"actor":{"login":"jphein"}},{"event":"renamed","actor":{"login":"triager"},"rename":{"from":"a","to":"b"}}]' \
+  FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 run_g >/dev/null
+{ [ "$(gj .decision)" = "no-work" ] && grep -q "renamed by triager' lacks write" "$TMP/state/dreamteam.log"; } \
+  && pass "an issue retitled by a non-writer is skipped" || fail "rename provenance: $(gj .decision) $(grep -c renamed "$TMP/state/dreamteam.log")"
+reset; mkqueue jphein/realmwatch:2
+FAKE_EVENTS='[{"event":"labeled","label":{"name":"dream"},"actor":{"login":"jphein"}},{"event":"renamed","actor":{"login":"jphein"},"rename":{"from":"a","to":"b"}}]' \
+  FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 run_g >/dev/null
+[ "$(gj .decision)" = "started" ] && pass "control: a writer's rename keeps the issue" || fail "writer rename rejected: $(gj .reason)"
 # comments are input too: an untrusted commenter (or an unreadable comment list) → issue skipped
 reset; mkqueue jphein/realmwatch:2
 FAKE_COMMENTS='[{"user":{"login":"jphein"}},{"user":{"login":"stranger"}}]' \
   FAKE_GH_realmwatch='[{"number":7,"title":"mine","user":{"login":"jphein"},"comments":2}]' FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 run_g >/dev/null
-{ [ "$(gj .decision)" = "no-work" ] && grep -q "commenter 'stranger' lacks write" "$TMP/state/dreamteam.log"; } \
+{ [ "$(gj .decision)" = "no-work" ] && grep -q "'commenter stranger' lacks write" "$TMP/state/dreamteam.log"; } \
   && pass "an issue with a comment from a non-writer is skipped" || fail "comment provenance: $(gj .decision)"
 reset; mkqueue jphein/realmwatch:2
 FAKE_COMMENTS_FAIL=1 FAKE_GH_realmwatch='[{"number":7,"title":"mine","user":{"login":"jphein"},"comments":1}]' FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 run_g >/dev/null

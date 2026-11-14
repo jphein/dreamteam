@@ -407,13 +407,17 @@ for full in $CANDS; do
     # comments are input too (the agent could read them): every commenter must also hold write access;
     # an unreadable comment list is untrusted
     bad_c=""
+    # a title renamed by a non-writer (e.g. the triage role) is untrusted too (xreview r14); the same full
+    # event history names every renamer. (A body can be edited only by its author or a writer.)
+    while IFS= read -r c; do trusted "$full" "$c" || bad_c="${bad_c:-renamed by $c}"; done \
+      < <(jq -rs 'add // [] | [.[]? | select(.event=="renamed") | .actor.login // ""] | unique | .[]' <<<"${ev:-[]}" 2>/dev/null)
     if [ "$(jq -r .comments <<<"$it")" != "0" ]; then
       if cm=$(gh api --paginate "repos/$full/issues/$n/comments?per_page=100" 2>/dev/null); then
-        while IFS= read -r c; do trusted "$full" "$c" || bad_c="${bad_c:-$c}"; done < <(jq -rs 'add // [] | [.[]?.user.login // ""] | unique | .[]' <<<"$cm" 2>/dev/null)
+        while IFS= read -r c; do trusted "$full" "$c" || bad_c="${bad_c:-commenter $c}"; done < <(jq -rs 'add // [] | [.[]?.user.login // ""] | unique | .[]' <<<"$cm" 2>/dev/null)
       else bad_c="(unreadable comments)"; fi
     fi
     if trusted "$full" "$au" && trusted "$full" "$lb" && [ -z "$bad_c" ]; then iss=$(jq -c --argjson it "$it" '. + [$it | del(.author, .comments)]' <<<"$iss")
-    else log "work: $full#$n skipped — author '${au:-?}' / dream labeller '${lb:-?}'${bad_c:+ / commenter '$bad_c'} lacks write access (untrusted input)"; fi
+    else log "work: $full#$n skipped — author '${au:-?}' / dream labeller '${lb:-?}'${bad_c:+ / '$bad_c'} lacks write access (untrusted input)"; fi
   done < <(jq -c '.[]' <<<"$cand")
   k=$(jq length <<<"$iss"); [ "${k:-0}" -gt 0 ] || continue
   name="${full#*/}"
