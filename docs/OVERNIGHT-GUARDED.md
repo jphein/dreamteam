@@ -12,7 +12,7 @@ before any merge; costs about 50 seat-points a night". This page is the contract
 | Per-repo loop (with `issues`, `prOnly` and `prGate` args) | `workflows/overnight.js` |
 | Tunables, production list | `config.json` → `.overnight` |
 | Install, status, uninstall (an install retires the 02:11 pilot pair, so only one nightly start exists) | `scripts/timers-ctl.sh` |
-| Tests | `tests/test-overnight-guarded.sh` (81 checks), `tests/test-overnight-workflow.sh` (12 checks) |
+| Tests | `tests/test-overnight-guarded.sh` (85 checks), `tests/test-overnight-workflow.sh` (12 checks) |
 
 ## What happens at 23:30
 
@@ -48,12 +48,15 @@ before any merge; costs about 50 seat-points a night". This page is the contract
      `gh` shim, and every read is bound to a known number:
      - Every call is bound to this repo:
        - a `--repo`, `-R`, `--repo=` or `GH_REPO` naming another repo is refused;
-       - `--repo github.com/<this repo>` is appended when none is given;
+       - every caller `--repo` is stripped once checked, and one `--repo github.com/<this repo>` is appended
+         (`api` always gets `--hostname github.com`);
+       - `GH_CONFIG_DIR` and `XDG_CONFIG_HOME` must be the values the shim was made under;
        - a `GH_HOST` other than github.com, a joined `-Rx` and `--` are refused, and the enterprise tokens are
          unset;
        - api `repos/{o}/{r}` must be this repo.
-     - `pr create` runs from a branch of this repo only (a `--head owner:branch` in a fork is refused), and the
-       shim records a PR only from a successful create whose last line is exactly
+     - `pr create` runs from a branch of this repo only (a `--head owner:branch` in a fork is refused). The shim
+       records a PR only when the create succeeded, the PR's actual `head.repo` (read back from
+       `pulls/N`) is this repo, and the create's last output line is exactly
        this repo's PR URL. `--dry-run` and `--web` are refused.
      - `pr diff|checks|comment N` work only for a PR this run opened.
      - `issue view N` works only for this night's vetted issues.

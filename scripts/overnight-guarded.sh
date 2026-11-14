@@ -118,7 +118,7 @@ write_sweep() { # $1 = json doc
 make_pr_only_guards() { # $1 = shim dir, $2 = clone dir, $3 = real gh path, $4 = vetted issue numbers, $5 = owner/repo
   mkdir -p "$1"
   : > "$1/prs"
-  { printf '#!/usr/bin/env bash\nREAL_GH=%q\nISSUES=%q\nPRS_FILE=%q\nREPO=%q\n' "$3" " $4 " "$1/prs" "$5"; cat <<'SHIM'; } > "$1/gh"
+  { printf '#!/usr/bin/env bash\nREAL_GH=%q\nISSUES=%q\nPRS_FILE=%q\nREPO=%q\nCFG0=%q\nXDG0=%q\n' "$3" " $4 " "$1/prs" "$5" "${GH_CONFIG_DIR:-}" "${XDG_CONFIG_HOME:-}"; cat <<'SHIM'; } > "$1/gh"
 # overnight-guarded PR-only shim: an ALLOWLIST with no flag-arity guessing (security review 2026-11-14:
 # inferring the action past flags is a parser differential). The action must be the word right after the
 # subcommand; in api mode only an exact flag set is accepted, each flag as its own word.
@@ -138,15 +138,25 @@ same_repo() { local r; r=$(lc "$1"); r="${r#https://}"; r="${r#github.com/}"; [ 
 # github.com only: another host would make every binding below meaningless (security review)
 [ -z "${GH_HOST:-}" ] || [ "$(lc "$GH_HOST")" = github.com ] || refuse "GH_HOST=$GH_HOST (github.com only)"
 unset GH_HOST GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
+# the gh config (hosts, tokens, aliases) is the one the shim was made under (security review)
+[ "${GH_CONFIG_DIR:-}" = "$CFG0" ] || refuse "GH_CONFIG_DIR changed"
+[ "${XDG_CONFIG_HOME:-}" = "$XDG0" ] || refuse "XDG_CONFIG_HOME changed"
 for a in "$@"; do case "$a" in --) refuse "'--' (the shim reads every argument)";; -R?*) refuse "joined $a (write -R OWNER/REPO)";; esac; done
 inject=0
 case "$sub" in pr|issue|label)
-  inject=1; prev=""
+  # every caller --repo must name this repo, then ALL are stripped and one fully-qualified
+  # --repo github.com/REPO is appended, so what gh resolves never depends on the caller's spelling
+  inject=1; prev=""; keep=("$sub" "$act")
   for a in "${@:3}"; do
-    case "$prev" in -R|--repo) same_repo "$a" || refuse "$sub $act --repo $a (only $REPO)"; inject=0;; esac
-    case "$a" in --repo=*) same_repo "${a#--repo=}" || refuse "$sub $act $a (only $REPO)"; inject=0;; esac
-    prev="$a"
-  done;;
+    case "$prev" in -R|--repo) same_repo "$a" || refuse "$sub $act --repo $a (only $REPO)"; prev=""; continue;; esac
+    case "$a" in
+      -R|--repo) prev="$a"; continue;;
+      --repo=*) same_repo "${a#--repo=}" || refuse "$sub $act $a (only $REPO)"; prev=""; continue;;
+    esac
+    keep+=("$a"); prev="$a"
+  done
+  [ -z "$prev" ] || case "$prev" in -R|--repo) refuse "$sub $act $prev without a value";; esac
+  set -- "${keep[@]}";;
 esac
 case "$sub" in
   pr)    case "$act" in
@@ -157,12 +167,17 @@ case "$sub" in
                      case "$prev" in -H|--head) case "$a" in *:*) refuse "pr create --head $a (a head in another owner's fork is not writer-authored)";; esac;; esac
                      prev="$a"
                    done
-                   [ "$inject" = 1 ] && set -- "$@" --repo "github.com/$REPO"; out=$("$REAL_GH" "$@"); rc=$?; printf '%s\n' "$out"
+                   set -- "$@" --repo "github.com/$REPO"; out=$("$REAL_GH" "$@"); rc=$?; printf '%s\n' "$out"
                    # record a PR only from a successful create whose LAST line is exactly this repo's PR URL
                    # (security review: a dry run, or an "already exists: <url>" error, must not poison the ledger)
                    last=$(printf '%s\n' "$out" | tail -n1)
                    if [ "$rc" -eq 0 ] && [[ "$(lc "$last")" =~ ^https://github\.com/$(lc "$REPO" | sed 's/[.]/\\./g')/pull/([0-9]+)$ ]]; then
-                     echo "${BASH_REMATCH[1]}" >> "$PRS_FILE"
+                     # the URL proves only the BASE repo; gh may infer a fork as the head from the clone's
+                     # remotes (xreview r13), so the PR's actual head repo must be this repo too
+                     pn="${BASH_REMATCH[1]}"
+                     hr=$("$REAL_GH" api --hostname github.com "repos/$REPO/pulls/$pn" --jq '.head.repo.full_name // ""' 2>/dev/null)
+                     if same_repo "$hr"; then echo "$pn" >> "$PRS_FILE"
+                     else echo "overnight-guarded: PR #$pn has head repo '${hr:-?}', not $REPO — not treated as this run's PR" >&2; fi
                    fi
                    exit "$rc";;
            diff|checks|comment) mine_pr "$num" || refuse "pr $act $num (only PRs this run opened)";;
@@ -183,7 +198,7 @@ case "$sub" in
              -X|--method) [ "$k" -lt "$n" ] || refuse "api $a without a value"; method=$(printf '%s' "$v" | tr '[:lower:]' '[:upper:]'); explicit=1; k=$((k+1));;
              -f|-F|--field|--raw-field) [ "$k" -lt "$n" ] || refuse "api $a without a value"
                                          case "$v" in *@*) refuse "api $a with a file value";; esac; fields=1; k=$((k+1));;
-             -*) refuse "api flag '$a' (only -H --header --jq -q --paginate -X/--method GET -f -F --field --raw-field)";;
+             -*) refuse "api flag '$a' (only -H --header --jq -q --paginate -X/--method GET)";;
              *) [ -z "$ep" ] || refuse "api with two endpoints"; ep="$a";;
            esac
          done
@@ -212,6 +227,7 @@ case "$sub $act" in "issue view"|"pr checks"|"pr diff")
   for a in "${@:3}"; do case "$a" in -c|*omment*|*eview*|-[!-]?*) refuse "$sub $act $a (comments and reviews are unvetted input; no grouped short flags)";; esac; done;;
 esac
 [ "$inject" = 1 ] && set -- "$@" --repo "github.com/$REPO"
+[ "$sub" = api ] && set -- "$@" --hostname github.com
 exec "$REAL_GH" "$@"
 SHIM
   chmod +x "$1/gh"
