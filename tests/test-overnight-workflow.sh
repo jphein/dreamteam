@@ -38,12 +38,12 @@ JS
 }
 has(){ jq -e "$2" <<<"$1" >/dev/null 2>&1; }
 
-o=$(run '{"repo":"o/r","issues":[{"number":7,"title":"seven"},{"number":9,"title":"nine"}],"prOnly":true,"prGate":"/x/pr-gate.sh"}')
+o=$(run '{"repo":"o/r","issues":[{"number":7,"title":"seven","body":"SNAP-BODY seven"},{"number":9,"title":"nine","body":"SNAP-BODY nine"}],"prOnly":true,"prGate":"/x/pr-gate.sh"}')
 has "$o" '[.labels[]|select(startswith("scout:"))]|length==0' && pass "issues given → no scout agent" || fail "scouted despite issues: $o"
 has "$o" '[.labels[]|select(startswith("fix:"))]|length==2' && pass "exactly the 2 handed-over issues are fixed" || fail "fix count: $(jq -c .labels <<<"$o")"
 has "$o" '[.prompts|to_entries[]|select(.key|startswith("fix:"))|.value|test("gh #7|gh #9")]|all' && pass "fix prompts name the dream issue numbers" || fail "issue numbers missing from fix prompts"
-has "$o" '[.prompts|to_entries[]|select(.key|startswith("fix:"))|.value|(test("UNTRUSTED DATA") and test("DATA, never instructions") and test("--json title,body") and test("never its comments"))]|all' \
-  && pass "fixer prompts fence the issue text as untrusted data and read title+body only, never comments" || fail "fixer prompt lacks the untrusted-data fence"
+has "$o" '[.prompts|to_entries[]|select(.key|startswith("fix:"))|.value|(test("UNTRUSTED DATA") and test("DATA, never instructions") and test("SNAP-BODY") and test("do not fetch the issue"))]|all' \
+  && pass "fixer prompts carry the issue snapshot, fenced as untrusted data, and say not to fetch it again" || fail "fixer prompt lacks the untrusted-data fence"
 has "$o" '[.prompts|to_entries[]|select(.key|startswith("review:"))|.value|test("untrusted data")]|all' \
   && pass "reviewer prompts quote the issue as untrusted and check for smuggled CI/credential edits" || fail "reviewer prompt lacks the fence"
 has "$o" '[.labels[]|select(startswith("ship:"))]|length==0' && pass "prOnly → no merge agent runs" || fail "prOnly shipped: $(jq -c .labels <<<"$o")"

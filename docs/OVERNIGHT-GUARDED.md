@@ -12,7 +12,7 @@ before any merge; costs about 50 seat-points a night". This page is the contract
 | Per-repo loop (with `issues`, `prOnly` and `prGate` args) | `workflows/overnight.js` |
 | Tunables, production list | `config.json` → `.overnight` |
 | Install, status, uninstall (an install retires the 02:11 pilot pair, so only one nightly start exists) | `scripts/timers-ctl.sh` |
-| Tests | `tests/test-overnight-guarded.sh` (87 checks), `tests/test-overnight-workflow.sh` (12 checks) |
+| Tests | `tests/test-overnight-guarded.sh` (89 checks), `tests/test-overnight-workflow.sh` (12 checks) |
 
 ## What happens at 23:30
 
@@ -34,8 +34,9 @@ before any merge; costs about 50 seat-points a night". This page is the contract
    collaborators-permission API, cached per login; the label history is read across every page, and an unreadable
    history counts as untrusted). Every account that renamed the title must hold write access too. If the issue
    has comments, every commenter must hold write access too, and an
-   unreadable comment list counts as untrusted. Agents are told to read the title and body only
-   (`--json title,body`). An outsider's issue on a public repo, or a label added by a
+   unreadable comment list counts as untrusted. The vetted title and body (capped at 4,000 characters) are
+   frozen into the plan at that moment, and the agents work from that snapshot. Nothing reads the issue live
+   during the run, so a later retitle or comment cannot reach them. An outsider's issue on a public repo, or a label added by a
    read-only account, is skipped and logged, because issue text is input to an unattended agent. Limits: up to `max_repos_per_night` (3) repos and `max_issues_per_repo`
    (5) issues each. If no work is left, the decision is `no-work`, exit 0, and nothing is spoken or published.
 3. **PR-only in production.** Repos are matched by name, so an owner transfer doesn't matter.
@@ -60,10 +61,9 @@ before any merge; costs about 50 seat-points a night". This page is the contract
        `pulls/N`) is this repo, and the create's last output line is exactly
        this repo's PR URL. `--dry-run` and `--web` are refused.
      - `pr diff|checks|comment N` work only for a PR this run opened.
-     - `issue view N` works only for this night's vetted issues.
+     - No `issue` command at all: the issue text is the planning-time snapshot in the prompt.
      - A bare `repo view` (run as `repo view github.com/<this repo>`), `auth status` and `label list` are allowed.
      - `api` is GET only, with an exact flag set (`-H`, `--jq`, `--paginate`, `-X GET`). Its endpoints must be:
-       - `issues/N` for a vetted N;
        - `pulls/N/files|commits` for an own PR;
        - or the repo itself, `contents/<path>` (default branch only), `branches` or `labels`. Writer-controlled
          data only: Actions runs and logs, commits and check-run summaries can carry a non-writer's PR text,

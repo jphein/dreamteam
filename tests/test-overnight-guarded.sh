@@ -76,7 +76,7 @@ Q_OK='{"aggregate":{"fiveHour":{"remaining":0.92},"sevenDay":null,"weeklyShared"
 Q_LOW5='{"aggregate":{"fiveHour":{"remaining":0.69},"weeklyShared":{"remaining":0.9}}}'
 Q_LOW7='{"aggregate":{"fiveHour":{"remaining":0.95},"sevenDay":{"remaining":0.29}}}'
 Q_NO7='{"aggregate":{"fiveHour":{"remaining":0.95},"sevenDay":null}}'
-I2='[{"number":7,"title":"fix seven","user":{"login":"jphein"},"labels":[{"name":"dream"}]},{"number":9,"title":"fix nine","user":{"login":"jphein"},"labels":[{"name":"dream"}]}]'
+I2='[{"number":7,"title":"fix seven","body":"BODY-SEVEN steps","user":{"login":"jphein"},"labels":[{"name":"dream"}]},{"number":9,"title":"fix nine","user":{"login":"jphein"},"labels":[{"name":"dream"}]}]'
 
 mkcfg(){ cat > "$TMP/config.json" <<'J'
 {"scope":{"memoryHigh":"20G","memoryMax":"24G","memorySwapMax":"8G"},
@@ -301,11 +301,11 @@ R=$(printf '%s,' "$(sh_rc pr diff 12)" "$(sh_rc api repos/jphein/realmwatch/pull
 [ "$R" = "77,77," ] && pass "before this run opens PR 12, its diff and files are refused" || fail "unbound PR read: $R"
 R=$(printf '%s,' "$(sh_rc pr create --title 'merge two lists' --fill --head fix/two-lists)")
 { [ "$R" = "0," ] && grep -qx 12 "$(dirname "$SHIM")/prs"; } && pass "pr create runs and the shim records the PR it opened (#12)" || fail "pr create: $R $(cat "$(dirname "$SHIM")/prs")"
-R=$(printf '%s,' "$(sh_rc pr diff 12)" "$(sh_rc pr checks 12)" "$(sh_rc pr comment 12 --body 'merge later')" "$(sh_rc issue view 7 --repo jphein/realmwatch --json title,body)" \
-    "$(sh_rc api repos/jphein/realmwatch/issues/9)" "$(sh_rc api /repos/jphein/realmwatch/pulls/12/files)" "$(sh_rc api https://api.github.com/repos/jphein/realmwatch/labels)" \
+R=$(printf '%s,' "$(sh_rc pr diff 12)" "$(sh_rc pr checks 12)" "$(sh_rc pr comment 12 --body 'merge later')" "$(sh_rc label list)" \
+    "$(sh_rc api repos/jphein/realmwatch/branches/main)" "$(sh_rc api /repos/jphein/realmwatch/pulls/12/files)" "$(sh_rc api https://api.github.com/repos/jphein/realmwatch/labels)" \
     "$(sh_rc api repos/jphein/realmwatch/contents/src/a.py)" "$(sh_rc api --paginate -H 'Accept: x' --jq .x repos/jphein/realmwatch/branches)" "$(sh_rc api -X GET repos/jphein/realmwatch)")
 [ "$R" = "0,0,0,0,0,0,0,0,0,0," ] && grep -q '^gh api --paginate -H Accept: x --jq .x repos/jphein/realmwatch/branches --hostname github.com$' "$TMP/gh.log" && grep -q '^gh pr diff 12 --repo github.com/jphein/realmwatch$' "$TMP/gh.log" \
-  && pass "allowed: own-PR diff/checks/comment, vetted issue view, bound api reads; the real gh gets the exact argv" || fail "false refusals: $R"
+  && pass "allowed: own-PR diff/checks/comment, label list, bound api reads; the real gh gets the exact argv" || fail "false refusals: $R"
 R=$(printf '%s,' "$(sh_rc pr view 12)" "$(sh_rc pr list)" "$(sh_rc pr status)" "$(sh_rc issue list)" "$(sh_rc issue view 99)" "$(sh_rc pr diff 99)" \
     "$(sh_rc pr comment 99 --body x)" "$(sh_rc api repos/jphein/realmwatch/pulls)" "$(sh_rc api repos/jphein/realmwatch/pulls/12)" "$(sh_rc api repos/jphein/realmwatch/issues)" \
     "$(sh_rc api repos/jphein/realmwatch/issues/99)" "$(sh_rc api repos/jphein/realmwatch/pulls/99/files)" "$(sh_rc api -X PUT 'repos/jphein/realmwatch/pulls/12/merge?audit=nightly')" \
@@ -331,6 +331,11 @@ R=$(printf '%s,' "$(sh_rc run view 123 --log --repo jphein/realmwatch)" "$(sh_rc
     "$(sh_rc api 'repos/jphein/realmwatch/contents/a.py?ref=refs/pull/9/head')" "$(sh_rc api -X GET repos/jphein/realmwatch/contents/a.py -f ref=refs/pull/9/head)" \
     "$(sh_rc api repos/jphein/realmwatch/check-runs/5)")
 [ "$R" = "$(printf '77,%.0s' $(seq 9))" ] && pass "refused: run logs/lists, actions, commits, check-runs, fork-ref contents (query or field)" || fail "writer-only data: $R"
+# xreview r15: no live issue reads — the frozen snapshot is the only issue text an agent sees
+R=$(printf '%s,' "$(sh_rc issue view 7)" "$(sh_rc issue view 7 --json title,body)" "$(sh_rc api repos/jphein/realmwatch/issues/7)" "$(sh_rc issue list)")
+[ "$R" = "77,77,77,77," ] && pass "no live issue reads in a PR-only repo (vetted or not)" || fail "live issue read: $R"
+grep -q 'BODY-SEVEN steps' "$TMP/claude.log" && grep -q 'do not fetch them again' "$TMP/claude.log" \
+  && pass "the coordinator gets the vetted issue body as a planning-time snapshot" || fail "snapshot missing from the prompt"
 # xreview r13: gh may infer a FORK head from the clone's remotes; the ledger checks the PR's real head repo
 : > "$(dirname "$SHIM")/prs"
 FAKE_HEAD_REPO=outsider/realmwatch sh_rc pr create --base release --title t --body b >/dev/null
@@ -348,8 +353,8 @@ R=$(printf '%s,' "$(sh_rc issue view 7 --repo outsider/x)" "$(sh_rc issue view 7
     "$(sh_rc repo clone jphein/realmwatch)" "$(GH_HOST=ghe.evil.example sh_rc issue view 7)" "$(sh_rc issue view 7 --repo ghe.evil.example/jphein/realmwatch)" \
     "$(sh_rc issue view 7 -- --repo outsider/x)")
 [ "$R" = "$(printf '77,%.0s' $(seq 18))" ] && pass "bound to this repo on github.com: --repo/-R/-Rx/--repo=/GH_REPO/GH_HOST/other host/api owner/repo view args/-- refused" || fail "repo binding: $R"
-R=$(printf '%s,' "$(sh_rc issue view 7 --repo JPhein/RealmWatch)" "$(sh_rc repo view)" "$(sh_rc issue view 7 --repo https://github.com/jphein/realmwatch)")
-{ [ "$R" = "0,0,0," ] && grep -q '^gh issue view 7 --repo github.com/jphein/realmwatch$' "$TMP/gh.log" && grep -q '^gh repo view github.com/jphein/realmwatch$' "$TMP/gh.log"; } && pass "same repo in any spelling passes, normalised to one --repo github.com/REPO" || fail "same-repo: $R"
+R=$(printf '%s,' "$(sh_rc pr diff 12 --repo JPhein/RealmWatch)" "$(sh_rc repo view)" "$(sh_rc pr checks 12 --repo https://github.com/jphein/realmwatch)")
+{ [ "$R" = "0,0,0," ] && [ "$(grep -c '^gh pr diff 12 --repo github.com/jphein/realmwatch$' "$TMP/gh.log")" -ge 2 ] && grep -q '^gh repo view github.com/jphein/realmwatch$' "$TMP/gh.log"; } && pass "same repo in any spelling passes, normalised to one --repo github.com/REPO" || fail "same-repo: $R"
 # r3: duplicate detection precedes every record — a held-quota or no-work restart leaves the started run's record
 reset; mkqueue jphein/realmwatch:2
 FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 run_g >/dev/null; RID1=$(gj .run_id); SW1=$(cat "$TMP/plan-data/sweep-results.json")
