@@ -36,6 +36,7 @@ cat > "$BIN/gh" <<'S'
 echo "gh $*" >> "$GH_LOG"
 for a in "$@"; do
   case "$a" in
+    repos/*/issues/*/comments*) [ "${FAKE_COMMENTS_FAIL:-0}" = 1 ] && exit 1; echo "${FAKE_COMMENTS:-[]}"; exit 0;;
     repos/*/issues/*/events*) def='[{"event":"labeled","label":{"name":"dream"},"actor":{"login":"jphein"}}]'
       [ "${FAKE_EVENTS_FAIL:-0}" = 1 ] && exit 1
       echo "${FAKE_EVENTS:-$def}"; [ -n "${FAKE_EVENTS_P2:-}" ] && case " $* " in *" --paginate "*) echo "$FAKE_EVENTS_P2";; esac; exit 0;;
@@ -292,11 +293,14 @@ R=$(printf '%s,' "$(sh_rc api --method PUT 'repos/o/r/pulls/1/merge?audit=nightl
     "$(sh_rc api -X PUT 'repos/o/r/pulls/1/merge#x')" "$(sh_rc api repos/o/r/merges -f base=main -f head=x)" \
     "$(sh_rc api https://api.github.com/graphql -X POST --input req.json)" "$(sh_rc api 'https://api.github.com/graphql?x=1' --input -)" \
     "$(sh_rc api -X PATCH repos/o/r/pulls/1 --input body.json)" "$(sh_rc api graphql -f 'query={viewer{login}}')" "$(sh_rc pr close 5)" \
-    "$(sh_rc pr edit 5 --base main)" "$(sh_rc api repos/o/r/issues/5/comments -f body=x)" "$(sh_rc workflow run deploy)" "$(sh_rc secret list)")
-[ "$R" = "77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77," ] && pass "allowlist shim refuses merge in every spelling, any graphql, non-GET or bodied api, pr close/edit, workflow, secret, alias" || fail "shim refusals: $R"
+    "$(sh_rc pr edit 5 --base main)" "$(sh_rc api repos/o/r/issues/5/comments -f body=x)" "$(sh_rc workflow run deploy)" "$(sh_rc secret list)" \
+    "$(sh_rc pr -R o/r diff 5)" "$(sh_rc pr --repo o/r merge 5)" "$(sh_rc api -XPOST repos/o/r/pulls/1/merge)" "$(sh_rc api --method=POST repos/o/r/x)" \
+    "$(sh_rc api -iX POST repos/o/r/x)" "$(sh_rc api -X GET repos/o/r/issues/7/comments)" "$(sh_rc api -X GET repos/o/r/issues/7/timeline)" \
+    "$(sh_rc issue view 7 --comments)" "$(sh_rc issue comment 7 --body hi)" "$(sh_rc api -X GET repos/o/r/x -f q=@f)")
+[ "$R" = "77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77," ] && pass "allowlist shim refuses merge in every spelling, any graphql, non-GET or bodied api, pr close/edit, workflow, secret, alias" || fail "shim refusals: $R"
 R=$(printf '%s,' "$(sh_rc pr create --title 'merge two lists' --fill)" "$(sh_rc api repos/o/r/pulls/1)" "$(sh_rc api -X GET repos/o/r/issues -f state=open)" "$(sh_rc pr view 5 --json state)" \
-    "$(sh_rc pr -R o/r diff 5)" "$(sh_rc issue view 7 --repo o/r)" "$(sh_rc pr comment 5 --body 'merge later')")
-[ "$R" = "0,0,0,0,0,0,0," ] && pass "allowlist passes reads, explicit-GET api with fields, pr create/diff/comment (the word merge in a title is not a merge)" || fail "shim false refusals: $R"
+    "$(sh_rc pr diff 5 -R o/r)" "$(sh_rc issue view 7 --repo o/r --json title,body)" "$(sh_rc pr comment 5 --body 'merge later')" "$(sh_rc api --paginate -H 'Accept: x' --jq .x repos/o/r/pulls)")
+[ "$R" = "0,0,0,0,0,0,0,0," ] && grep -q '^gh api --paginate -H Accept: x --jq .x repos/o/r/pulls$' "$TMP/gh.log" && pass "allowlist passes reads, explicit-GET api with fields, pr create/diff/comment, and hands the real gh the exact argv" || fail "shim false refusals: $R"
 # r3: duplicate detection precedes every record — a held-quota or no-work restart leaves the started run's record
 reset; mkqueue jphein/realmwatch:2
 FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 run_g >/dev/null; RID1=$(gj .run_id); SW1=$(cat "$TMP/plan-data/sweep-results.json")
@@ -327,6 +331,18 @@ reset; mkqueue jphein/realmwatch:2
 FAKE_PERM_helper=write FAKE_EVENTS='[{"event":"labeled","label":{"name":"dream"},"actor":{"login":"helper"}}]' \
   FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 run_g >/dev/null
 [ "$(gj .decision)" = "started" ] && pass "a labeller with write access is trusted (control)" || fail "write labeller rejected: $(gj .reason)"
+# comments are input too: an untrusted commenter (or an unreadable comment list) → issue skipped
+reset; mkqueue jphein/realmwatch:2
+FAKE_COMMENTS='[{"user":{"login":"jphein"}},{"user":{"login":"stranger"}}]' \
+  FAKE_GH_realmwatch='[{"number":7,"title":"mine","user":{"login":"jphein"},"comments":2}]' FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 run_g >/dev/null
+{ [ "$(gj .decision)" = "no-work" ] && grep -q "commenter 'stranger' lacks write" "$TMP/state/dreamteam.log"; } \
+  && pass "an issue with a comment from a non-writer is skipped" || fail "comment provenance: $(gj .decision)"
+reset; mkqueue jphein/realmwatch:2
+FAKE_COMMENTS_FAIL=1 FAKE_GH_realmwatch='[{"number":7,"title":"mine","user":{"login":"jphein"},"comments":1}]' FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 run_g >/dev/null
+[ "$(gj .decision)" = "no-work" ] && pass "an unreadable comment list → untrusted" || fail "comment read failure trusted"
+reset; mkqueue jphein/realmwatch:2
+FAKE_COMMENTS='[{"user":{"login":"jphein"}}]' FAKE_GH_realmwatch='[{"number":7,"title":"mine","user":{"login":"jphein"},"comments":1}]' FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 run_g >/dev/null
+[ "$(gj .decision)" = "started" ] && pass "comments only from writers → worked (control)" || fail "writer comments rejected: $(gj .reason)"
 # hook honours the clone's real default branch (origin/HEAD → develop), not only main/master
 reset; mkqueue jphein/realmwatch:2
 FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 run_g >/dev/null

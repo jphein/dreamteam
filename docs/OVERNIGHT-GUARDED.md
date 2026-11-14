@@ -12,7 +12,7 @@ before any merge; costs about 50 seat-points a night". This page is the contract
 | Per-repo loop (with `issues`, `prOnly` and `prGate` args) | `workflows/overnight.js` |
 | Tunables, production list | `config.json` → `.overnight` |
 | Install, status, uninstall (an install retires the 02:11 pilot pair, so only one nightly start exists) | `scripts/timers-ctl.sh` |
-| Tests | `tests/test-overnight-guarded.sh` (73 checks), `tests/test-overnight-workflow.sh` (12 checks) |
+| Tests | `tests/test-overnight-guarded.sh` (76 checks), `tests/test-overnight-workflow.sh` (12 checks) |
 
 ## What happens at 23:30
 
@@ -32,7 +32,9 @@ before any merge; costs about 50 seat-points a night". This page is the contract
    live over REST and drops pull requests. **Provenance:** an issue is worked only when its author AND the account
    that last added the `dream` label both hold write, maintain or admin on that repo (checked through the
    collaborators-permission API, cached per login; the label history is read across every page, and an unreadable
-   history counts as untrusted). An outsider's issue on a public repo, or a label added by a
+   history counts as untrusted). If the issue has comments, every commenter must hold write access too, and an
+   unreadable comment list counts as untrusted. Agents are told to read the title and body only
+   (`--json title,body`). An outsider's issue on a public repo, or a label added by a
    read-only account, is skipped and logged, because issue text is input to an unattended agent. Limits: up to `max_repos_per_night` (3) repos and `max_issues_per_repo`
    (5) issues each. If no work is left, the decision is `no-work`, exit 0, and nothing is spoken or published.
 3. **PR-only in production.** Repos are matched by name, so an owner transfer doesn't matter.
@@ -45,14 +47,17 @@ before any merge; costs about 50 seat-points a night". This page is the contract
    - **Guardrails in PR-only repos (not a security boundary).** The coordinator's PATH starts with an ALLOWLIST
      `gh` shim. It allows only these commands:
      - `pr create|view|list|checks|diff|comment|status`
-     - `issue view|list|comment`
+     - `issue view|list` (never `--comments`)
      - `repo view|clone`
      - `run view|list`
      - `auth status`
      - `label list`
-     - `api` with GET only: never GraphQL, never `--input`, and fields only with an explicit `-X GET`.
+     - `api` with GET only. Only an exact set of flags is accepted (`-H`, `--jq`, `--paginate`, `-X GET`, and
+       `-f`/`-F` fields without `@` and only with an explicit `-X GET`). GraphQL is refused, and so are the
+       comment and timeline endpoints.
 
-     Everything else is refused, every merge spelling included. The clone also gets a `pre-push` hook that refuses
+     The action word must come right after the subcommand. The shim never guesses flag arity, and nothing else
+     is accepted, every merge spelling included. The clone also gets a `pre-push` hook that refuses
      the clone's real default branch (`origin/HEAD`) and main/master/trunk/production. Together they stop an agent that follows a misleading issue body ("merge it").
      They cannot stop a hostile one, which could call `/usr/bin/gh` or use `--no-verify`. The boundary is GitHub
      branch protection on those repos.

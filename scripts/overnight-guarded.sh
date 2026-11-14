@@ -118,40 +118,42 @@ write_sweep() { # $1 = json doc
 make_pr_only_guards() { # $1 = shim dir, $2 = clone dir, $3 = real gh path
   mkdir -p "$1"
   { printf '#!/usr/bin/env bash\nREAL_GH=%q\n' "$3"; cat <<'SHIM'; } > "$1/gh"
-# overnight-guarded PR-only shim: an ALLOWLIST (security review 2026-11-14: a denylist kept missing merge
-# spellings). A PR-only fixer or reviewer needs only these; everything else is refused.
+# overnight-guarded PR-only shim: an ALLOWLIST with no flag-arity guessing (security review 2026-11-14:
+# inferring the action past flags is a parser differential). The action must be the word right after the
+# subcommand; in api mode only an exact flag set is accepted, each flag as its own word.
 refuse() { echo "overnight-guarded: PR-only repo — 'gh $*' is not on the allowlist (open the PR and stop)" >&2; exit 77; }
-sub="${1:-}"; shift || true
-act=""; method=GET; explicit=0; body=0; gql=0; skip=0; prev=""
-for a in "$@"; do
-  if [ "$skip" = 1 ]; then skip=0; case "$prev" in -X|--method) method="$a"; explicit=1;; esac; continue; fi
-  prev="$a"
-  case "$a" in
-    -R|--repo|-X|--method|-H|--header|--jq|-q|--template|-t|--title|-b|--body|-B|--base|--head|-L|--limit|--json|-s|--state|-l|--label|-a|--assignee|-A|--author|-S|--search|-c|--commit|-w|--web) skip=1;;
-    -X*|--method=*) method="${a#-X}"; method="${method#--method=}"; explicit=1;;
-    --input|--input=*) body=2; [ "$a" = --input ] && skip=1;;
-    -f|-F|--field|--raw-field) [ "$body" = 2 ] || body=1; skip=1;;
-    -f*|-F*|--field=*|--raw-field=*) [ "$body" = 2 ] || body=1;;
-    -*) ;;
-    *) if [ -z "$act" ]; then act="$a"; fi
-       e="${a%%[?#]*}"; e="${e%/}"; case "$e" in graphql|*/graphql) gql=1;; esac;;
-  esac
-done
-method=$(printf '%s' "$method" | tr '[:lower:]' '[:upper:]')
+sub="${1:-}"; act="${2:-}"
+[ "$sub" = api ] || case "$act" in -*|"") refuse "$sub $act (the action must come right after '$sub')";; esac
 case "$sub" in
   pr)    case "$act" in create|view|list|checks|diff|comment|status) ;; *) refuse "$sub" "$act";; esac;;
-  issue) case "$act" in view|list|comment) ;; *) refuse "$sub" "$act";; esac;;
+  issue) case "$act" in view|list) ;; *) refuse "$sub" "$act";; esac
+         for a in "$@"; do case "$a" in --comments|-c) refuse "issue $act --comments (comments are unvetted input)";; esac; done;;
   repo)  case "$act" in view|clone) ;; *) refuse "$sub" "$act";; esac;;
   run)   case "$act" in view|list) ;; *) refuse "$sub" "$act";; esac;;
   auth)  case "$act" in status) ;; *) refuse "$sub" "$act";; esac;;
   label) case "$act" in list) ;; *) refuse "$sub" "$act";; esac;;
-  # api: GET only. gh sends fields as a POST unless -X GET is explicit; an --input body is never read here.
-  api)   [ "$gql" = 0 ] || refuse "api graphql"; [ "$method" = GET ] || refuse "api -X $method"
-         [ "$body" = 2 ] && refuse "api --input"; { [ "$body" = 1 ] && [ "$explicit" = 0 ]; } && refuse "api fields without -X GET (a POST)";;
-  --version|version|help|"") ;;
+  api)   A=("${@:2}"); n=${#A[@]}; k=0; ep=""; method=GET; explicit=0; fields=0
+         while [ "$k" -lt "$n" ]; do
+           a="${A[$k]}"; v="${A[$((k+1))]:-}"; k=$((k+1))
+           case "$a" in
+             -H|--header|--jq|-q) [ "$k" -lt "$n" ] || refuse "api $a without a value"; k=$((k+1));;
+             --paginate) ;;
+             -X|--method) [ "$k" -lt "$n" ] || refuse "api $a without a value"; method=$(printf '%s' "$v" | tr '[:lower:]' '[:upper:]'); explicit=1; k=$((k+1));;
+             -f|-F|--field|--raw-field) [ "$k" -lt "$n" ] || refuse "api $a without a value"
+                                         case "$v" in *@*) refuse "api $a with a file value";; esac; fields=1; k=$((k+1));;
+             -*) refuse "api flag '$a' (only -H --header --jq -q --paginate -X/--method GET -f -F --field --raw-field)";;
+             *) [ -z "$ep" ] || refuse "api with two endpoints"; ep="$a";;
+           esac
+         done
+         [ "$method" = GET ] || refuse "api -X $method"
+         { [ "$fields" = 1 ] && [ "$explicit" = 0 ]; } && refuse "api fields without -X GET (gh would POST)"
+         e="${ep%%[?#]*}"; e="${e%/}"
+         case "$e" in ""|graphql|*/graphql) refuse "api graphql or no endpoint";; esac
+         case "$e" in */comments|*/comments/*|*/timeline) refuse "api $e (comments are unvetted input)";; esac;;
+  --version|version) ;;
   *) refuse "$sub";;
 esac
-exec "$REAL_GH" "$sub" "$@"
+exec "$REAL_GH" "$@"
 SHIM
   chmod +x "$1/gh"
   [ -d "$2/.git/hooks" ] || mkdir -p "$2/.git/hooks"
@@ -319,7 +321,7 @@ for full in $CANDS; do
   # provenance (security review 2026-11-14): issue text is input to an unattended agent, so only issues
   # whose AUTHOR and whose `dream` LABELLER both hold write/maintain/admin on the repo are worked. An
   # outsider's issue on a public repo, or a label added by a read-only account, is skipped and logged.
-  cand=$(jq -c --argjson m "$(( MAX_ISSUES * 3 ))" '[.[]? | select(.pull_request|not) | {number, title: (.title[:160]), author: (.user.login // "")}] | .[:$m]' <<<"$raw" 2>/dev/null) || continue
+  cand=$(jq -c --argjson m "$(( MAX_ISSUES * 3 ))" '[.[]? | select(.pull_request|not) | {number, title: (.title[:160]), author: (.user.login // ""), comments: (.comments // 0)}] | .[:$m]' <<<"$raw" 2>/dev/null) || continue
   iss='[]'
   while IFS= read -r it; do
     [ "$(jq length <<<"$iss")" -ge "$MAX_ISSUES" ] && break
@@ -327,8 +329,16 @@ for full in $CANDS; do
     # every page (xreview r6: a relabel past event 100 must be seen); an unreadable history = untrusted
     lb=""; ev=$(gh api --paginate "repos/$full/issues/$n/events?per_page=100" 2>/dev/null) \
       && lb=$(jq -rs 'add // [] | [.[]? | select(.event=="labeled" and .label.name=="dream")] | last | .actor.login // ""' <<<"$ev" 2>/dev/null)
-    if trusted "$full" "$au" && trusted "$full" "$lb"; then iss=$(jq -c --argjson it "$it" '. + [$it | del(.author)]' <<<"$iss")
-    else log "work: $full#$n skipped — author '${au:-?}' / dream labeller '${lb:-?}' lacks write access (untrusted input)"; fi
+    # comments are input too (the agent could read them): every commenter must also hold write access;
+    # an unreadable comment list is untrusted
+    bad_c=""
+    if [ "$(jq -r .comments <<<"$it")" != "0" ]; then
+      if cm=$(gh api --paginate "repos/$full/issues/$n/comments?per_page=100" 2>/dev/null); then
+        while IFS= read -r c; do trusted "$full" "$c" || bad_c="${bad_c:-$c}"; done < <(jq -rs 'add // [] | [.[]?.user.login // ""] | unique | .[]' <<<"$cm" 2>/dev/null)
+      else bad_c="(unreadable comments)"; fi
+    fi
+    if trusted "$full" "$au" && trusted "$full" "$lb" && [ -z "$bad_c" ]; then iss=$(jq -c --argjson it "$it" '. + [$it | del(.author, .comments)]' <<<"$iss")
+    else log "work: $full#$n skipped — author '${au:-?}' / dream labeller '${lb:-?}'${bad_c:+ / commenter '$bad_c'} lacks write access (untrusted input)"; fi
   done < <(jq -c '.[]' <<<"$cand")
   k=$(jq length <<<"$iss"); [ "${k:-0}" -gt 0 ] || continue
   name="${full#*/}"
