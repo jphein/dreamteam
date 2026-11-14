@@ -12,7 +12,7 @@ before any merge; costs about 50 seat-points a night". This page is the contract
 | Per-repo loop (with `issues`, `prOnly` and `prGate` args) | `workflows/overnight.js` |
 | Tunables, production list | `config.json` → `.overnight` |
 | Install, status, uninstall (an install retires the 02:11 pilot pair, so only one nightly start exists) | `scripts/timers-ctl.sh` |
-| Tests | `tests/test-overnight-guarded.sh` (76 checks), `tests/test-overnight-workflow.sh` (12 checks) |
+| Tests | `tests/test-overnight-guarded.sh` (78 checks), `tests/test-overnight-workflow.sh` (12 checks) |
 
 ## What happens at 23:30
 
@@ -45,23 +45,24 @@ before any merge; costs about 50 seat-points a night". This page is the contract
    - A repo in neither list is PR-only. Adding a repo to `merge_repos` is the deliberate act that lets the sweep
      merge there.
    - **Guardrails in PR-only repos (not a security boundary).** The coordinator's PATH starts with an ALLOWLIST
-     `gh` shim. It allows only these commands:
-     - `pr create|view|list|checks|diff|comment|status`
-     - `issue view|list` (never `--comments`)
-     - `repo view|clone`
-     - `run view|list`
-     - `auth status`
-     - `label list`
-     - `api` with GET only. Only an exact set of flags is accepted (`-H`, `--jq`, `--paginate`, `-X GET`, and
-       `-f`/`-F` fields without `@` and only with an explicit `-X GET`). The endpoint must match a read
-       allowlist of `repos/{o}/{r}/…` paths: pulls, issues/N, commits and check-runs, actions runs, contents,
-       branches and labels. `%`, `//`, `..` and other hosts are refused, and so is GraphQL.
-     - `pr`/`issue` `view`/`list` refuse anything that names comments or reviews, in any spelling (flags,
-       `--json` fields, grouped short flags).
+     `gh` shim, and every read is bound to a known number:
+     - `pr create` runs, and the shim records the PR number it returns.
+     - `pr diff|checks|comment N` work only for a PR this run opened.
+     - `issue view N` works only for this night's vetted issues.
+     - `repo view|clone`, `run view|list`, `auth status` and `label list` are allowed.
+     - `api` is GET only, with an exact flag set (`-H`, `--jq`, `--paginate`, `-X GET`, `-f`/`-F` without `@`
+       and only with an explicit `-X GET`). Its endpoints must be:
+       - `issues/N` for a vetted N;
+       - `pulls/N/files|commits` for an own PR;
+       - or one of commits/check-runs, actions runs, contents, branches, labels.
 
-     The action word must come right after the subcommand. The shim never guesses flag arity, and nothing else
-     is accepted, every merge spelling included. The clone also gets a `pre-push` hook that refuses
-     the clone's real default branch (`origin/HEAD`) and main/master/trunk/production. Together they stop an agent that follows a misleading issue body ("merge it").
+       `%`, `//`, `..` and other hosts are refused, and so is GraphQL.
+
+     Listings (`pr list`, `issue list`, `pr view`, `pr status`) are refused, because they would hand the agent text a
+     non-writer wrote. So is anything that names comments or reviews, every merge spelling, and every mutation
+     other than `pr create` and `pr comment` on an own PR. The action word must come right after the subcommand,
+     so the shim never guesses flag arity. The clone also gets a `pre-push` hook that refuses
+the clone's real default branch (`origin/HEAD`) and main/master/trunk/production. Together they stop an agent that follows a misleading issue body ("merge it").
      They cannot stop a hostile one, which could call `/usr/bin/gh` or use `--no-verify`. The boundary is GitHub
      branch protection on those repos.
 4. **One start a night.** The guard holds an flock while it runs. A night marker (`state/overnight-night`, keyed
