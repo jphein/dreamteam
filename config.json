@@ -67,7 +67,9 @@
   },
   "org": {
     "agentsCatalog": "~/Projects/lexicon.realm.watch/catalog/agents.yaml",
-    "threeChannelOwners": ["jp"],
+    "threeChannelOwners": [
+      "jp"
+    ],
     "_notes": "OPTIONAL org map — who owns an agent, which department it serves, who it escalates to. scripts/lib/org_lookup.py reads lexicon's agents.yaml (fields department/owner/escalates_to; plain ids resolved by the owning org — TechEMPOWER: techempower-admin/org/). Read-only; never writes the catalog or the harness team config. Consumers: org-lookup.sh, roster-live.sh and idle-agents.sh --json (keys added ONLY when an agent resolves), the spawn template's ORG block. Missing file / no PyYAML / no match = byte-identical legacy output. Env DREAMTEAM_AGENTS_CATALOG=<path>|off overrides agentsCatalog. threeChannelOwners: humans whose escalation uses the REACHING JP rule (speech queue + Slack + top-of-reply block); any other owner gets slack+text. Readers default to these values if this section is absent."
   },
   "speech": {
@@ -96,6 +98,48 @@
     "_notes": {
       "guard": "gpu-guard.sh (PreToolUse Bash|Monitor in every session): a lane cannot launch GPU work on a card it does not hold (spec docs/superpowers/specs/2026-09-29-gpu-fleet-design.md §5). warn = allow, and log the would-block line to ~/.claude/state/dreamteam/gpu/guard.log (the rollout default, because GEMS lanes launch today with no claims on record); enforce = exit 2 with the reason; off = no check. A missing or unreadable value is warn, never off. Flip to enforce once the current holdings are seeded as claims and a day of warn lines shows no false positives.",
       "granters": "Who may claim, release and set windows, besides orchestrator sessions (no --agent-id) and JP's own shells: lane-name globs. nyx* is the resource-manager role (agents/nyx.md); morpheus-gems grants GEMS windows (FAMILIAR-RULES: 'Windows are Morpheus's to grant on every host')."
+    }
+  },
+  "overnight": {
+    "five_hour_min": 0.7,
+    "seven_day_min": 0.3,
+    "continue_five_hour_min": 0.4,
+    "max_repos_per_night": 3,
+    "max_issues_per_repo": 5,
+    "stop_at": "06:30",
+    "max_hours": 7.5,
+    "min_start_minutes": 60,
+    "min_repo_minutes": 30,
+    "production_repos": [
+      "realmwatch",
+      "livekit-voice",
+      "ha",
+      "techempower-admin",
+      "dreamteam",
+      "mempalace",
+      "palace-daemon",
+      "familiar.realm.watch",
+      "gnome-speaks",
+      "techempower.org",
+      "realm-cloud",
+      "smol"
+    ],
+    "merge_repos": [
+      "dreamscape",
+      "starcharts",
+      "adaptmem",
+      "candela",
+      "forageforall",
+      "multipass-structural-memory-eval"
+    ],
+    "never_sweep": [
+      "plan.realm.watch"
+    ],
+    "_notes": {
+      "guard": "scripts/overnight-guarded.sh (timer dreamteam-nightly-guarded.timer, 23:30). JP 2026-11-14 06:40 'go' on ask 4c77a5b8f3ef. THE 70 % QUOTA GUARD: the sweep starts only if the teamclaude proxy's aggregate.fiveHour.remaining >= five_hour_min AND the 7-day pool (aggregate.sevenDay.remaining, else weeklyShared.remaining; this proxy reports sevenDay null) >= seven_day_min. A proxy that does not answer, or answers without those numbers = no start (fail closed). Before each further repo the runner re-probes and stops under continue_five_hour_min, and stops when fewer than min_repo_minutes remain before stop_at. Contract: docs/OVERNIGHT-GUARDED.md.",
+      "production_repos": "Matched by repo NAME (owner-agnostic; repos moved jphein → techempower-org). PR-only: PRs are opened and oracle-reviewed, NEVER merged. Seeded 2026-11-14 from the catalog's deploy: systemd services (realmwatch, livekit-voice, dreamteam, mempalace, palace-daemon, familiar.realm.watch, smol) plus ha, techempower-admin, the live org site techempower.org, realm-cloud (cloud infra) and gnome-speaks (speech on every host).",
+      "merge_repos": "A PR merges only after the dreamteam:oracle review says approve AND scripts/pr-gate.sh exits 0 (no CI = no merge), one at a time. A repo in NEITHER list is PR-only (fail safe): adding a repo here is the deliberate act that lets the sweep merge in it.",
+      "never_sweep": "Never read, never swept. plan.realm.watch is local-only and holds JP's plan state."
     }
   }
 }

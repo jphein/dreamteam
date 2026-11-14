@@ -75,10 +75,28 @@ if [ -f "$STATE/events.log" ] && [ -n "$CUTOFF" ]; then
                | awk '{printf "%s×%s ", $1, $2}' || true)
 fi
 
+# 2b. the guarded nightly (scripts/overnight-guarded.sh): its decision, when made in the last 12h.
+#     A started run counts as overnight activity even if its agents logged no team events.
+NIGHTLY=""; NIGHTLY_DEC=""
+GREC="$STATE/overnight-guard.json"
+if [ -f "$GREC" ]; then
+  GAT=$(jq -r '.at // empty' "$GREC" 2>/dev/null || true)
+  GEP=$(date -d "${GAT:-@0}" +%s 2>/dev/null || echo 0)
+  if [ -n "$GAT" ] && [ "$GEP" -ge $(( NOW - 43200 )) ]; then
+    NIGHTLY_DEC=$(jq -r '.decision // empty' "$GREC" 2>/dev/null || true)
+    NIGHTLY=$(jq -r 'if .decision=="started" then "started \(.run_id): \(.issues) dream issue(s) in \((.repos // []) | map(split("/")[1]) | join(", "))"
+                     elif .decision=="no-work" then "nothing queued (no open dream issues)"
+                     else "\(.decision): \(.reason)" end' "$GREC" 2>/dev/null || true)
+    FIN=$(grep -m1 '^FINISHED' "$STATE/overnight-pending.md" 2>/dev/null || true)
+    [ -n "$FIN" ] && NIGHTLY="$NIGHTLY; ${FIN%%:*}"
+  fi
+fi
+
 # ── nothing ran overnight → one-liner, no voice, exit 0 ──────────────────────
-if [ "$HANDOFF_FRESH" -eq 0 ] && [ "$EV_COUNT" -eq 0 ]; then
+if [ "$HANDOFF_FRESH" -eq 0 ] && [ "$EV_COUNT" -eq 0 ] && [ "$NIGHTLY_DEC" != "started" ]; then
   { echo "# Dreamteam briefing — $DATE"; echo ""
     echo "_No overnight dreamteam activity (no fresh HANDOFF-auto, no agent events in the last 12h)._"
+    [ -n "$NIGHTLY" ] && echo "- **Nightly sweep**: $NIGHTLY"
   } > "$BRIEF"
   echo "no overnight activity — briefing: $BRIEF"
   exit 0
@@ -123,6 +141,7 @@ if [ -n "$OOMD" ]; then OOMD_NOTE="⚠ OOM kill overnight: ${OOMD##*]: }"; else 
   echo "- **Last HANDOFF-auto**: $([ "$HANDOFF_FRESH" -eq 1 ] && echo "${HANDOFF_AGE_H}h ago (fresh)" || echo "stale/none")"
   echo "- **Palace queue depth**: ${QUEUE}"
   echo "- **Memory**: ${OOMD_NOTE}"
+  [ -n "$NIGHTLY" ] && echo "- **Nightly sweep**: $NIGHTLY"
   if [ -n "$OPEN_TITLES" ]; then echo ""; echo "## Open PRs"; printf '%s\n' "$OPEN_TITLES"; fi
 } > "$BRIEF"
 
