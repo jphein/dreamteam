@@ -52,7 +52,8 @@ before any merge; costs about 50 seat-points a night". This page is the contract
        - a `GH_HOST` other than github.com, a joined `-Rx` and `--` are refused, and the enterprise tokens are
          unset;
        - api `repos/{o}/{r}` must be this repo.
-     - `pr create` runs, and the shim records a PR only from a successful create whose last line is exactly
+     - `pr create` runs from a branch of this repo only (a `--head owner:branch` in a fork is refused), and the
+       shim records a PR only from a successful create whose last line is exactly
        this repo's PR URL. `--dry-run` and `--web` are refused.
      - `pr diff|checks|comment N` work only for a PR this run opened.
      - `issue view N` works only for this night's vetted issues.

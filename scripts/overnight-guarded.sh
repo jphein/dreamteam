@@ -150,7 +150,13 @@ case "$sub" in pr|issue|label)
 esac
 case "$sub" in
   pr)    case "$act" in
-           create) for a in "${@:3}"; do case "$a" in --dry-run|--web|-w|--dry-run=*|--web=*) refuse "pr create $a";; esac; done
+           create) prev=""
+                   for a in "${@:3}"; do
+                     case "$a" in --dry-run|--web|-w|--dry-run=*|--web=*|-H?*) refuse "pr create $a";;
+                                  --head=*:*) refuse "pr create $a (a head in another owner's fork is not writer-authored)";; esac
+                     case "$prev" in -H|--head) case "$a" in *:*) refuse "pr create --head $a (a head in another owner's fork is not writer-authored)";; esac;; esac
+                     prev="$a"
+                   done
                    [ "$inject" = 1 ] && set -- "$@" --repo "github.com/$REPO"; out=$("$REAL_GH" "$@"); rc=$?; printf '%s\n' "$out"
                    # record a PR only from a successful create whose LAST line is exactly this repo's PR URL
                    # (security review: a dry run, or an "already exists: <url>" error, must not poison the ledger)

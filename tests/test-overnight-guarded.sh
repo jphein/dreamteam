@@ -298,7 +298,7 @@ sh_rc(){ GH_LOG="$TMP/gh.log" "$SHIM" "$@" >/dev/null 2>&1; echo $?; }
 : > "$(dirname "$SHIM")/prs"
 R=$(printf '%s,' "$(sh_rc pr diff 12)" "$(sh_rc api repos/jphein/realmwatch/pulls/12/files)")
 [ "$R" = "77,77," ] && pass "before this run opens PR 12, its diff and files are refused" || fail "unbound PR read: $R"
-R=$(printf '%s,' "$(sh_rc pr create --title 'merge two lists' --fill)")
+R=$(printf '%s,' "$(sh_rc pr create --title 'merge two lists' --fill --head fix/two-lists)")
 { [ "$R" = "0," ] && grep -qx 12 "$(dirname "$SHIM")/prs"; } && pass "pr create runs and the shim records the PR it opened (#12)" || fail "pr create: $R $(cat "$(dirname "$SHIM")/prs")"
 R=$(printf '%s,' "$(sh_rc pr diff 12)" "$(sh_rc pr checks 12)" "$(sh_rc pr comment 12 --body 'merge later')" "$(sh_rc issue view 7 --repo jphein/realmwatch --json title,body)" \
     "$(sh_rc api repos/jphein/realmwatch/issues/9)" "$(sh_rc api /repos/jphein/realmwatch/pulls/12/files)" "$(sh_rc api https://api.github.com/repos/jphein/realmwatch/labels)" \
@@ -318,9 +318,11 @@ R=$(printf '%s,' "$(sh_rc pr view 12)" "$(sh_rc pr list)" "$(sh_rc pr status)" "
 [ "$R" = "$(printf '77,%.0s' $(seq 40))" ] && pass "refused: listings, pr view, unvetted issues, other PRs, every merge spelling, mutations, comments/reviews, traversal, other hosts" || fail "refusals: $R"
 # PR ledger is not poisonable: a failed create, a URL in other output, another repo's URL, --dry-run/--web
 FAKE_CREATE=exists sh_rc pr create --fill >/dev/null; FAKE_CREATE=body sh_rc pr create --fill >/dev/null
-R=$(printf '%s,' "$(sh_rc pr create --fill --dry-run)" "$(sh_rc pr create --web)" "$(sh_rc pr diff 55)" "$(sh_rc pr diff 56)" "$(sh_rc pr diff 57)")
-{ [ "$R" = "77,77,77,77,77," ] && [ "$(sort -u "$(dirname "$SHIM")/prs" | tr '\n' ' ')" = "12 " ]; } \
-  && pass "PR ledger records only a successful create's exact own-repo URL (no dry-run/web, no error or body URLs)" || fail "ledger: $R [$(tr '\n' ' ' < "$(dirname "$SHIM")/prs")]"
+R=$(printf '%s,' "$(sh_rc pr create --fill --dry-run)" "$(sh_rc pr create --web)" "$(sh_rc pr diff 55)" "$(sh_rc pr diff 56)" "$(sh_rc pr diff 57)" \
+    "$(sh_rc pr create --head outsider:payload --base main --title t --body b)" "$(sh_rc pr create -H outsider:payload --fill)" "$(sh_rc pr create --head=outsider:payload --fill)" \
+    "$(sh_rc pr create -Houtsider:payload --fill)")
+{ [ "$R" = "77,77,77,77,77,77,77,77,77," ] && [ "$(sort -u "$(dirname "$SHIM")/prs" | tr '\n' ' ')" = "12 " ]; } \
+  && pass "PR ledger records only a successful create's exact own-repo URL (no dry-run/web/fork head, no error or body URLs)" || fail "ledger: $R [$(tr '\n' ' ' < "$(dirname "$SHIM")/prs")]"
 # writer-controlled data only (xreview r11): run logs, run titles, commit messages, check-run summaries and
 # fork-ref contents can all carry a non-writer's text
 R=$(printf '%s,' "$(sh_rc run view 123 --log --repo jphein/realmwatch)" "$(sh_rc run list)" "$(sh_rc api repos/jphein/realmwatch/actions/runs)" \
