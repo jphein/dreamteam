@@ -48,18 +48,22 @@ before any merge; costs about 50 seat-points a night". This page is the contract
      `gh` shim, and every read is bound to a known number:
      - Every call is bound to this repo:
        - a `--repo`, `-R`, `--repo=` or `GH_REPO` naming another repo is refused;
-       - `--repo <this repo>` is appended when none is given;
+       - `--repo github.com/<this repo>` is appended when none is given;
+       - a `GH_HOST` other than github.com, a joined `-Rx` and `--` are refused, and the enterprise tokens are
+         unset;
        - api `repos/{o}/{r}` must be this repo.
      - `pr create` runs, and the shim records a PR only from a successful create whose last line is exactly
        this repo's PR URL. `--dry-run` and `--web` are refused.
      - `pr diff|checks|comment N` work only for a PR this run opened.
      - `issue view N` works only for this night's vetted issues.
-     - `repo view|clone`, `run view|list`, `auth status` and `label list` are allowed.
-     - `api` is GET only, with an exact flag set (`-H`, `--jq`, `--paginate`, `-X GET`, `-f`/`-F` without `@`
-       and only with an explicit `-X GET`). Its endpoints must be:
+     - A bare `repo view` (run as `repo view github.com/<this repo>`), `auth status` and `label list` are allowed.
+     - `api` is GET only, with an exact flag set (`-H`, `--jq`, `--paginate`, `-X GET`). Its endpoints must be:
        - `issues/N` for a vetted N;
        - `pulls/N/files|commits` for an own PR;
-       - or one of commits/check-runs, actions runs, contents, branches, labels.
+       - or the repo itself, `contents/<path>` (default branch only), `branches` or `labels`. Writer-controlled
+         data only: Actions runs and logs, commits and check-run summaries can carry a non-writer's PR text,
+         so they are refused. The CI state of an own PR comes from `pr checks N`.
+       - No query strings and no `-f`/`-F` fields, because `?ref=refs/pull/N/head` would read a fork's files.
 
        `%`, `//`, `..` and other hosts are refused, and so is GraphQL.
 

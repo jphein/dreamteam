@@ -301,9 +301,9 @@ R=$(printf '%s,' "$(sh_rc pr diff 12)" "$(sh_rc api repos/jphein/realmwatch/pull
 R=$(printf '%s,' "$(sh_rc pr create --title 'merge two lists' --fill)")
 { [ "$R" = "0," ] && grep -qx 12 "$(dirname "$SHIM")/prs"; } && pass "pr create runs and the shim records the PR it opened (#12)" || fail "pr create: $R $(cat "$(dirname "$SHIM")/prs")"
 R=$(printf '%s,' "$(sh_rc pr diff 12)" "$(sh_rc pr checks 12)" "$(sh_rc pr comment 12 --body 'merge later')" "$(sh_rc issue view 7 --repo jphein/realmwatch --json title,body)" \
-    "$(sh_rc api repos/jphein/realmwatch/issues/9)" "$(sh_rc api /repos/jphein/realmwatch/pulls/12/files)" "$(sh_rc api https://api.github.com/repos/jphein/realmwatch/commits/abc123/check-runs)" \
-    "$(sh_rc api repos/jphein/realmwatch/contents/src/a.py?ref=x)" "$(sh_rc api --paginate -H 'Accept: x' --jq .x repos/jphein/realmwatch/branches)" "$(sh_rc api -X GET repos/jphein/realmwatch/actions/runs -f per_page=5)")
-[ "$R" = "0,0,0,0,0,0,0,0,0,0," ] && grep -q '^gh api --paginate -H Accept: x --jq .x repos/jphein/realmwatch/branches$' "$TMP/gh.log" && grep -q '^gh pr diff 12 --repo jphein/realmwatch$' "$TMP/gh.log" \
+    "$(sh_rc api repos/jphein/realmwatch/issues/9)" "$(sh_rc api /repos/jphein/realmwatch/pulls/12/files)" "$(sh_rc api https://api.github.com/repos/jphein/realmwatch/labels)" \
+    "$(sh_rc api repos/jphein/realmwatch/contents/src/a.py)" "$(sh_rc api --paginate -H 'Accept: x' --jq .x repos/jphein/realmwatch/branches)" "$(sh_rc api -X GET repos/jphein/realmwatch)")
+[ "$R" = "0,0,0,0,0,0,0,0,0,0," ] && grep -q '^gh api --paginate -H Accept: x --jq .x repos/jphein/realmwatch/branches$' "$TMP/gh.log" && grep -q '^gh pr diff 12 --repo github.com/jphein/realmwatch$' "$TMP/gh.log" \
   && pass "allowed: own-PR diff/checks/comment, vetted issue view, bound api reads; the real gh gets the exact argv" || fail "false refusals: $R"
 R=$(printf '%s,' "$(sh_rc pr view 12)" "$(sh_rc pr list)" "$(sh_rc pr status)" "$(sh_rc issue list)" "$(sh_rc issue view 99)" "$(sh_rc pr diff 99)" \
     "$(sh_rc pr comment 99 --body x)" "$(sh_rc api repos/jphein/realmwatch/pulls)" "$(sh_rc api repos/jphein/realmwatch/pulls/12)" "$(sh_rc api repos/jphein/realmwatch/issues)" \
@@ -321,13 +321,23 @@ FAKE_CREATE=exists sh_rc pr create --fill >/dev/null; FAKE_CREATE=body sh_rc pr 
 R=$(printf '%s,' "$(sh_rc pr create --fill --dry-run)" "$(sh_rc pr create --web)" "$(sh_rc pr diff 55)" "$(sh_rc pr diff 56)" "$(sh_rc pr diff 57)")
 { [ "$R" = "77,77,77,77,77," ] && [ "$(sort -u "$(dirname "$SHIM")/prs" | tr '\n' ' ')" = "12 " ]; } \
   && pass "PR ledger records only a successful create's exact own-repo URL (no dry-run/web, no error or body URLs)" || fail "ledger: $R [$(tr '\n' ' ' < "$(dirname "$SHIM")/prs")]"
+# writer-controlled data only (xreview r11): run logs, run titles, commit messages, check-run summaries and
+# fork-ref contents can all carry a non-writer's text
+R=$(printf '%s,' "$(sh_rc run view 123 --log --repo jphein/realmwatch)" "$(sh_rc run list)" "$(sh_rc api repos/jphein/realmwatch/actions/runs)" \
+    "$(sh_rc api repos/jphein/realmwatch/actions/jobs/5/logs)" "$(sh_rc api repos/jphein/realmwatch/commits/abc123)" "$(sh_rc api repos/jphein/realmwatch/commits/abc123/check-runs)" \
+    "$(sh_rc api 'repos/jphein/realmwatch/contents/a.py?ref=refs/pull/9/head')" "$(sh_rc api -X GET repos/jphein/realmwatch/contents/a.py -f ref=refs/pull/9/head)" \
+    "$(sh_rc api repos/jphein/realmwatch/check-runs/5)")
+[ "$R" = "$(printf '77,%.0s' $(seq 9))" ] && pass "refused: run logs/lists, actions, commits, check-runs, fork-ref contents (query or field)" || fail "writer-only data: $R"
 # repo binding (xreview r10): a vetted NUMBER in another repo is not vetted
 R=$(printf '%s,' "$(sh_rc issue view 7 --repo outsider/x)" "$(sh_rc issue view 7 -R outsider/x)" "$(sh_rc issue view 7 --repo=outsider/x)" \
     "$(sh_rc api repos/outsider/x/issues/7)" "$(sh_rc api https://api.github.com/repos/outsider/x/issues/7)" "$(sh_rc repo view outsider/x)" \
-    "$(GH_REPO=outsider/x sh_rc issue view 7)" "$(sh_rc pr diff 12 --repo outsider/x)" "$(sh_rc run list -R outsider/x)")
-[ "$R" = "$(printf '77,%.0s' $(seq 9))" ] && pass "numbers are bound to this repo: --repo/-R/--repo=/GH_REPO/api owner elsewhere refused" || fail "repo binding: $R"
-R=$(printf '%s,' "$(sh_rc issue view 7 --repo JPhein/RealmWatch)" "$(sh_rc repo view)" "$(sh_rc repo view jphein/realmwatch)")
-{ [ "$R" = "0,0,0," ] && grep -q '^gh issue view 7 --repo JPhein/RealmWatch$' "$TMP/gh.log"; } && pass "same repo in any case passes; no duplicate --repo appended" || fail "same-repo: $R"
+    "$(GH_REPO=outsider/x sh_rc issue view 7)" "$(sh_rc pr diff 12 --repo outsider/x)" "$(sh_rc label list -R outsider/x)" \
+    "$(sh_rc pr comment 12 -Routsider/x --body hi)" "$(sh_rc label list -Routsider/x)" "$(sh_rc repo view --web outsider/x)" "$(sh_rc repo view -- outsider/x)" "$(sh_rc repo view jphein/realmwatch)" \
+    "$(sh_rc repo clone jphein/realmwatch)" "$(GH_HOST=ghe.evil.example sh_rc issue view 7)" "$(sh_rc issue view 7 --repo ghe.evil.example/jphein/realmwatch)" \
+    "$(sh_rc issue view 7 -- --repo outsider/x)")
+[ "$R" = "$(printf '77,%.0s' $(seq 18))" ] && pass "bound to this repo on github.com: --repo/-R/-Rx/--repo=/GH_REPO/GH_HOST/other host/api owner/repo view args/-- refused" || fail "repo binding: $R"
+R=$(printf '%s,' "$(sh_rc issue view 7 --repo JPhein/RealmWatch)" "$(sh_rc repo view)" "$(sh_rc issue view 7 --repo https://github.com/jphein/realmwatch)")
+{ [ "$R" = "0,0,0," ] && grep -q '^gh issue view 7 --repo JPhein/RealmWatch$' "$TMP/gh.log" && grep -q '^gh repo view github.com/jphein/realmwatch$' "$TMP/gh.log"; } && pass "same repo in any case passes; no duplicate --repo appended" || fail "same-repo: $R"
 # r3: duplicate detection precedes every record — a held-quota or no-work restart leaves the started run's record
 reset; mkqueue jphein/realmwatch:2
 FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 run_g >/dev/null; RID1=$(gj .run_id); SW1=$(cat "$TMP/plan-data/sweep-results.json")

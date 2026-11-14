@@ -133,10 +133,14 @@ vetted()  { [[ "$1" =~ ^[0-9]+$ ]] && [[ "$ISSUES" == *" $1 "* ]]; }
 # Every number is THIS repo's number (xreview r10): a --repo / GH_REPO naming another repo is refused, and
 # a pr/issue/run/label call without one gets --repo "$REPO" appended, so cwd cannot pick another repo.
 lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
-same_repo() { [ "$(lc "${1#https://github.com/}")" = "$(lc "$REPO")" ]; }
+same_repo() { local r; r=$(lc "$1"); r="${r#https://}"; r="${r#github.com/}"; [ "$r" = "$(lc "$REPO")" ]; }
 [ -z "${GH_REPO:-}" ] || same_repo "$GH_REPO" || refuse "GH_REPO=$GH_REPO (only $REPO)"
+# github.com only: another host would make every binding below meaningless (security review)
+[ -z "${GH_HOST:-}" ] || [ "$(lc "$GH_HOST")" = github.com ] || refuse "GH_HOST=$GH_HOST (github.com only)"
+unset GH_HOST GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
+for a in "$@"; do case "$a" in --) refuse "'--' (the shim reads every argument)";; -R?*) refuse "joined $a (write -R OWNER/REPO)";; esac; done
 inject=0
-case "$sub" in pr|issue|run|label)
+case "$sub" in pr|issue|label)
   inject=1; prev=""
   for a in "${@:3}"; do
     case "$prev" in -R|--repo) same_repo "$a" || refuse "$sub $act --repo $a (only $REPO)"; inject=0;; esac
@@ -147,7 +151,7 @@ esac
 case "$sub" in
   pr)    case "$act" in
            create) for a in "${@:3}"; do case "$a" in --dry-run|--web|-w|--dry-run=*|--web=*) refuse "pr create $a";; esac; done
-                   [ "$inject" = 1 ] && set -- "$@" --repo "$REPO"; out=$("$REAL_GH" "$@"); rc=$?; printf '%s\n' "$out"
+                   [ "$inject" = 1 ] && set -- "$@" --repo "github.com/$REPO"; out=$("$REAL_GH" "$@"); rc=$?; printf '%s\n' "$out"
                    # record a PR only from a successful create whose LAST line is exactly this repo's PR URL
                    # (security review: a dry run, or an "already exists: <url>" error, must not poison the ledger)
                    last=$(printf '%s\n' "$out" | tail -n1)
@@ -160,9 +164,8 @@ case "$sub" in
          esac;;
   issue) [ "$act" = view ] || refuse "$sub" "$act"
          vetted "$num" || refuse "issue view $num (only this night's vetted issues)";;
-  repo)  case "$act" in view|clone) ;; *) refuse "$sub" "$act";; esac
-         [ -z "$num" ] || case "$num" in -*) ;; *) same_repo "$num" || refuse "repo $act $num (only $REPO)";; esac;;
-  run)   case "$act" in view|list) ;; *) refuse "$sub" "$act";; esac;;
+  repo)  [ "$act" = view ] && [ $# -eq 2 ] || refuse "repo $act ${*:3} (only a bare 'repo view' of this repo)"
+         exec "$REAL_GH" repo view "github.com/$REPO";;
   auth)  case "$act" in status) ;; *) refuse "$sub" "$act";; esac;;
   label) case "$act" in list) ;; *) refuse "$sub" "$act";; esac;;
   api)   A=("${@:2}"); n=${#A[@]}; k=0; ep=""; method=GET; explicit=0; fields=0
@@ -179,16 +182,20 @@ case "$sub" in
            esac
          done
          [ "$method" = GET ] || refuse "api -X $method"
-         { [ "$fields" = 1 ] && [ "$explicit" = 0 ]; } && refuse "api fields without -X GET (gh would POST)"
+         # no fields at all: with -X GET they become query parameters (?ref=refs/pull/N/head reads a fork's
+         # files), and without it gh would POST (xreview r11)
+         [ "$fields" = 0 ] || refuse "api with -f/-F fields"
          # endpoint ALLOWLIST (security review: a denylist of paths is a parser differential): only the
          # read paths a fixer needs, as plain ASCII path segments; no %-encoding, //, .., or other hosts
-         e="${ep#https://api.github.com/}"; e="${e#/}"; e="${e%%[?#]*}"; e="${e%/}"
-         case "$e" in *%*|*//*|*..*|*://*|"") refuse "api endpoint '$ep'";; esac
+         e="${ep#https://api.github.com/}"; e="${e#/}"; e="${e%/}"
+         case "$e" in *%*|*//*|*..*|*://*|*\?*|*#*|"") refuse "api endpoint '$ep' (no query, fragment, encoding or traversal)";; esac
          seg='[A-Za-z0-9._-]+'
          [[ "$e" =~ ^repos/($seg/$seg)(/|$) ]] && same_repo "${BASH_REMATCH[1]}" || refuse "api $e (only repos/$REPO)"
          if [[ "$e" =~ ^repos/$seg/$seg/issues/([0-9]+)$ ]]; then vetted "${BASH_REMATCH[1]}" || refuse "api $e (not a vetted issue)"
          elif [[ "$e" =~ ^repos/$seg/$seg/pulls/([0-9]+)/(files|commits)$ ]]; then mine_pr "${BASH_REMATCH[1]}" || refuse "api $e (not a PR this run opened)"
-         elif [[ "$e" =~ ^repos/$seg/$seg(/(commits/[0-9a-fA-F]+(/(check-runs|status))?|check-runs/[0-9]+|actions/runs(/[0-9]+(/jobs)?)?|contents(/[A-Za-z0-9._/-]*)?|branches(/[A-Za-z0-9._/-]+)?|labels))?$ ]]; then :
+         # writer-controlled data only (xreview r11): Actions runs/logs, commits and check-run summaries can
+         # carry a non-writer's PR text, so they are gone; CI state of an own PR is `pr checks N`
+         elif [[ "$e" =~ ^repos/$seg/$seg(/(contents(/[A-Za-z0-9._/-]*)?|branches(/[A-Za-z0-9._/-]+)?|labels))?$ ]]; then :
          else refuse "api endpoint '$ep' (not on the read allowlist)"; fi;;
   --version|version) ;;
   *) refuse "$sub";;
@@ -198,7 +205,7 @@ esac
 case "$sub $act" in "issue view"|"pr checks"|"pr diff")
   for a in "${@:3}"; do case "$a" in -c|*omment*|*eview*|-[!-]?*) refuse "$sub $act $a (comments and reviews are unvetted input; no grouped short flags)";; esac; done;;
 esac
-[ "$inject" = 1 ] && set -- "$@" --repo "$REPO"
+[ "$inject" = 1 ] && set -- "$@" --repo "github.com/$REPO"
 exec "$REAL_GH" "$@"
 SHIM
   chmod +x "$1/gh"
