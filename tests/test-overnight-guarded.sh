@@ -36,6 +36,9 @@ cat > "$BIN/gh" <<'S'
 echo "gh $*" >> "$GH_LOG"
 for a in "$@"; do
   case "$a" in
+    repos/*/issues/*/events*) def='[{"event":"labeled","label":{"name":"dream"},"actor":{"login":"jphein"}}]'; echo "${FAKE_EVENTS:-$def}"; exit 0;;
+    repos/*/collaborators/*/permission) l="${a#*/collaborators/}"; l="${l%%/permission}"; v="FAKE_PERM_${l//[^A-Za-z0-9]/_}"
+      d=read; [ "$l" = jphein ] && d=admin; echo "{\"permission\":\"${!v:-$d}\"}"; exit 0;;
     repos/*/issues*) r="${a#repos/}"; r="${r%%/issues*}"; n="${r#*/}"; v="FAKE_GH_${n//[^A-Za-z0-9]/_}"; echo "${!v:-[]}"; exit 0;;
   esac
 done
@@ -51,7 +54,7 @@ cat > "$BIN/claude-rec" <<'S'
 #!/bin/bash
 echo claude >> "${SEQ_LOG:-/dev/null}"
 { echo "CWD=$PWD"; echo "HTTPS_PROXY=${HTTPS_PROXY:-}"; echo "NODE_EXTRA_CA_CERTS=${NODE_EXTRA_CA_CERTS:-}";
-  echo "ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-unset}"; echo "SCOPE=${DREAMTEAM_SCOPE_NAME:-unset}"; echo "PATH1=${PATH%%:*}"
+  echo "ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-unset}"; echo "SCOPE=${DREAMTEAM_SCOPE_NAME:-unset}"; echo "DIRECT=${TEAMCLAUDE_ALLOW_DIRECT:-unset}${TEAMCLAUDE_BYPASS:-}"; echo "PATH1=${PATH%%:*}"
   printf 'ARG=%s\n' "$@"; echo "---"; } >> "$CLAUDE_LOG"
 if [ -n "${FAKE_CLAUDE_SLEEP:-}" ]; then sleep "$FAKE_CLAUDE_SLEEP"; echo "END-NOT-KILLED" >> "$CLAUDE_LOG"; fi
 echo '{"type":"result","result":"done\nSWEEP-RESULT {\"fixed\":[{\"repo\":\"jphein/realmwatch\",\"number\":7,\"pr\":12,\"sha\":\"\"}],\"reviewed_not_merged\":[],\"too_large\":[]}"}'
@@ -62,7 +65,7 @@ Q_OK='{"aggregate":{"fiveHour":{"remaining":0.92},"sevenDay":null,"weeklyShared"
 Q_LOW5='{"aggregate":{"fiveHour":{"remaining":0.69},"weeklyShared":{"remaining":0.9}}}'
 Q_LOW7='{"aggregate":{"fiveHour":{"remaining":0.95},"sevenDay":{"remaining":0.29}}}'
 Q_NO7='{"aggregate":{"fiveHour":{"remaining":0.95},"sevenDay":null}}'
-I2='[{"number":7,"title":"fix seven","labels":[{"name":"dream"}]},{"number":9,"title":"fix nine","labels":[{"name":"dream"}]}]'
+I2='[{"number":7,"title":"fix seven","user":{"login":"jphein"},"labels":[{"name":"dream"}]},{"number":9,"title":"fix nine","user":{"login":"jphein"},"labels":[{"name":"dream"}]}]'
 
 mkcfg(){ cat > "$TMP/config.json" <<'J'
 {"scope":{"memoryHigh":"20G","memoryMax":"24G","memorySwapMax":"8G"},
@@ -78,7 +81,7 @@ mkqueue(){ # $@ = repo:dream pairs
 }
 reset(){ rm -rf "$TMP/state" "$TMP/wt" "$TMP/plan-data" "$TMP"/*.log; mkdir -p "$TMP/state"; mkcfg; }
 run_g(){ # env passthrough via caller prefix assignments; extra args to the script
-  DREAMTEAM_TEST=1 DREAMTEAM_STATE="$TMP/state" DREAMTEAM_CONFIG="$TMP/config.json" CLAUDE_PLUGIN_ROOT="$ROOT" \
+  TEAMCLAUDE_ALLOW_DIRECT=1 TEAMCLAUDE_BYPASS=1 DREAMTEAM_TEST=1 DREAMTEAM_STATE="$TMP/state" DREAMTEAM_CONFIG="$TMP/config.json" CLAUDE_PLUGIN_ROOT="$ROOT" \
   DREAMTEAM_WT_BASE="$TMP/wt" DREAMTEAM_CLAUDE_BIN="$BIN/claude-rec" DREAMTEAM_PLAN_DATA="$TMP/plan-data" \
   DREAMTEAM_DEADLINE_EPOCH="${DEADLINE:-$(( $(date +%s) + 6*3600 ))}" \
   GH_LOG="$TMP/gh.log" GIT_LOG="$TMP/git.log" CLAUDE_LOG="$TMP/claude.log" \
@@ -138,7 +141,7 @@ FAKE_GH_plan_realm_watch="$I2" FAKE_QUOTA="$Q_OK" run_g >/dev/null
 { [ "$(gj .decision)" = "no-work" ] && ! grep -q 'plan.realm.watch' "$TMP/gh.log" 2>/dev/null; } \
   && pass "never_sweep repo (plan.realm.watch) is never read or swept" || fail "plan.realm.watch swept"
 reset; mkqueue jphein/starcharts:2
-FAKE_GH_starcharts='[{"number":5,"title":"a PR","pull_request":{}},{"number":6,"title":"real","labels":[]}]' FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 run_g >/dev/null
+FAKE_GH_starcharts='[{"number":5,"title":"a PR","pull_request":{}},{"number":6,"title":"real","user":{"login":"jphein"},"labels":[]}]' FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 run_g >/dev/null
 { grep -q '"number":6' "$TMP/claude.log" 2>/dev/null && ! grep -q '"number":5' "$TMP/claude.log"; } && pass "pull requests in the issues endpoint are dropped (issue 6 kept, PR 5 not)" || fail "PR/issue filter: $(grep -o '"number":[0-9]*' "$TMP/claude.log" 2>/dev/null | sort -u | tr '\n' ' ')"
 
 echo "── (c) PR-only in production repos ──────────────────────────────"
@@ -159,7 +162,8 @@ grep -q 'ARG=-p' "$TMP/claude.log" && pass "coordinator runs headless (claude -p
 grep -q 'use a workflow' "$TMP/claude.log" && grep -q 'workflows/overnight.js' "$TMP/claude.log" \
   && pass "prompt opts into the overnight workflow by path" || fail "workflow opt-in/path missing"
 grep -q "HTTPS_PROXY=http://127.0.0.1:3456" "$TMP/claude.log" && grep -q 'NODE_EXTRA_CA_CERTS=.*teamclaude-ca.pem' "$TMP/claude.log" \
-  && grep -q 'ANTHROPIC_BASE_URL=unset' "$TMP/claude.log" && pass "coordinator gets the teamclaude proxy env, no base URL override" || fail "proxy env not passed"
+  && grep -q 'ANTHROPIC_BASE_URL=unset' "$TMP/claude.log" && grep -q '^DIRECT=unset$' "$TMP/claude.log" \
+  && pass "coordinator gets the teamclaude proxy env, no base URL override, no direct-seat opt-in" || fail "proxy env not passed / direct opt-in leaked"
 grep -q "CWD=$TMP/wt/" "$TMP/claude.log" && ! grep -q "CWD=$HOME/Projects" "$TMP/claude.log" \
   && pass "each coordinator runs in a fresh clone outside the synced tree" || fail "coordinator cwd: $(grep CWD "$TMP/claude.log" | head -2)"
 grep -q 'Stop by' "$TMP/claude.log" && pass "prompt carries the wall-clock cap" || fail "no stop-by line in prompt"
@@ -278,17 +282,19 @@ FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 SEQ_LOG="$TMP/seq
 [ "$(tr '\n' ' ' < "$TMP/seq.log")" = "probe clone probe claude " ] && pass "runner order: guard probe → clone → probe → coordinator (xreview r2)" || fail "order: $(tr '\n' ' ' < "$TMP/seq.log")"
 # r2: GraphQL from a file cannot be inspected → refused in a PR-only repo
 SHIM=$(grep -m1 '^PATH1=' "$TMP/claude.log" | cut -d= -f2)/gh
-GH_LOG="$TMP/gh.log" "$SHIM" api graphql -F query=@q.graphql >/dev/null 2>&1; r=$?; GH_LOG="$TMP/gh.log" "$SHIM" api graphql -f query='{viewer{login}}' >/dev/null 2>&1; [ $r -eq 77 ] && [ $? -eq 0 ] && pass "PR-only shim refuses a GraphQL query read from a file (an inline read query still passes)" || fail "graphql @file: rc=$r"
+GH_LOG="$TMP/gh.log" "$SHIM" api graphql -F query=@q.graphql >/dev/null 2>&1; [ $? -eq 77 ] && pass "PR-only shim refuses a GraphQL query read from a file" || fail "graphql @file passed"
 # r3: shim parses per argument — query strings, trailing slashes, unreadable GraphQL bodies, split pr/merge
 sh_rc(){ GH_LOG="$TMP/gh.log" "$SHIM" "$@" >/dev/null 2>&1; echo $?; }
 R=$(printf '%s,' "$(sh_rc api --method PUT 'repos/o/r/pulls/1/merge?audit=nightly')" "$(sh_rc api -X PUT repos/o/r/pulls/1/merge/)" \
     "$(sh_rc api graphql --input req.json)" "$(sh_rc api graphql --input=req.json)" "$(sh_rc pr -R o/r merge 5)" "$(sh_rc alias set m 'pr merge')" \
     "$(sh_rc api -X PUT 'repos/o/r/pulls/1/merge#x')" "$(sh_rc api repos/o/r/merges -f base=main -f head=x)" \
     "$(sh_rc api https://api.github.com/graphql -X POST --input req.json)" "$(sh_rc api 'https://api.github.com/graphql?x=1' --input -)" \
-    "$(sh_rc api -X PATCH repos/o/r/pulls/1 --input body.json)")
-[ "$R" = "77,77,77,77,77,77,77,77,77,77,77," ] && pass "shim refuses ?query / trailing-slash / #frag merge URLs, graphql --input (by name or full URL, stdin too), any api --input, pr -R x merge, alias, /merges" || fail "shim refusals: $R"
-R=$(printf '%s,' "$(sh_rc pr create --title 'merge two lists' --fill)" "$(sh_rc api repos/o/r/pulls/1)" "$(sh_rc api graphql -f 'query={viewer{login}}')" "$(sh_rc pr view 5 --json state)")
-[ "$R" = "0,0,0,0," ] && pass "shim passes ordinary reads and pr create (a title with the word merge is not a merge)" || fail "shim false refusals: $R"
+    "$(sh_rc api -X PATCH repos/o/r/pulls/1 --input body.json)" "$(sh_rc api graphql -f 'query={viewer{login}}')" "$(sh_rc pr close 5)" \
+    "$(sh_rc pr edit 5 --base main)" "$(sh_rc api repos/o/r/issues/5/comments -f body=x)" "$(sh_rc workflow run deploy)" "$(sh_rc secret list)")
+[ "$R" = "77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77,77," ] && pass "allowlist shim refuses merge in every spelling, any graphql, non-GET or bodied api, pr close/edit, workflow, secret, alias" || fail "shim refusals: $R"
+R=$(printf '%s,' "$(sh_rc pr create --title 'merge two lists' --fill)" "$(sh_rc api repos/o/r/pulls/1)" "$(sh_rc api -X GET repos/o/r/issues -f state=open)" "$(sh_rc pr view 5 --json state)" \
+    "$(sh_rc pr -R o/r diff 5)" "$(sh_rc issue view 7 --repo o/r)" "$(sh_rc pr comment 5 --body 'merge later')")
+[ "$R" = "0,0,0,0,0,0,0," ] && pass "allowlist passes reads, explicit-GET api with fields, pr create/diff/comment (the word merge in a title is not a merge)" || fail "shim false refusals: $R"
 # r3: duplicate detection precedes every record — a held-quota or no-work restart leaves the started run's record
 reset; mkqueue jphein/realmwatch:2
 FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 run_g >/dev/null; RID1=$(gj .run_id); SW1=$(cat "$TMP/plan-data/sweep-results.json")
@@ -296,6 +302,30 @@ FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_LOW5" DREAMTEAM_INLINE=1 run_g >/dev/nul
 FAKE_GH_realmwatch='[]' FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 run_g >/dev/null
 { [ "$(gj .run_id)" = "$RID1" ] && [ "$(gj .decision)" = "started" ] && [ "$(cat "$TMP/plan-data/sweep-results.json")" = "$SW1" ]; } \
   && pass "restarts that night under a low quota or an empty queue leave the started run's record + results untouched (xreview r3)" || fail "dup ordering: $(gj .decision) $(gj .run_id) vs $RID1"
+
+# security review: provenance — only issues whose author AND dream labeller hold write access are worked
+reset; mkqueue jphein/realmwatch:3
+FAKE_GH_realmwatch='[{"number":7,"title":"mine","user":{"login":"jphein"}},{"number":8,"title":"outsider","user":{"login":"stranger"}}]' \
+  FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 run_g >/dev/null
+{ grep -q '"number":7' "$TMP/claude.log" && ! grep -q '"number":8' "$TMP/claude.log" && grep -q "realmwatch#8 skipped — author 'stranger'" "$TMP/state/dreamteam.log"; } \
+  && pass "an outsider-authored dream issue is skipped as untrusted input (a maintainer's is worked)" || fail "author provenance: $(grep -o '"number":[0-9]*' "$TMP/claude.log" | tr '\n' ' ')"
+reset; mkqueue jphein/realmwatch:2
+FAKE_EVENTS='[{"event":"labeled","label":{"name":"dream"},"actor":{"login":"jphein"}},{"event":"labeled","label":{"name":"dream"},"actor":{"login":"helper"}}]' \
+  FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 run_g >/dev/null
+{ [ "$(gj .decision)" = "no-work" ] && grep -q "labeller 'helper' lacks write" "$TMP/state/dreamteam.log"; } \
+  && pass "a dream label last added by a read-only account → not worked" || fail "labeller provenance: $(gj .decision)"
+reset; mkqueue jphein/realmwatch:2
+FAKE_PERM_helper=write FAKE_EVENTS='[{"event":"labeled","label":{"name":"dream"},"actor":{"login":"helper"}}]' \
+  FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 run_g >/dev/null
+[ "$(gj .decision)" = "started" ] && pass "a labeller with write access is trusted (control)" || fail "write labeller rejected: $(gj .reason)"
+# hook honours the clone's real default branch (origin/HEAD → develop), not only main/master
+reset; mkqueue jphein/realmwatch:2
+FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 run_g >/dev/null
+HOOK=$(ls "$TMP"/wt/*/realmwatch/.git/hooks/pre-push 2>/dev/null | head -n1); HR="$TMP/hookrepo"
+/usr/bin/git init -q "$HR" && /usr/bin/git -C "$HR" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/develop
+( cd "$HR" && echo "refs/heads/x a refs/heads/develop b" | PATH="/usr/bin:/bin" "$HOOK" >/dev/null 2>&1 ); h1=$?
+( cd "$HR" && echo "refs/heads/x a refs/heads/fix/y b" | PATH="/usr/bin:/bin" "$HOOK" >/dev/null 2>&1 ); h2=$?
+{ [ -x "$HOOK" ] && [ $h1 -ne 0 ] && [ $h2 -eq 0 ]; } && pass "pre-push hook refuses the clone's real default branch (develop via origin/HEAD)" || fail "default-branch hook rc $h1 $h2"
 
 # r2: a failed contained launch does not consume the night
 reset; mkqueue jphein/realmwatch:2; mkdir -p "$TMP/failbin"; printf '#!/bin/bash\nexit 1\n' > "$TMP/failbin/systemd-run"; chmod +x "$TMP/failbin/systemd-run"

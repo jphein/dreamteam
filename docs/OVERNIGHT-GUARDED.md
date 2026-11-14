@@ -12,7 +12,7 @@ before any merge; costs about 50 seat-points a night". This page is the contract
 | Per-repo loop (with `issues`, `prOnly` and `prGate` args) | `workflows/overnight.js` |
 | Tunables, production list | `config.json` → `.overnight` |
 | Install, status, uninstall (an install retires the 02:11 pilot pair, so only one nightly start exists) | `scripts/timers-ctl.sh` |
-| Tests | `tests/test-overnight-guarded.sh` (64 checks), `tests/test-overnight-workflow.sh` (10 checks) |
+| Tests | `tests/test-overnight-guarded.sh` (71 checks), `tests/test-overnight-workflow.sh` (12 checks) |
 
 ## What happens at 23:30
 
@@ -29,7 +29,10 @@ before any merge; costs about 50 seat-points a night". This page is the contract
 2. **Work.** The guard reads `state/issues-queue.json` (refreshed 21:50) and takes the repos with `dream > 0` from
    every owner, not only jphein/dreamteam. It drops `never_sweep` (plan.realm.watch), puts the least recently swept
    first (`state/overnight-rotation.json`), then the most dream issues. It re-reads each repo's open `dream` issues
-   live over REST and drops pull requests. Limits: up to `max_repos_per_night` (3) repos and `max_issues_per_repo`
+   live over REST and drops pull requests. **Provenance:** an issue is worked only when its author AND the account
+   that last added the `dream` label both hold write, maintain or admin on that repo (checked through the
+   collaborators-permission API, cached per login). An outsider's issue on a public repo, or a label added by a
+   read-only account, is skipped and logged, because issue text is input to an unattended agent. Limits: up to `max_repos_per_night` (3) repos and `max_issues_per_repo`
    (5) issues each. If no work is left, the decision is `no-work`, exit 0, and nothing is spoken or published.
 3. **PR-only in production.** Repos are matched by name, so an owner transfer doesn't matter.
    - A repo in `production_repos` is PR-only: the sweep opens PRs and the oracle reviews them, but it never merges.
@@ -38,10 +41,18 @@ before any merge; costs about 50 seat-points a night". This page is the contract
      only one in flight.
    - A repo in neither list is PR-only. Adding a repo to `merge_repos` is the deliberate act that lets the sweep
      merge there.
-   - **Guardrails in PR-only repos (not a security boundary).** The coordinator's PATH starts with a `gh` shim. It
-     refuses `pr merge`, the REST `/merge` endpoint, the GraphQL merge and auto-merge mutations, and any GraphQL
-     query read from a file (which it cannot inspect). The clone also gets a `pre-push` hook that refuses
-     main/master/trunk/production. Together they stop an agent that follows a misleading issue body ("merge it").
+   - **Guardrails in PR-only repos (not a security boundary).** The coordinator's PATH starts with an ALLOWLIST
+     `gh` shim. It allows only these commands:
+     - `pr create|view|list|checks|diff|comment|status`
+     - `issue view|list|comment`
+     - `repo view|clone`
+     - `run view|list`
+     - `auth status`
+     - `label list`
+     - `api` with GET only: never GraphQL, never `--input`, and fields only with an explicit `-X GET`.
+
+     Everything else is refused, every merge spelling included. The clone also gets a `pre-push` hook that refuses
+     the clone's real default branch (`origin/HEAD`) and main/master/trunk/production. Together they stop an agent that follows a misleading issue body ("merge it").
      They cannot stop a hostile one, which could call `/usr/bin/gh` or use `--no-verify`. The boundary is GitHub
      branch protection on those repos.
 4. **One start a night.** The guard holds an flock while it runs. A night marker (`state/overnight-night`, keyed
@@ -99,6 +110,17 @@ A dry run writes the guard record in `state/` and never publishes to the plan.
 - **Stop a run in flight:** `systemctl --user stop 'dreamteam-nightly-*.scope'`.
 
 ## Known limits
+
+- The coordinators run `claude -p --dangerously-skip-permissions`, because an unattended fixer needs Edit and Bash.
+  The boundaries that make that acceptable are:
+  - provenance (only trusted authors and labellers);
+  - prompts that fence issue text as untrusted data;
+  - the read-only oracle review;
+  - PR-only by default, with the allowlist shim and the pre-push hook;
+  - the memory and runtime caps.
+
+  Branch protection, or a token without merge rights on production repos, is still the real boundary. It is not
+  checked by this code.
 
 - The seat-point cost per night is not measured yet. The continuation floor (0.40) and the three-repo cap bound it;
   the card's "about 50" is an estimate.

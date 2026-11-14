@@ -118,34 +118,49 @@ write_sweep() { # $1 = json doc
 make_pr_only_guards() { # $1 = shim dir, $2 = clone dir, $3 = real gh path
   mkdir -p "$1"
   { printf '#!/usr/bin/env bash\nREAL_GH=%q\n' "$3"; cat <<'SHIM'; } > "$1/gh"
-# overnight-guarded PR-only shim: this repo is production, nothing merges unattended. Per-argument checks
-# (xreview r3/r4): a query string or trailing slash does not hide a merge endpoint, and a gh api body the
-# shim cannot read (--input, --input -, -F x=@file), REST or GraphQL, by name or by full URL, is refused.
-refuse() { echo "overnight-guarded: PR-only repo — $1 refused (open the PR and stop)" >&2; exit 77; }
-has_pr=0; has_merge=0; api=0
+# overnight-guarded PR-only shim: an ALLOWLIST (security review 2026-11-14: a denylist kept missing merge
+# spellings). A PR-only fixer or reviewer needs only these; everything else is refused.
+refuse() { echo "overnight-guarded: PR-only repo — 'gh $*' is not on the allowlist (open the PR and stop)" >&2; exit 77; }
+sub="${1:-}"; shift || true
+act=""; method=GET; explicit=0; body=0; gql=0; skip=0; prev=""
 for a in "$@"; do
-  case "$a" in pr) has_pr=1;; merge) has_merge=1;; alias) refuse "gh alias";; api) api=1;; esac
-  case "$a" in *mergePullRequest*|*enablePullRequestAutoMerge*|*mergeBranch*) refuse "a GraphQL merge mutation";; esac
-  e="${a%%[?#]*}"; e="${e%/}"
-  case "$e" in */merge|*/merges|*/auto-merge) refuse "the REST merge endpoint ($a)";; esac
+  if [ "$skip" = 1 ]; then skip=0; case "$prev" in -X|--method) method="$a"; explicit=1;; esac; continue; fi
+  prev="$a"
+  case "$a" in
+    -R|--repo|-X|--method|-H|--header|--jq|-q|--template|-t|--title|-b|--body|-B|--base|--head|-L|--limit|--json|-s|--state|-l|--label|-a|--assignee|-A|--author|-S|--search|-c|--commit|-w|--web) skip=1;;
+    -X*|--method=*) method="${a#-X}"; method="${method#--method=}"; explicit=1;;
+    --input|--input=*) body=2; [ "$a" = --input ] && skip=1;;
+    -f|-F|--field|--raw-field) [ "$body" = 2 ] || body=1; skip=1;;
+    -f*|-F*|--field=*|--raw-field=*) [ "$body" = 2 ] || body=1;;
+    -*) ;;
+    *) if [ -z "$act" ]; then act="$a"; fi
+       e="${a%%[?#]*}"; e="${e%/}"; case "$e" in graphql|*/graphql) gql=1;; esac;;
+  esac
 done
-[ "$has_pr" = 1 ] && [ "$has_merge" = 1 ] && refuse "gh pr merge"
-# ANY gh api call with a body the shim cannot read is refused (xreview r4: a full-URL .../graphql endpoint
-# with --input carried a merge mutation past an endpoint-name check). A PR-only fixer never needs one.
-if [ "$api" = 1 ]; then
-  for a in "$@"; do
-    case "$a" in --input|--input=*|*=@*) refuse "a gh api request body the shim cannot inspect ($a)";; esac
-  done
-fi
-exec "$REAL_GH" "$@"
+method=$(printf '%s' "$method" | tr '[:lower:]' '[:upper:]')
+case "$sub" in
+  pr)    case "$act" in create|view|list|checks|diff|comment|status) ;; *) refuse "$sub" "$act";; esac;;
+  issue) case "$act" in view|list|comment) ;; *) refuse "$sub" "$act";; esac;;
+  repo)  case "$act" in view|clone) ;; *) refuse "$sub" "$act";; esac;;
+  run)   case "$act" in view|list) ;; *) refuse "$sub" "$act";; esac;;
+  auth)  case "$act" in status) ;; *) refuse "$sub" "$act";; esac;;
+  label) case "$act" in list) ;; *) refuse "$sub" "$act";; esac;;
+  # api: GET only. gh sends fields as a POST unless -X GET is explicit; an --input body is never read here.
+  api)   [ "$gql" = 0 ] || refuse "api graphql"; [ "$method" = GET ] || refuse "api -X $method"
+         [ "$body" = 2 ] && refuse "api --input"; { [ "$body" = 1 ] && [ "$explicit" = 0 ]; } && refuse "api fields without -X GET (a POST)";;
+  --version|version|help|"") ;;
+  *) refuse "$sub";;
+esac
+exec "$REAL_GH" "$sub" "$@"
 SHIM
   chmod +x "$1/gh"
   [ -d "$2/.git/hooks" ] || mkdir -p "$2/.git/hooks"
   cat > "$2/.git/hooks/pre-push" <<'HOOK'
 #!/usr/bin/env bash
 # overnight-guarded PR-only hook: never push to the default branch of a production repo.
+def=$(git symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null); def="refs/heads/${def#refs/remotes/origin/}"
 while read -r _lref _lsha rref _rsha; do
-  case "$rref" in refs/heads/main|refs/heads/master|refs/heads/trunk|refs/heads/production)
+  case "$rref" in "$def"|refs/heads/main|refs/heads/master|refs/heads/trunk|refs/heads/production)
     echo "overnight-guarded: PR-only repo — push to $rref refused; push a branch and open a PR" >&2; exit 1;;
   esac
 done
@@ -166,7 +181,9 @@ run_runner() {
   export HTTPS_PROXY="$PROXY" HTTP_PROXY="$PROXY" https_proxy="$PROXY" http_proxy="$PROXY"
   export NO_PROXY='localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.jphe.in,.realm.watch,.local,familiar,disks,ubox0,nodered,game,katana,gatekeeper'
   export no_proxy="$NO_PROXY" NODE_EXTRA_CA_CERTS="$HOME/.config/teamclaude-ca.pem"
-  unset ANTHROPIC_BASE_URL TEAMCLAUDE_BYPASS
+  # never the host's own login: the wrapper (teamclaude #66) exits 69 when the proxy is down unless one of
+  # these opts into the direct seat, so an inherited opt-in must not ride along
+  unset ANTHROPIC_BASE_URL TEAMCLAUDE_BYPASS TEAMCLAUDE_ALLOW_DIRECT
   export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
   # Pin any teammate a coordinator spawns to THIS scope: scope-attach.sh otherwise re-homes agent procs
   # into dreamteam-<repo>.scope, which has neither this night's aggregate cap nor its RuntimeMaxSec.
@@ -285,12 +302,32 @@ ROT=$(cat "$STATE/overnight-rotation.json" 2>/dev/null || echo '{}'); jq -e 'typ
 CANDS=$(jq -r --argjson never "$NEVER" --argjson rot "$ROT" '
    [.repos[]? | select((.dream // 0) > 0) | select((.repo|split("/")[1]) as $n | ($never | index($n)) | not)]
    | sort_by([($rot[.repo] // ""), -(.dream)]) | .[].repo' "$QUEUE" 2>/dev/null) || CANDS=""
+declare -A PERM=()
+trusted() { # repo login → rc 0 when the login holds write/maintain/admin there (cached per repo+login)
+  [ -n "$2" ] || return 1
+  local k="$1|$2"
+  if [ -z "${PERM[$k]+x}" ]; then
+    PERM[$k]=$(gh api "repos/$1/collaborators/$2/permission" 2>/dev/null | jq -r '.permission // "none"' 2>/dev/null)
+  fi
+  case "${PERM[$k]}" in admin|maintain|write) return 0;; *) return 1;; esac
+}
 REPOS='[]'; TOTAL=0; READS=0
 for full in $CANDS; do
   [ "$(jq length <<<"$REPOS")" -ge "$MAX_REPOS" ] && break
   READS=$((READS+1)); [ "$READS" -gt $(( MAX_REPOS * 4 )) ] && break
   raw=$(gh api "repos/$full/issues?state=open&labels=dream&per_page=100" 2>/dev/null) || { log "work: cannot read $full — skipped"; continue; }
-  iss=$(jq -c --argjson m "$MAX_ISSUES" '[.[]? | select(.pull_request|not) | {number, title: (.title[:160])}] | .[:$m]' <<<"$raw" 2>/dev/null) || continue
+  # provenance (security review 2026-11-14): issue text is input to an unattended agent, so only issues
+  # whose AUTHOR and whose `dream` LABELLER both hold write/maintain/admin on the repo are worked. An
+  # outsider's issue on a public repo, or a label added by a read-only account, is skipped and logged.
+  cand=$(jq -c --argjson m "$(( MAX_ISSUES * 3 ))" '[.[]? | select(.pull_request|not) | {number, title: (.title[:160]), author: (.user.login // "")}] | .[:$m]' <<<"$raw" 2>/dev/null) || continue
+  iss='[]'
+  while IFS= read -r it; do
+    [ "$(jq length <<<"$iss")" -ge "$MAX_ISSUES" ] && break
+    n=$(jq -r .number <<<"$it"); au=$(jq -r .author <<<"$it")
+    lb=$(gh api "repos/$full/issues/$n/events?per_page=100" 2>/dev/null | jq -r '[.[]? | select(.event=="labeled" and .label.name=="dream")] | last | .actor.login // ""' 2>/dev/null)
+    if trusted "$full" "$au" && trusted "$full" "$lb"; then iss=$(jq -c --argjson it "$it" '. + [$it | del(.author)]' <<<"$iss")
+    else log "work: $full#$n skipped — author '${au:-?}' / dream labeller '${lb:-?}' lacks write access (untrusted input)"; fi
+  done < <(jq -c '.[]' <<<"$cand")
   k=$(jq length <<<"$iss"); [ "${k:-0}" -gt 0 ] || continue
   name="${full#*/}"
   if jq -e --arg n "$name" 'index($n)' <<<"$PROD" >/dev/null; then po=true
