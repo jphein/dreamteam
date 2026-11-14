@@ -32,6 +32,14 @@ const MAX_HOURS = A.maxHours || 6
 const REQUIRED = A.requiredCheck || 'Build APK'
 const CI_TIMEOUT = A.ciTimeoutMin || 25
 const FOCUS = A.focus || '' // optional: narrow scouting, e.g. "wear module" or "playback"
+// Guarded nightly (scripts/overnight-guarded.sh, JP 2026-11-14): the timer hands over the
+// dream-labelled issues it confirmed live, so Scout is skipped and only those are worked.
+const GIVEN = Array.isArray(A.issues) ? A.issues.filter(i => i && Number.isInteger(i.number)) : null
+// prOnly: a production repo. PRs are opened and reviewed, and Ship never runs (nothing merges).
+const PR_ONLY = A.prOnly === true
+// prGate: path to dreamteam's scripts/pr-gate.sh. When set, Ship gates on EVERY check run of the
+// head sha via that REST-only script instead of grepping one named check out of the checks list.
+const PR_GATE = typeof A.prGate === 'string' ? A.prGate : ''
 
 if (!REPO) {
   return { error: 'overnight needs args: { repo: "owner/name", maxHours?: 6, focus?: "..." }' }
@@ -100,9 +108,13 @@ const slug = s => (s || 'issue').toLowerCase().replace(/[^a-z0-9]+/g, '-').repla
 
 // ════════════════ Phase 1: Scout ════════════════
 phase('Scout')
+let scoutResults = []
+if (GIVEN) {
+  log(`Overnight on ${REPO}: ${GIVEN.length} dream-labelled issue(s) handed over by the guarded nightly; scouting skipped${PR_ONLY ? '; PR-only (production repo)' : ''}.`)
+} else {
 log(`Overnight on ${REPO} — ${LENSES.length} scout(s), issue cap ${ISSUE_CAP}, gate "${REQUIRED}"${FOCUS ? `, focus: ${FOCUS}` : ''}. Budget: ${budget.total ? Math.round(budget.remaining() / 1000) + 'k left' : 'no target (maxHours=' + MAX_HOURS + ')'}.`)
 
-const scoutResults = (await parallel(LENSES.map(lens => () =>
+scoutResults = (await parallel(LENSES.map(lens => () =>
   agent(`## Overnight scout — lens: ${lens.key}
 
 Repo: \`${REPO}\` (work in the local checkout). ${FOCUS ? `Focus area: **${FOCUS}**.` : ''} You have full shell, \`gh\`, and the codebase.
@@ -117,12 +129,16 @@ For each item worth fixing, FILE a GitHub issue so it survives context loss (per
 Return each as: title, area, severity, type, rationale, files[], issueNumber (if filed), effort. READ + file issues only — do NOT edit code in this phase.`,
     { label: `scout:${lens.key}`, phase: 'Scout', schema: SCOUT_SCHEMA })
 ))).filter(Boolean)
+}
 
 // Dedup across scouts by (area + normalized title); prioritize critical/high, small effort first.
 const sevRank = { critical: 0, high: 1, medium: 2, low: 3 }
 const effRank = { small: 0, medium: 1, large: 2 }
 const seen = new Set()
-const allIssues = scoutResults.flatMap(r => r.issues || [])
+const allIssues = (GIVEN
+  ? GIVEN.map(i => ({ title: i.title || `#${i.number}`, area: REPO, severity: 'medium', type: 'bug', effort: 'medium',
+      issueNumber: i.number, rationale: `Dream-labelled issue #${i.number}: read it first (\`gh issue view ${i.number} --repo ${REPO}\`) and fix what it asks.` }))
+  : scoutResults.flatMap(r => r.issues || []))
   .filter(it => { const k = slug(it.area) + '|' + slug(it.title); if (seen.has(k)) return false; seen.add(k); return true })
   .sort((a, b) => (sevRank[a.severity] - sevRank[b.severity]) || (effRank[a.effort || 'medium'] - effRank[b.effort || 'medium']))
 
@@ -204,7 +220,8 @@ log(`Fix+Review done: ${opened} PR(s) opened, ${approved.length} approved, ${nee
 // the approved ones one at a time in severity order; if a merge dirties the
 // next, that agent rebases it as part of its own step.
 phase('Ship')
-const queue = [...approved].sort((a, b) => (sevRank[a.severity] - sevRank[b.severity]))
+const queue = PR_ONLY ? [] : [...approved].sort((a, b) => (sevRank[a.severity] - sevRank[b.severity]))
+if (PR_ONLY && approved.length) log(`PR-only (production repo): ${approved.length} approved PR(s) left open for a human merge: [${approved.map(q => '#' + q.prNumber).join(', ')}]`)
 const shipped = []
 if (!queue.length) {
   log('Nothing approved to ship this sweep.')
@@ -217,9 +234,9 @@ You are merging ONE PR, then stopping. Full shell + \`gh\`. NEVER force-push mai
 
 1. \`gh pr view ${w.prNumber} --repo ${REPO} --json state,mergeable,mergeStateStatus,headRefName,baseRefName\` — if already MERGED, return merged:true/action:"merged".
 2. If CONFLICTING/BEHIND/DIRTY or no CI run for the head SHA → fetch, checkout the branch, rebase onto origin/main, \`git push --force-with-lease\` (re-triggers CI). Real semantic conflict needing judgement → action:"conflict", merged:false.
-3. Wait up to ~${CI_TIMEOUT} min for **${REQUIRED}** to pass (advisory bots — CodeRabbit/DeepSource/Gemini — do NOT gate):
+${PR_GATE ? `3. Gate on EVERY check run of the head sha with \`bash ${PR_GATE} ${REPO} ${w.prNumber}\` (REST only). Exit 0 = green. Exit 1 = failed or still running: re-run it at most every 5 minutes, up to ~${CI_TIMEOUT} min, then action:"ci-timeout" (or "ci-red" if a check failed). Exit 4 = the repo has no CI: do NOT merge, action:"blocked". Exit 3 = unreadable: action:"error". Do NOT merge on anything but exit 0.` : `3. Wait up to ~${CI_TIMEOUT} min for **${REQUIRED}** to pass (advisory bots — CodeRabbit/DeepSource/Gemini — do NOT gate):
    \`until gh pr checks ${w.prNumber} --repo ${REPO} | grep -qiE '${REQUIRED}.*(pass|success)'; do gh pr checks ${w.prNumber} --repo ${REPO} | grep -qiE '${REQUIRED}.*(fail|error)' && break; sleep 30; done\`
-   Failed → action:"ci-red", merged:false. Timeout → action:"ci-timeout", merged:false. Do NOT merge either.
+   Failed → action:"ci-red", merged:false. Timeout → action:"ci-timeout", merged:false. Do NOT merge either.`}
 4. If green + mergeable: \`gh pr merge ${w.prNumber} --repo ${REPO} --squash --delete-branch\`, then \`git fetch origin\` and confirm MERGED.
 
 Return: pr, merged, action, mergeCommit, notes.`,
@@ -235,6 +252,8 @@ Return: pr, merged, action, mergeCommit, notes.`,
 
 return {
   repo: REPO,
+  prOnly: PR_ONLY,
+  approvedOpen: PR_ONLY ? approved.map(w => w.prNumber) : [],
   budget: budget.total ? { targetK: Math.round(budget.total / 1000), spentK: Math.round(budget.spent() / 1000), leftK: Math.round(budget.remaining() / 1000) } : 'no-target',
   scouts: LENSES.map(l => l.key),
   scouted: allIssues.length,
