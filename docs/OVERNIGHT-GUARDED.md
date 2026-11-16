@@ -23,9 +23,10 @@ before any merge; costs about 50 seat-points a night". This page is the contract
    - the 7-day pool: `aggregate.sevenDay.remaining` must be ≥ `seven_day_min` (0.30). This proxy reports `sevenDay`
      as null, so the guard reads `aggregate.weeklyShared.remaining` in its place.
 
-   It fails closed: if the proxy doesn't answer, or answers without those two numbers, nothing starts. The
-   `~/.cargo/bin/claude` wrapper silently falls back to familiar's own login when the proxy is down, so starting
-   anyway would bill a seat outside the pool.
+   Before the quota is read, a pre-flight asks the proxy's `/teamclaude/status`: anything but HTTP 200 means no
+   start. It fails closed: if the proxy doesn't answer, or answers without those two numbers, nothing starts. Since
+   teamclaude #66 the `~/.cargo/bin/claude` wrapper exits 69 when the proxy is down (it used to fall back to
+   familiar's own login, billing a seat outside the pool); a runner that meets exit 69 stops the night.
 2. **Work.** The guard reads `state/issues-queue.json` (refreshed 21:50) and takes the repos with `dream > 0` from
    every owner, not only jphein/dreamteam. It drops `never_sweep` (plan.realm.watch), puts the least recently swept
    first (`state/overnight-rotation.json`), then the most dream issues. It re-reads each repo's open `dream` issues

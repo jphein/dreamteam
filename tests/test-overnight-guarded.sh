@@ -4,12 +4,16 @@
 # "runs 23:30 with the 70 % quota guard, PR-only in production repos, oracle review before any merge".
 #
 # HERMETIC — nothing real is started, spent or mutated:
-#   • curl is PATH-stubbed: serves $FAKE_QUOTA (JSON) or fails when FAKE_QUOTA_DOWN=1 (proxy down).
+#   • curl is PATH-stubbed: serves $FAKE_QUOTA (JSON) or fails when FAKE_QUOTA_DOWN=1 (proxy down); the
+#     /teamclaude/status pre-flight answers HTTP $FAKE_STATUS_CODE (200), logged as "status" in $STATUS_LOG.
 #   • gh is PATH-stubbed: `gh api repos/<r>/issues…` serves $FAKE_GH_<name> or [] ; logs argv.
 #   • git is PATH-stubbed: `git clone` just makes the directory; logs argv.
 #   • claude is a recorder (DREAMTEAM_CLAUDE_BIN): writes its argv + cwd + proxy env, prints {}.
 #   • systemd-run / tmux are never reached: DREAMTEAM_INLINE=1 runs the runner in-process, and
-#     the scope+tmux launch line is asserted from DRY_RUN=1 output instead.
+#     the scope+tmux launch line is asserted from DRY_RUN=1 output instead. Both are ALSO PATH-stubbed, so a
+#     test that forgets DRY_RUN/INLINE cannot reach the real ones (2026-11-15: a red-phase test did, twice):
+#     `tmux … ls` answers "no server"; any launch is logged to $TMP/launch-attempts.txt (outside reset's *.log sweep) and exits 97; the suite's
+#     last check requires that log to be empty.
 #   • DREAMTEAM_TEST=1 silences voice; state, queue, config and clone dirs are all under $TMP.
 #
 # Run standalone:  bash tests/test-overnight-guarded.sh   (exit 0 = all pass, 1 = any fail)
@@ -27,9 +31,25 @@ BIN="$TMP/bin"; mkdir -p "$BIN"
 
 cat > "$BIN/curl" <<'S'
 #!/bin/bash
+for a in "$@"; do
+  case "$a" in */teamclaude/status)
+    echo status >> "${STATUS_LOG:-/dev/null}"; echo status >> "${SEQ_LOG:-/dev/null}"
+    [ "${FAKE_QUOTA_DOWN:-0}" = "1" ] && { printf 000; exit 7; }
+    printf '%s' "${FAKE_STATUS_CODE:-200}"; exit "${FAKE_STATUS_RC:-0}" ;;
+  esac
+done
 echo probe >> "${SEQ_LOG:-/dev/null}"
 [ "${FAKE_QUOTA_DOWN:-0}" = "1" ] && exit 7
 echo "${FAKE_QUOTA:-}"
+S
+cat > "$BIN/systemd-run" <<S
+#!/bin/bash
+echo "systemd-run \$*" >> "$TMP/launch-attempts.txt"; exit 97
+S
+cat > "$BIN/tmux" <<S
+#!/bin/bash
+for a in "\$@"; do [ "\$a" = ls ] && exit 1; done   # no live nightly server, whatever the real host runs
+echo "tmux \$*" >> "$TMP/launch-attempts.txt"; exit 97
 S
 cat > "$BIN/gh" <<'S'
 #!/bin/bash
@@ -136,6 +156,29 @@ reset; mkqueue jphein/starcharts:2
 FAKE_GH_starcharts="$I2" FAKE_QUOTA_DOWN=1 run_g >/dev/null; rc=$?
 { [ "$rc" -eq 0 ] && [ "$(gj .decision)" = "no-start" ] && gj .reason | grep -qi 'proxy' && [ ! -s "$TMP/claude.log" ]; } \
   && pass "proxy down → no start (fail closed), unit still exits 0" || fail "proxy down (rc=$rc $(gj .decision) $(gj .reason))"
+# the pre-flight (Sen 2026-11-15): /teamclaude/status must answer 200 before the quota is even read
+reset; mkqueue jphein/starcharts:2
+: > "$TMP/status.log"; : > "$TMP/seq.log"
+FAKE_GH_starcharts="$I2" FAKE_QUOTA="$Q_OK" FAKE_STATUS_CODE=503 STATUS_LOG="$TMP/status.log" SEQ_LOG="$TMP/seq.log" run_g >/dev/null; rc=$?
+{ [ "$rc" -eq 0 ] && [ "$(gj .decision)" = "no-start" ] && gj .reason | grep -q '503' && gj .reason | grep -q 'teamclaude/status' \
+  && [ -s "$TMP/status.log" ] && ! grep -q probe "$TMP/seq.log" && [ ! -s "$TMP/claude.log" ]; } \
+  && pass "status pre-flight 503 with a healthy quota → no start, the quota is never read" || fail "status 503 (rc=$rc $(gj .decision) $(gj .reason))"
+reset; mkqueue jphein/starcharts:2
+: > "$TMP/status.log"
+FAKE_GH_starcharts="$I2" FAKE_QUOTA="$Q_OK" STATUS_LOG="$TMP/status.log" DRY_RUN=1 run_g >/dev/null
+{ [ "$(gj .decision)" = "dry-run" ] && [ "$(grep -c status "$TMP/status.log")" = 1 ]; } \
+  && pass "status 200 → the guard goes on to the quota (one pre-flight probe)" || fail "status 200 path ($(gj .decision) $(grep -c status "$TMP/status.log"))"
+reset; mkqueue jphein/starcharts:2; : > "$TMP/seq.log"
+FAKE_GH_starcharts="$I2" FAKE_QUOTA="$Q_OK" SEQ_LOG="$TMP/seq.log" DRY_RUN=1 run_g >/dev/null
+[ "$(head -2 "$TMP/seq.log" | tr '\n' ' ')" = "status probe " ] \
+  && pass "the pre-flight runs before the quota probe (status, then probe)" || fail "order: $(tr '\n' ' ' < "$TMP/seq.log")"
+reset; mkqueue jphein/starcharts:2; : > "$TMP/seq.log"
+FAKE_GH_starcharts="$I2" FAKE_QUOTA="$Q_OK" FAKE_STATUS_RC=28 SEQ_LOG="$TMP/seq.log" run_g >/dev/null
+{ [ "$(gj .decision)" = "no-start" ] && gj .reason | grep -q 'rc 28' && ! grep -q probe "$TMP/seq.log"; } \
+  && pass "a 200 whose transfer failed (curl rc 28) → no start" || fail "200 + curl failure ($(gj .decision) $(gj .reason))"
+# the header tells the truth about the wrapper since teamclaude #66 (exit 69, not a silent fallback)
+! grep -q 'silently falls back' "$G" "$ROOT/docs/OVERNIGHT-GUARDED.md" && grep -q 'exits 69' "$G" \
+  && pass "header and contract doc: the wrapper exits 69 when the proxy is down (no stale fallback claim)" || fail "stale 'silently falls back' text"
 reset; mkqueue jphein/starcharts:2
 FAKE_GH_starcharts="$I2" FAKE_QUOTA='<html>502</html>' run_g >/dev/null
 [ "$(gj .decision)" = "no-start" ] && pass "proxy answers garbage → no start" || fail "garbage quota started"
@@ -293,7 +336,7 @@ FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_TEST=1 DREAMTEAM_QUOTA_SEQ
 # r2: the quota is probed AFTER the clone, right before the coordinator spends
 reset; mkqueue jphein/realmwatch:2
 FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 SEQ_LOG="$TMP/seq.log" run_g >/dev/null
-[ "$(tr '\n' ' ' < "$TMP/seq.log")" = "probe clone probe claude " ] && pass "runner order: guard probe → clone → probe → coordinator (xreview r2)" || fail "order: $(tr '\n' ' ' < "$TMP/seq.log")"
+[ "$(tr '\n' ' ' < "$TMP/seq.log")" = "status probe clone probe claude " ] && pass "runner order: status pre-flight → guard probe → clone → probe → coordinator (xreview r2)" || fail "order: $(tr '\n' ' ' < "$TMP/seq.log")"
 # r2: GraphQL from a file cannot be inspected → refused in a PR-only repo
 SHIM=$(grep -m1 '^PATH1=' "$TMP/claude.log" | cut -d= -f2)/gh
 GH_LOG="$TMP/gh.log" "$SHIM" api graphql -F query=@q.graphql >/dev/null 2>&1; [ $? -eq 77 ] && pass "PR-only shim refuses a GraphQL query read from a file" || fail "graphql @file passed"
@@ -493,6 +536,8 @@ mode, at = m.next_sweep(datetime.datetime.now().astimezone()); print(mode, at.st
 [ "$(ns 1)" = "guarded 23:30" ] && pass "guarded timer active → next_sweep mode guarded at its elapse" || fail "next_sweep guarded: $(ns 1)"
 [ "$(ns 0 | cut -d' ' -f1)" = "pilot" ] && pass "guarded timer inactive → pilot (unchanged fallback)" || fail "next_sweep fallback: $(ns 0)"
 
+# hermetic: no test reached the (stubbed) real systemd-run / tmux launch
+[ ! -s "$TMP/launch-attempts.txt" ] && pass "no test attempted a real scope/tmux launch" || fail "a test reached the launch: $(head -3 "$TMP/launch-attempts.txt")"
 echo "─────────────────────────────────────────────────────────────────"
 echo "SUMMARY: $PASS passed, $FAIL failed, $((PASS+FAIL)) total"
 [ "$FAIL" -eq 0 ] || exit 1
