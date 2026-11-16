@@ -9,12 +9,15 @@
 #
 # THE GUARD (every step logged to state/dreamteam.log and recorded in state/overnight-guard.json:
 # {at, quota_remaining:{five_hour, seven_day}, decision, reason, issues, repos, run_id}):
-#   (a) quota: GET the teamclaude proxy's /teamclaude/quota. START only if aggregate.fiveHour.remaining
+#   (a) pre-flight: GET the proxy's /teamclaude/status; anything but HTTP 200 is NO START, before the quota is
+#       read (Sen 2026-11-15: a proxy that serves a stale quota while its status is unhealthy must not start
+#       the sweep). Then the quota: GET the teamclaude proxy's /teamclaude/quota. START only if aggregate.fiveHour.remaining
 #       >= .overnight.five_hour_min (0.70: the sweep never starts into a 5-hour pool below 70 %) and the
 #       7-day pool (aggregate.sevenDay.remaining, else aggregate.weeklyShared.remaining: this proxy
 #       reports sevenDay as null) >= .overnight.seven_day_min (0.30). A proxy that does not answer, or
-#       answers without those numbers, is NO START (fail closed): the ~/.cargo/bin/claude wrapper
-#       silently falls back to familiar's own login when the proxy is down, which bills outside the pool.
+#       answers without those numbers, is NO START (fail closed). Since teamclaude #66 the
+#       ~/.cargo/bin/claude wrapper exits 69 when the proxy is down (it used to fall back to familiar's own
+#       login, billing outside the pool); the runner reads 69 as proxy-down and stops the night (#196).
 #   (b) work: repos with dream > 0 in state/issues-queue.json (all owners, not only jphein/dreamteam),
 #       minus .overnight.never_sweep, least-recently-swept first (state/overnight-rotation.json), each
 #       re-read LIVE over REST (the queue can be hours old). None open → decision no-work, silent, exit 0.
@@ -40,7 +43,7 @@
 #   boundary; branch protection is; spawned teammates are pinned to the nightly scope
 #   (DREAMTEAM_SCOPE_NAME, Delegate=yes) so scope-attach cannot re-home them out of its caps.
 # SEAMS (tests/test-overnight-guarded.sh): DREAMTEAM_STATE, DREAMTEAM_CONFIG, DREAMTEAM_QUEUE,
-#   DREAMTEAM_QUOTA_URL, DREAMTEAM_QUOTA_SEQ (space-separated fiveHour overrides, one per probe),
+#   DREAMTEAM_QUOTA_URL, DREAMTEAM_STATUS_URL (the pre-flight), DREAMTEAM_QUOTA_SEQ (space-separated fiveHour overrides, one per probe),
 #   DREAMTEAM_WT_BASE, DREAMTEAM_CLAUDE_BIN, DREAMTEAM_PLAN_DATA, DREAMTEAM_DEADLINE_EPOCH,
 #   DREAMTEAM_INLINE=1 (run the runner in-process, no scope/tmux), DREAMTEAM_PREV_LIVE (0/1),
 #   DRY_RUN=1 (print the launch, start nothing), DREAMTEAM_WATCH_SEC (watchdog period). curl/gh/git/tmux are called by bare name (PATH stubs).
@@ -54,6 +57,7 @@ mkdir -p "$STATE"
 LOG="$STATE/dreamteam.log"
 PROXY="http://127.0.0.1:3456"
 QURL="${DREAMTEAM_QUOTA_URL:-$PROXY/teamclaude/quota}"
+SURL="${DREAMTEAM_STATUS_URL:-$PROXY/teamclaude/status}"
 TMUX_SOCK="dreamteam-nightly"
 
 log() { echo "$(date +%FT%T) overnight-guarded: $*" >> "$LOG" 2>/dev/null || true; }
@@ -82,6 +86,12 @@ quota_probe() {
     [ "$i" -lt "${#seq[@]}" ] && FIVE="${seq[$i]}"; echo $((i+1)) > "$f"
   fi
   return 0
+}
+# status_ok → rc 0 when the proxy's status endpoint answers HTTP 200; else sets QREASON (the start pre-flight)
+status_ok() {
+  local code rc=0; code=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "$SURL" 2>/dev/null) || rc=$?
+  [ "$code" = 200 ] && [ "$rc" -eq 0 ] && return 0   # a 200 whose transfer then failed (curl rc != 0) holds too
+  QREASON="the teamclaude proxy's $SURL answered ${code:-nothing} (curl rc $rc), not a clean 200 (pre-flight; fail closed)"; return 1
 }
 # quota_ok MIN5 → rc 0 ok; else sets QREASON
 quota_ok() {
@@ -415,7 +425,8 @@ if [ "$(cut -d' ' -f1 "$STATE/overnight-night" 2>/dev/null)" = "$NIGHT" ]; then
 fi
 
 # (a) quota — probed first, judged after the work gate (no work = nothing to hold back, silent)
-quota_ok "$FIVE_MIN"; QRC=$?; QR="$QREASON"
+if status_ok; then quota_ok "$FIVE_MIN"; QRC=$?; QR="$QREASON"
+else QRC=1; QR="$QREASON"; FIVE=""; WEEK=""; fi
 log "quota: five_hour=${FIVE:-?} seven_day=${WEEK:-?} → $([ $QRC -eq 0 ] && echo ok || echo "hold: $QR")"
 
 # (b) work gate — queue candidates by rotation, confirmed live over REST
