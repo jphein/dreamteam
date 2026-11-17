@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
+STATE="${SEN_WATCH_STATE:-$HOME/.local/state/sen-watch}"; mkdir -p "$STATE"
 # One combined watch: plan-chat (JP), Squire's dispatch/pane, agent-mail inbox. Lines prefixed by source.
-seen=/var/tmp/claude-1000/-home-jp/3f2afe4b-df91-402b-8792-e19b2a007cf6/scratchpad/squire-seen.txt; touch "$seen"
+seen=$STATE/squire-seen.txt; touch "$seen"
 ( ~/.local/bin/plan-chat watch 2>&1 | grep --line-buffered -v '^plan-chat watch: listening' | sed -u 's/^/[plan-chat] /' ) &
 ( agent-mail watch sen | sed -u 's/^/[agent-mail] /' ) &
 ( while true; do out=$(ssh -o ConnectTimeout=8 katana 'tail -n 10 ~/Projects/money/scratch/webagent-queue/dispatch.log 2>/dev/null | grep -E "DONE|CLAIM|ASK|FAIL|NEEDS|READY|NOTE|SIGNED-OUT|BLOCKED|ABSENT|CANCEL|BAD|SWEPT|VERDICT"; p=$(tmux capture-pane -pt ember 2>/dev/null); printf "%s\n" "$p" | grep -vE "^\s*$" | tail -3 | grep -E "ASK|JP|needs you|blocked|NEEDS-JP|READY-FOR-JP|VERDICT" | sed "s/^/Squire: /"' 2>/dev/null || echo "squire-watch: ssh katana failed $(date +%H:%M)"); printf '%s\n' "$out" | while IFS= read -r l; do [ -z "$l" ] && continue; if ! grep -qxF -- "$l" "$seen"; then printf '%s\n' "$l" >> "$seen"; printf '[squire] %s\n' "$l"; fi; done; sleep 60; done ) &
 # Gmail Sent watcher (JP 2026-11-07 12:29 "you really are stale": his own sends must reach the lead within minutes, not at the hourly pass)
-( sentseen="/var/tmp/claude-1000/-home-jp/3f2afe4b-df91-402b-8792-e19b2a007cf6/scratchpad/sen-watch.sent-seen"; touch "$sentseen"; while true; do ~/.local/bin/gmail-fetch search 'in:sent newer_than:1d' 2>/dev/null | python3 -c "
+( sentseen="$STATE/sen-watch.sent-seen"; touch "$sentseen"; while true; do ~/.local/bin/gmail-fetch search 'in:sent newer_than:1d' 2>/dev/null | python3 -c "
 import sys,json
 try: d=json.load(sys.stdin)
 except Exception: d={}
