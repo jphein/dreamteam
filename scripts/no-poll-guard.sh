@@ -31,7 +31,9 @@
 # cascade; blocking it would break the very workflow this exists to protect.
 #
 # CONSERVATIVE BY DESIGN: it matches command TEXT, so a loop that merely prints
-# the string "gh pr checks" is blocked too. That is the right trade — the
+# the string "gh pr checks" is blocked too. One narrowing (#191): a heredoc body that
+# only ever lands as data (a commit message, an issue body, a python edit
+# script) is not judged; see (f). That is the right trade — the
 # message says exactly what to do instead, and the cost of a false block is one
 # rephrase, while the cost of a miss is a fleet-wide quota outage.
 #
@@ -66,38 +68,61 @@ ENFORCE=$(jq -r 'if .nopoll.enforce == false then "false" else "true" end' "$CFG
 # ── (c) teammates only. The lead's gate and cascade must never be blocked.
 dt_is_teammate || exit 0
 
-# ── (d) is this a GraphQL-heavy CI-status read?
-POLLS_CI=0
-case "$CMD" in
-  *"gh pr checks"*) POLLS_CI=1 ;;
-esac
-if [ "$POLLS_CI" -eq 0 ]; then
-  case "$CMD" in
-    *"gh pr view"*statusCheckRollup*) POLLS_CI=1 ;;
+# ── (d)+(e) as one judgement of a text: 0 = it reads CI status in a loop.
+polls() {
+  # ── (d) is this a GraphQL-heavy CI-status read?
+  POLLS_CI=0
+  case "$1" in
+    *"gh pr checks"*) POLLS_CI=1 ;;
   esac
-fi
-[ "$POLLS_CI" -eq 1 ] || exit 0
+  if [ "$POLLS_CI" -eq 0 ]; then
+    case "$1" in
+      *"gh pr view"*statusCheckRollup*) POLLS_CI=1 ;;
+    esac
+  fi
+  [ "$POLLS_CI" -eq 1 ] || return 1
 
-# ── (e) is it in a loop? A Monitor IS a poller by construction, whatever it
-#        runs. For Bash, look for the loop/repeat constructs the measured
-#        incident used (`for i in $(seq 1 40); do … sleep 30; done`).
-LOOPING=0
-[ "$TOOL" = "Monitor" ] && LOOPING=1
-# `gh pr checks --watch` is a poller with NO loop keyword — it is the built-in
-# version of the thing this guard exists to stop, and it is the form that never
-# terminates on a force-pushed head. It must be matched as a FLAG: the loop
-# patterns below are space-delimited (" watch ") and `--watch` is
-# hyphen-prefixed, so the single most dangerous invocation was the one that
-# slipped the first version of this detector.
-if [ "$LOOPING" -eq 0 ]; then
-  case "$CMD" in *"--watch"*) LOOPING=1 ;; esac
-fi
-if [ "$LOOPING" -eq 0 ]; then
-  case " $CMD " in
-    *" while "*|*" until "*|*" for "*|*" watch "*|*"sleep "*|*";sleep"*|*"&& sleep"*) LOOPING=1 ;;
-  esac
-fi
-[ "$LOOPING" -eq 1 ] || exit 0
+  # ── (e) is it in a loop? A Monitor IS a poller by construction, whatever it
+  #        runs. For Bash, look for the loop/repeat constructs the measured
+  #        incident used (`for i in $(seq 1 40); do … sleep 30; done`).
+  LOOPING=0
+  [ "$TOOL" = "Monitor" ] && LOOPING=1
+  # `gh pr checks --watch` is a poller with NO loop keyword — it is the built-in
+  # version of the thing this guard exists to stop, and it is the form that never
+  # terminates on a force-pushed head. It must be matched as a FLAG: the loop
+  # patterns below are space-delimited (" watch ") and `--watch` is
+  # hyphen-prefixed, so the single most dangerous invocation was the one that
+  # slipped the first version of this detector.
+  if [ "$LOOPING" -eq 0 ]; then
+    case "$1" in *"--watch"*) LOOPING=1 ;; esac
+  fi
+  if [ "$LOOPING" -eq 0 ]; then
+    case " $1 " in
+      *" while "*|*" until "*|*" for "*|*" watch "*|*"sleep "*|*";sleep"*|*"&& sleep"*) LOOPING=1 ;;
+    esac
+  fi
+  [ "$LOOPING" -eq 1 ] || return 1
+  return 0
+}
+
+polls "$CMD" || exit 0
+
+# ── (f) heredoc data (#191). The text above includes every heredoc body, and most
+#        bodies are data: a commit message, an issue body, a python edit script that
+#        quotes a file's old poll loop (2026-11-14 06:5x: two blocks, nothing polled).
+#        scripts/lib/nopoll_text.py removes a body only when every path its text can
+#        take ends as data, and returns the command unchanged on anything it does not
+#        model, so this step can only narrow a block to "the code itself still polls".
+#        No python3, or any error: keep the block (the pre-#191 behaviour).
+case "$CMD" in
+  *"<<"*)
+    RAW="$(printf '%s' "$INPUT" | jq -r '.tool_input.command // ""' 2>/dev/null)"
+    if [ -n "$RAW" ] && DATA="$(printf '%s' "$RAW" | python3 -I "$ROOT/scripts/lib/nopoll_text.py" 2>/dev/null)"; then
+      DATA="${DATA//$'\n'/ }"; DATA="${DATA//$'\t'/ }"
+      polls "$DATA" || exit 0
+    fi
+    ;;
+esac
 
 # ── BLOCK. exit 2 = deny + surface stderr to the agent.
 {

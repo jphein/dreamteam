@@ -146,6 +146,120 @@ run "$LANE" Bash "$MEASURED" "$TMP/nonexistent.json"
 if blocked; then pass "still ENFORCES when the config file is missing (absent kill switch ≠ disabled guard)"
 else fail "a missing config silently disabled the guard — exit $GRC"; fi
 
+# ── HEREDOC DATA (#191): a heredoc body is data unless something runs it ──────────
+# The 2026-11-14 06:5x false blocks: a python heredoc that EDITED overnight.js quoted
+# the merge warden's checks-loop line, and a heredoc writing an issue body described
+# it. Nothing polled. The text is a mention; a poll is where a shell RUNS it. (The
+# first edit of this very block was itself blocked on 2026-11-17 04:5x.)
+LOOPLINE="$(grep -m1 'until gh pr checks' "$ROOT/workflows/overnight.js")"
+POLLBODY=$'while true; do\n  gh pr checks 458 --repo o/r\n  sleep 30\ndone'
+# allow <label> <command>  /  deny <label> <command>   (as the teammate, tool Bash)
+allow() { run "$LANE" Bash "$2"; if [ "$GRC" -eq 0 ]; then pass "ALLOWS $1"; else fail "false block: $1 — exit $GRC"; fi; }
+deny()  { run "$LANE" Bash "$2"; if blocked; then pass "BLOCKS $1"; else fail "missed a poll: $1 — exit $GRC"; fi; }
+
+if [ -n "$LOOPLINE" ]; then pass "fixture: overnight.js still holds the checks-loop line the incident quoted"
+else fail "fixture: the checks-loop line is gone from workflows/overnight.js"; fi
+allow "the 11-14 incident: a python3 - heredoc that edits overnight.js and quotes its checks loop" \
+  "cd $ROOT && python3 - <<'PY'"$'\np = "workflows/overnight.js"\ns = open(p).read()\nold = r"""'"$LOOPLINE"$'"""\nassert s.count(old) == 1\nopen(p, "w").write(s.replace(old, "   (the lead gates; no loop)"))\nPY\ngit diff --stat'
+allow "the 11-14 second hit: an issue body written by heredoc, then posted with gh api -F body=@file" \
+  $'cat > "$S/issue-191.md" <<\'EOF\'\nThe guard blocked a heredoc that quoted `until gh pr checks 1; do sleep 30; done`.\nEOF\ngh api repos/o/r/issues -X POST -F title=x -F body=@"$S/issue-191.md"'
+allow "a PR body passed as \"\$(cat <<'EOF' … EOF)\" to gh pr create" \
+  $'gh pr create --title t --body "$(cat <<\'EOF\'\nWe removed the old `while true; do gh pr checks 1; sleep 30; done` watcher.\nEOF\n)"'
+allow "a commit message fed to git commit -F - by heredoc" \
+  $'git commit -q -F - <<\'EOF\'\nfix: drop the `for i in $(seq 40); do gh pr checks 1; sleep 30; done` loop\nEOF'
+allow "a body kept in a variable and passed only to gh" \
+  $'body=$(cat <<\'EOF\'\nuntil gh pr checks 1; do sleep 30; done\nEOF\n)\ngh api repos/o/r/issues/1/comments -f body="$body"'
+allow "a <<- heredoc with tab-indented data, written to a file nothing runs" \
+  $'cat > notes.md <<-\'EOF\'\n\twhile :; do gh pr checks 1; sleep 30; done\n\tEOF\nwc -l notes.md'
+allow "this suite's own edit (python heredoc holding allow/deny lines that name poll loops)" \
+  "python3 - <<'PYEDIT'"$'\ns = open("t.sh").read()\ns += \'deny "x" $\\\'bash <<EOF\\nwhile :; do gh pr checks 1; sleep 30; done\\nEOF\\\'\\n\'\nopen("t.sh", "w").write(s)\nPYEDIT\ngit diff --stat t.sh'
+deny "an edit script whose edited file is then run (it may now hold a poll)" \
+  "python3 - <<'PYEDIT'"$'\ns = open("t.sh").read()\ns += "while :; do gh pr checks 1; sleep 30; done\\n"\nopen("t.sh", "w").write(s)\nPYEDIT\nbash t.sh'
+
+deny "a heredoc fed to bash" $'bash <<\'EOF\'\n'"$POLLBODY"$'\nEOF'
+deny "a heredoc fed to bash -s over ssh" $'ssh gpu1 bash -s <<\'EOF\'\n'"$POLLBODY"$'\nEOF'
+deny "a heredoc piped into sh" $'cat <<\'EOF\' | sh\n'"$POLLBODY"$'\nEOF'
+deny "a script written by heredoc and then run" $'cat > poll.sh <<\'EOF\'\n'"$POLLBODY"$'\nEOF\nbash poll.sh'
+deny "a script written by heredoc, made executable and run by path" $'cat <<\'EOF\' > "$S/poll.sh" && chmod +x "$S/poll.sh" && "$S/poll.sh"\n'"$POLLBODY"$'\nEOF'
+deny "a script written by tee and then sourced" $'tee p.sh >/dev/null <<\'EOF\'\n'"$POLLBODY"$'\nEOF\n. ./p.sh'
+deny "a heredoc read into a variable, then eval'd" $'read -r -d \'\' s <<\'EOF\'\n'"$POLLBODY"$'\nEOF\neval "$s"'
+deny "a heredoc captured by \$(…) and run by bash -c" $'bash -c "$(cat <<\'EOF\'\n'"$POLLBODY"$'\nEOF\n)"'
+deny "a heredoc captured into a variable that bash -c runs" $'p=$(cat <<\'EOF\'\n'"$POLLBODY"$'\nEOF\n)\nbash -c "$p"'
+deny "a heredoc behind process substitution, sourced" $'source <(cat <<\'EOF\'\n'"$POLLBODY"$'\nEOF\n)'
+deny "a heredoc whose \$(…) runs when it expands (unquoted delimiter)" $'cat <<EOF\n$(while :; do gh pr checks 1; sleep 30; done)\nEOF'
+deny "a heredoc inside a group piped to bash" $'{ cat <<\'EOF\'\n'"$POLLBODY"$'\nEOF\n} | bash'
+deny "a heredoc feeding a while-read loop that evals each line" $'while read -r l; do eval "$l"; done <<\'EOF\'\n'"$POLLBODY"$'\nEOF'
+deny "a python heredoc that polls through os.system" $'python3 - <<\'PY\'\nimport os, time\nwhile True:\n    os.system("gh pr checks 458 --repo o/r")\n    time.sleep(30)\nPY'
+deny "a gh alias defined from a heredoc (gh runs it as shell)" $'gh alias set --shell w - <<\'EOF\'\n'"$POLLBODY"$'\nEOF\ngh w'
+deny "a real loop in the code, with a heredoc only as its input list" $'while read -r n; do gh pr checks "$n"; sleep 30; done <<\'EOF\'\n458\n459\nEOF'
+# python3 missing or failing: step (f) must keep the block (the pre-#191 behaviour), never allow
+mkdir -p "$TMP/nopy"; printf '#!/bin/sh\nexit 1\n' > "$TMP/nopy/python3"; chmod +x "$TMP/nopy/python3"
+GRC=0
+jq -nc --arg c $'cat > p.sh <<\'EOF\'\n'"$POLLBODY"$'\nEOF' '{tool_name:"Bash",tool_input:{command:$c}}' \
+  | PATH="$TMP/nopy:$PATH" DREAMTEAM_AGENT_ID="$LANE" DREAMTEAM_CONFIG="$TMP/on.json" bash "$GUARD" 2>"$TMP/err" || GRC=$?
+if blocked; then pass "KEEPS the block when python3 fails (no reader, no narrowing)"
+else fail "a failing python3 turned a heredoc block into an allow — exit $GRC"; fi
+deny "a heredoc written by a sink inside an if (its output is not followed)" $'if true; then cat <<\'EOF\'\n'"$POLLBODY"$'\nEOF\nfi | bash'
+# xreview r1 (2026-11-17): each of these was allowed by the first cut
+deny "code after an ANSI-C-quoted delimiter (<<\$'EOF' ends at EOF, not \$EOF)" $'cat <<$\'EOF\'\nnotes\nEOF\n'"$POLLBODY"
+deny "an ANSI-C delimiter where the literal \$EOF line also exists further down" $'cat <<$\'EOF\'\nnotes\nEOF\n'"$POLLBODY"$'\n$EOF'
+deny "a script written now for a LATER call to run (no data extension): the body stays judged" $'cat > "$HOME/bin/ci-wait" <<\'EOF\'\n'"$POLLBODY"$'\nEOF'
+allow "a heredoc written to a .md file that nothing runs" $'cat > "$S/notes.md" <<\'EOF\'\n'"$POLLBODY"$'\nEOF'
+# xreview r2
+deny "a body copied by printf -vNAME (attached) into a variable that eval runs" $'read -r -d \'\' a <<\'EOF\'\n'"$POLLBODY"$'\nEOF\nprintf -vb \'%s\' "$a"\neval "$b"'
+deny "a python body that writes to a path from an env var, then bash runs \"\$VAR\"" $'export POLL_SCRIPT="$S/ci-wait.sh"\npython3 - <<\'PY\'\nimport os\nfrom pathlib import Path\nPath(os.environ["POLL_SCRIPT"]).write_text("while true; do gh pr checks 458 --repo o/r; sleep 30; done\\n")\nPY\nbash "$POLL_SCRIPT"'
+deny "a python body that writes a script, then a glob runs it" $'python3 - <<\'PY\'\nopen("ci-wait.sh", "w").write("while true; do gh pr checks 1; sleep 30; done\\n")\nPY\nbash ./ci-*.sh'
+deny "a git alias defined from a heredoc, then run" $'git config alias.wait-checks "$(cat <<\'EOF\'\n!gh pr checks 458 --repo o/r --watch\nEOF\n)"\ngit wait-checks'
+deny "a git -c alias from a heredoc" $'git -c alias.w="$(cat <<\'EOF\'\n!while :; do gh pr checks 1; sleep 30; done\nEOF\n)" w'
+deny "gh config set pager from a heredoc" $'gh config set pager "$(cat <<\'EOF\'\nsh -c \'while :; do gh pr checks 1; sleep 30; done\'\nEOF\n)"\ngh pr view 1'
+deny "a python edit followed by a test run: the edit may have written what runs (kept)" \
+  $'python3 - <<\'PY\'\np = "workflows/overnight.js"\ns = open(p).read()\ns = s.replace("until gh pr checks 1; do sleep 30; done", "")\nopen(p, "w").write(s)\nPY\nbash tests/test-overnight-workflow.sh'
+# xreview r3
+deny "a python body that polls through a third-party runner (invoke.run)" $'python3 - <<\'PY\'\nfrom invoke import run\nrun("gh pr checks 458 --repo o/r --watch")\nPY'
+deny "a python body that imports a runner by plain import (import sh)" $'python3 - <<\'PY\'\nimport sh\nsh.bash("-c", "gh pr checks 458 --repo o/r --watch")\nPY'
+deny "a python body that writes a script with a two-letter name, then bash runs it" $'python3 - <<\'PY\'\nfrom pathlib import Path\nPath("ci").write_text("gh pr checks 458 --repo o/r --watch\\n")\nPY\nbash ci'
+allow "a python edit importing only stdlib text modules (json, re, pathlib, textwrap)" \
+  $'python3 - <<\'PY\'\nimport json, re, textwrap\nfrom pathlib import Path\np = Path("notes.md")\np.write_text(textwrap.dedent("""\n    old: until gh pr checks 1; do sleep 30; done\n"""))\nPY\ngit diff --stat notes.md'
+# xreview r4
+deny "a heredoc captured by \$( ) in command position (its words run as a command)" $'$(cat <<\'EOF\'\ngh pr checks 458 --repo o/r --watch\nEOF\n)'
+deny "a python body that builds the script name (with_suffix), then bash runs it" $'python3 - <<\'PY\'\nfrom pathlib import Path\nscript = Path("ci-wait").with_suffix(".sh")\nscript.write_text("gh pr checks 458 --repo o/r --watch\\n")\nPY\nbash ci-wait.sh'
+deny "an import after a semicolon (import time; from invoke import run)" $'python3 - <<\'PY\'\nimport time; from invoke import run\nwhile True:\n    run("gh pr checks 458 --repo o/r")\n    time.sleep(30)\nPY'
+deny "an import inside a function body" $'python3 - <<\'PY\'\nimport time\ndef go():\n    from invoke import run\n    run("gh pr checks 458 --repo o/r")\nwhile True:\n    go(); time.sleep(30)\nPY'
+deny "a python body that does not parse (kept: its imports cannot be read)" $'python3 - <<\'PY\'\nimport json\nwhile True:\n    print "gh pr checks 1"\n    sleep 30\nPY'
+deny "a python edit followed by git add / git commit (both run hooks the edit may have written)" \
+  $'python3 - <<\'PY\'\np = "workflows/overnight.js"\ns = open(p).read()\nopen(p, "w").write(s.replace("until gh pr checks 1; do sleep 30; done", ""))\nPY\ngit add workflows/overnight.js && git commit -q -m "drop loop"'
+allow "a commit message by heredoc, then a test run (git commit writes no file that runs)" \
+  $'git commit -q -F - <<\'EOF\'\nfix: drop the `until gh pr checks 1; do sleep 30; done` loop\nEOF\nbash tests/run.sh'
+deny "a patch by git apply, then any test run (the patch may have written it)" $'git apply <<\'PATCH\'\n--- a/t.sh\n+++ b/t.sh\n@@ -1 +1 @@\n-x\n+while :; do gh pr checks 1; sleep 30; done\nPATCH\nbash tests/run.sh'
+# xreview r5
+deny "a python edit followed by git add (measured: add runs post-index-change)" $'python3 - <<\'PY\'\nopen(".git/hooks/post-index-change", "w").write("gh pr checks 1 --watch\\n")\nPY\ngit add notes.md'
+deny "a python body that installs a pre-push hook, then git push runs it" $'python3 - <<\'PY\'\nfrom pathlib import Path\nhook = Path(".git/hooks/pre-push")\nhook.write_text("#!/bin/sh\\ngh pr checks 458 --repo o/r --watch\\n")\nhook.chmod(0o755)\nPY\ngit push'
+deny "a python body that writes, then gh pr create (it pushes, and so runs hooks)" $'python3 - <<\'PY\'\nopen(".git/hooks/pre-push", "w").write("gh pr checks 1 --watch\\n")\nPY\ngh pr create --fill'
+allow "a python edit followed by git diff (measured: diff runs no hook and writes no index)" \
+  $'python3 - <<\'PY\'\np = "workflows/overnight.js"\ns = open(p).read()\nopen(p, "w").write(s.replace("until gh pr checks 1; do sleep 30; done", ""))\nPY\ngit diff --stat && git log --oneline -1'
+deny "read -p PROMPT with no name: the body lands in REPLY, which bash -c runs" $'read -r -p CI <<\'EOF\'\ngh pr checks 458 --repo o/r --watch\nEOF\nbash -c "$REPLY"'
+deny "read -a NAME: the array is the destination" $'read -r -a parts <<\'EOF\'\ngh pr checks 458 --repo o/r --watch\nEOF\n"${parts[@]}"'
+deny "read -rpCI line (attached prompt): the name after it is the destination" $'read -rpCI line <<\'EOF\'\ngh pr checks 458 --repo o/r --watch\nEOF\neval "$line"'
+deny "mapfile -C CALLBACK runs each line through the callback" $'mapfile -C eval -c 1 x <<\'EOF\'\nwhile :; do gh pr checks 1; sleep 30; done\nEOF'
+deny "mapfile -t -O 0 with no name: MAPFILE" $'mapfile -t -O 0 <<\'EOF\'\n'"$POLLBODY"$'\nEOF\neval "${MAPFILE[*]}"'
+allow "read into a named variable that only gh receives" $'read -r -d \'\' -p x body <<\'EOF\'\nuntil gh pr checks 1; do sleep 30; done\nEOF\ngh api repos/o/r/issues/1/comments -f body="$body"'
+# xreview r6
+allow "mapfile -t -O 0 lines (the 0 is -O's operand, lines the name) feeding only gh" $'mapfile -t -O 0 lines <<\'EOF\'\nuntil gh pr checks 1; do sleep 30; done\nEOF\ngh api repos/o/r/issues/1/comments -f body="${lines[*]}"'
+deny "read into an array element, then bash -c \"\${commands[*]}\"" $'read -r \'commands[0]\' <<\'EOF\'\ngh pr checks 458 --repo o/r --watch\nEOF\nbash -c "${commands[*]}"'
+deny "read into an array element, then eval \"\${commands[@]}\"" $'read -r \'commands[0]\' <<\'EOF\'\ngh pr checks 458 --repo o/r --watch\nEOF\neval "${commands[@]}"'
+deny "printf -v into an array element, then eval" $'read -r -d \'\' a <<\'EOF\'\n'"$POLLBODY"$'\nEOF\nprintf -v \'c[1]\' \'%s\' "$a"\neval "${c[1]}"'
+deny "mapfile into an array named by a variable (unresolvable destination)" $'mapfile -t "$n" <<\'EOF\'\n'"$POLLBODY"$'\nEOF\neval "${lines[*]}"'
+deny "an unterminated heredoc (its delimiter may be misread): kept, never cut" $'cat <<\'EOF\'\n'"$POLLBODY"
+deny "a python program that writes a script with Path.write_text, then bash runs it" $'python3 - <<\'PY\'\nfrom pathlib import Path\nPath("poll.sh").write_text("while true; do gh pr checks 458 --repo o/r; sleep 30; done\\n")\nPY\nbash poll.sh'
+deny "a patch applied by git apply that creates a script, then bash runs it" $'git apply <<\'PATCH\'\ndiff --git a/poll.sh b/poll.sh\nnew file mode 100644\n--- /dev/null\n+++ b/poll.sh\n@@ -0,0 +1 @@\n+while true; do gh pr checks 458 --repo o/r; sleep 30; done\nPATCH\nbash poll.sh'
+deny "a captured body copied into a second variable that bash -c runs" $'poll=$(cat <<\'EOF\'\n'"$POLLBODY"$'\nEOF\n)\ncommand="set -e; $poll"\nbash -c "$command"'
+deny "a captured body copied by local/export into a variable that eval runs" $'poll=$(cat <<\'EOF\'\n'"$POLLBODY"$'\nEOF\n)\nexport CMD2="$poll"\neval "$CMD2"'
+deny "a body copied by printf -v into a variable that eval runs" $'read -r -d \'\' a <<\'EOF\'\n'"$POLLBODY"$'\nEOF\nprintf -v b \'%s\' "$a"\neval "$b"'
+deny "a body put on the clipboard, then pasted into bash" $'xclip -selection clipboard <<\'EOF\'\n'"$POLLBODY"$'\nEOF\nxclip -o -selection clipboard | bash'
+allow "a python edit whose later command only reads (git diff) the file it names" \
+  $'python3 - <<\'PY\'\np = "notes.md"\nopen(p, "a").write("old: while :; do gh pr checks 1; sleep 30; done\\n")\nPY\ngit diff --stat notes.md'
+deny "a poll on the header line of an unterminated heredoc" $'gh pr checks 1; sleep 30; gh pr checks 1; cat <<\'EOF\'\ntext'
+
 # truly-empty identity: only assertable when the suite is not itself a teammate.
 . "$ROOT/scripts/lib/agent-id.sh"
 if [ -n "$(DREAMTEAM_AGENT_ID='' dt_agent_id)" ]; then
