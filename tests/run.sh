@@ -9,6 +9,20 @@
 set -uo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# No suite may touch REAL state (2026-11-17: a mutated run.sh kept an inherited checks dir and its cleanup rm -rf'd
+# familiar's real ~/.local/state/checks). So every suite runs with a PRIVATE HOME and a private checks dir, both under
+# ONE dir this script creates itself; the cleanup target is only ever that dir, never a path from the environment,
+# and the trap is set only after the dir is known to exist. No suite runs if it cannot be made. The live roster check
+# reads the real team config through DREAMTEAM_REAL_HOME, read-only.
+PRIV="$(mktemp -d 2>/dev/null)"
+if [ -z "$PRIV" ] || [ ! -d "$PRIV" ] || ! mkdir -p "$PRIV/home/.config" "$PRIV/home/.local/state" "$PRIV/home/.local/share" "$PRIV/home/.cache" "$PRIV/checks"; then
+  echo "run.sh: cannot create a private test home; no suite run"; exit 1
+fi
+trap 'rm -rf -- "$PRIV"' EXIT
+export DREAMTEAM_REAL_HOME="$HOME" HOME="$PRIV/home" DREAMTEAM_CHECKS_DIR="$PRIV/checks" \
+       XDG_CONFIG_HOME="$PRIV/home/.config" XDG_STATE_HOME="$PRIV/home/.local/state" \
+       XDG_DATA_HOME="$PRIV/home/.local/share" XDG_CACHE_HOME="$PRIV/home/.cache"   # an inherited XDG dir never leaks in
+
 fail=0; ran=0; failed_suites=""
 for t in "$DIR"/test-*.sh; do
   [ -f "$t" ] || continue

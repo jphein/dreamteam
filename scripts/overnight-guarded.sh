@@ -6,6 +6,7 @@
 #
 #   overnight-guarded.sh                 guard → (start the contained runner | record why not)
 #   overnight-guarded.sh --runner DIR    the runner itself (started by the line above, inside the scope)
+#   overnight-guarded.sh --check-line    re-read the guard record and write its CHECK line (nothing is run)
 #
 # THE GUARD (every step logged to state/dreamteam.log and recorded in state/overnight-guard.json:
 # {at, quota_remaining:{five_hour, seven_day}, decision, reason, issues, repos, run_id}):
@@ -59,6 +60,98 @@ PROXY="http://127.0.0.1:3456"
 QURL="${DREAMTEAM_QUOTA_URL:-$PROXY/teamclaude/quota}"
 SURL="${DREAMTEAM_STATUS_URL:-$PROXY/teamclaude/status}"
 TMUX_SOCK="dreamteam-nightly"
+
+# ── the CHECK line (docs/CHECKS.md row nightly-guarded; scripts/lib/check-line.sh) ──────────────────────────────
+# Derived from ONE place, the guard record (state/overnight-guard.json) plus the run's plan.json, so the guard's
+# decision, the runner's finish and `--check-line` (a re-read, nothing run) all say the same thing:
+#   started  → ok while it is still before its cap or once every repo is finished; warn when a repo stopped or was
+#              skipped; FAIL when the cap has passed and repos never finished (the runner died: 11-16 23:41, the
+#              tmux session ended 11 min in, one repo begun, no FINISHED line, and nothing said so)
+#   no-work  → ok ("nothing queued")   dry-run → ok   no-start → warn ("held: <reason>"), fail when the launch failed
+#   no readable record, or an unknown decision → fail.  A record older than 36 h → warn (the timer did not decide).
+. "$ROOT/scripts/lib/check-line.sh"
+# Every nightly-guarded publication happens while holding state/.nightly-line.lock (REQUIRED: no lock, no line), so an
+# older reading never lands after a newer one. publish_nightly sets NIGHTLY_PUBLISHED to the exact text it published.
+NIGHTLY_LOCKFD=""; NIGHTLY_PUBLISHED=""
+nightly_lock() {
+  { exec {NIGHTLY_LOCKFD}>"$STATE/.nightly-line.lock"; } 2>/dev/null || { NIGHTLY_LOCKFD=""; return 1; }
+  flock -w "${DREAMTEAM_LOCK_WAIT:-20}" "$NIGHTLY_LOCKFD" 2>/dev/null && return 0
+  exec {NIGHTLY_LOCKFD}>&-; NIGHTLY_LOCKFD=""; return 1
+}
+nightly_unlock() { [ -n "$NIGHTLY_LOCKFD" ] && exec {NIGHTLY_LOCKFD}>&-; NIGHTLY_LOCKFD=""; return 0; }
+publish_nightly() {  # publish_nightly <status> <fact>  (caller holds the lock)
+  local out
+  out=$(check_line "$(check_name nightly-guarded)" "$1" "$2" "next 23:30, owner Sen") && NIGHTLY_PUBLISHED="$out"
+}
+guard_line() {
+  # ONE snapshot of the record (a replacement mid-read can't mix two runs), under a lock (the guard, the runner and a
+  # --check-line can't interleave their publications).
+  local g="$STATE/overnight-guard.json" snap st fact dec rid night now plan dl age exp counts total fin stp skp prs mrg
+  # the read AND the publication under the required lock (DREAMTEAM_LOCK_WAIT: seconds to wait, tests)
+  nightly_lock || { log "nightly line: lock $STATE/.nightly-line.lock not taken; not published"; return 0; }
+  now=$(date +%s)
+  snap=$(cat "$g" 2>/dev/null)
+  if ! dec=$(jq -er '.decision' <<<"$snap" 2>/dev/null); then
+    publish_nightly fail "no readable guard record ($g)"; nightly_unlock; return 0
+  fi
+  rid=$(jq -r '.run_id // ""' <<<"$snap")
+  # the record's timestamp must be a real ISO time: GNU date reads "" as today's midnight, which would invent a night
+  # and a fresh age for a record that has none
+  local at at_s
+  at=$(jq -r '.at | strings' <<<"$snap" 2>/dev/null)
+  # the WHOLE string must be `date -Iseconds` shape (GNU date also accepts trailing words like "+1 day")
+  if ! [[ "$at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([+-][0-9]{2}:[0-9]{2}|Z)$ ]] || ! at_s=$(date -d "$at" +%s 2>/dev/null); then
+    publish_nightly fail "guard record has no valid timestamp (decision $(printf '%s' "$dec" | tr -cd 'a-z-' | cut -c1-20))"; nightly_unlock; return 0
+  fi
+  night=$(date -d "@$at_s" '+%m-%d %H:%M')
+  case "$dec" in
+    no-work) st=ok;   fact="night $night: nothing queued (no open dream issues)" ;;
+    dry-run) st=ok;   fact="night $night: dry run, nothing started" ;;
+    no-start)
+      fact="night $night: held, $(jq -r '.reason // ""' <<<"$snap" | cut -c1-120)"
+      if jq -e '.reason | test("launch failed")' <<<"$snap" >/dev/null 2>&1; then st=fail; else st=warn; fi ;;
+    started)
+      plan="$STATE/overnight-runs/${rid//[^A-Za-z0-9-]/}/plan.json"
+      # a deadline is a JSON number in [1e9, 4102444800) (2001–2100), floored to whole seconds (jq normalizes 1e9 or
+      # 1.7e9 to plain digits); anything else (out of range, a string, null) is an unreadable plan, never a shell
+      # comparison that silently fails
+      dl=$(jq -er '.deadline_epoch | select(type == "number" and . >= 1000000000 and . < 4102444800) | floor | tostring' "$plan" 2>/dev/null)
+      [[ "$dl" =~ ^[0-9]{10}$ ]] || dl=0
+      # a usable plan: an object whose repos are a non-empty list of unique owner/name strings (else exp=[] → fail)
+      exp=$(jq -c 'if type == "object" and (.repos | type) == "array" then
+                     [.repos[] | .repo? | strings | select(test("^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$"))] as $r
+                     | if ($r | length) == (.repos | length) and ($r | unique | length) == ($r | length) then $r else [] end
+                   else [] end' "$plan" 2>/dev/null || echo '[]'); exp=${exp:-[]}
+      # one terminal result per PLANNED repo (its last entry), never a count of entries
+      counts=$(jq -r --argjson exp "$exp" '
+        (.runs // []) as $runs
+        | [ $exp[] as $r | ([ $runs[] | select(.repo == $r) ] | last | .status // "none") ] as $st
+        | [ ($exp|length), ([$st[]|select(.=="finished")]|length), ([$st[]|select(.=="stopped")]|length),
+            ([$st[]|select(.=="skipped")]|length),
+            ([ $exp[] as $r | ([ $runs[] | select(.repo == $r) ] | last | (.prs_opened // []) | length) ] | add // 0),
+            ([ $exp[] as $r | ([ $runs[] | select(.repo == $r) ] | last | (.merged // []) | length) ] | add // 0) ]
+        | @tsv' <<<"$snap" 2>/dev/null)
+      read -r total fin stp skp prs mrg <<<"${counts:-0 0 0 0 0 0}"
+      fact="night $night: $rid, $(jq -r '.issues // 0' <<<"$snap") issue(s) in $total planned repo(s); finished $fin, stopped $stp, skipped $skp; PRs opened $prs, merged $mrg"
+      if [ "${dl:-0}" -le 0 ] || [ "$total" -eq 0 ]; then
+        st=fail; fact="$fact; no readable plan.json for $rid (cap and repos unknown)"
+      elif [ $(( fin + stp + skp )) -ge "$total" ]; then
+        [ $(( stp + skp )) -eq 0 ] && st=ok || st=warn
+      elif [ "$now" -gt "$dl" ]; then
+        st=fail; fact="$fact; the $(date -d "@$dl" +%H:%M) cap passed with $(( total - fin - stp - skp )) repo(s) never finished (runner gone)"
+      else
+        # still running: ok, unless a repo already stopped or was skipped (warn, naming it in the counts)
+        [ $(( stp + skp )) -eq 0 ] && st=ok || st=warn
+        fact="$fact; running until $(date -d "@$dl" +%H:%M)"
+      fi ;;
+    *) st=fail; fact="night $night: unknown decision '${dec//[^a-z-]/}'" ;;
+  esac
+  age=$(( now - at_s ))
+  if [ "$age" -gt 129600 ] && [ "$st" = ok ]; then st=warn; fact="$fact; record is $(( age / 3600 )) h old (no decision since)"; fi
+  publish_nightly "$st" "$fact"
+  nightly_unlock
+  return 0
+}
 
 log() { echo "$(date +%FT%T) overnight-guarded: $*" >> "$LOG" 2>/dev/null || true; }
 oc()  { jq -r --arg k "$1" --arg d "$2" '(.overnight[$k] // $d) | tostring' "$CFG" 2>/dev/null || printf '%s' "$2"; }
@@ -385,13 +478,19 @@ End your reply with ONE line: SWEEP-RESULT {\"opened\":[N, ...PRs this run opene
       | .too_large = ([$rs[].too_large // [] | .[]])' "$STATE/sweep-results.json" 2>/dev/null) && [ -n "$sw" ] && write_sweep "$sw"
   echo "FINISHED $rid at $(date '+%F %H:%M %Z'): $done_n of $n repo(s) swept.${stop_reason:+ Stopped: $stop_reason.}" >> "$STATE/overnight-pending.md"
   log "runner $rid: finished $done_n of $n repo(s)"
+  guard_line
 }
 
+if [ "${1:-}" = "--check-line" ]; then
+  # prints exactly the text THIS call published under the lock, and nothing when it published nothing
+  guard_line; [ -n "$NIGHTLY_PUBLISHED" ] && printf '%s\n' "$NIGHTLY_PUBLISHED"
+  exit 0
+fi
 if [ "${1:-}" = "--runner" ]; then
   [ -n "${2:-}" ] || { echo "usage: overnight-guarded.sh --runner RUN_DIR" >&2; exit 2; }
   run_runner "$2"; exit 0
 fi
-[ -z "${1:-}" ] || { echo "usage: overnight-guarded.sh [--runner RUN_DIR]" >&2; exit 2; }
+[ -z "${1:-}" ] || { echo "usage: overnight-guarded.sh [--runner RUN_DIR | --check-line]" >&2; exit 2; }
 
 # ════════════════════════════════ GUARD ════════════════════════════════
 NOW_ISO=$(date -Iseconds)
@@ -399,11 +498,18 @@ NIGHT=$(date -d '12 hours ago' +%F)   # a 00:20 restart belongs to the night tha
 RUN_ID="nightly-$(date +%Y%m%d-%H%M%S)"
 GUARD="$STATE/overnight-guard.json"
 record() { # decision reason repos_json issues_n run_id
-  jq -n --arg at "$NOW_ISO" --arg f "$FIVE" --arg w "$WEEK" --arg d "$1" --arg r "$2" \
+  local tmp
+  # an exclusively created temp file beside the record (a planted symlink at a predictable name is never followed)
+  tmp=$(mktemp "$STATE/.overnight-guard.json.XXXXXX" 2>/dev/null) || tmp=""
+  [ -n "$tmp" ] && jq -n --arg at "$NOW_ISO" --arg f "$FIVE" --arg w "$WEEK" --arg d "$1" --arg r "$2" \
      --argjson repos "$3" --argjson n "$4" --arg rid "$5" \
      '{at:$at, quota_remaining:{five_hour:($f|tonumber? // null), seven_day:($w|tonumber? // null)},
        decision:$d, reason:$r, issues:$n, repos:$repos, run_id:(if $rid=="" then null else $rid end)}' \
-     > "$GUARD.tmp" 2>/dev/null && mv -f "$GUARD.tmp" "$GUARD"
+     > "$tmp" 2>/dev/null && mv -T -f "$tmp" "$GUARD" 2>/dev/null && { guard_line; return 0; }
+  [ -n "$tmp" ] && rm -f -- "$tmp"
+  log "could not write the guard record $GUARD (decision $1)"
+  if nightly_lock; then publish_nightly fail "could not write the guard record for decision $1 ($GUARD)"; nightly_unlock
+  else log "nightly line: lock not taken; the record-write failure was not published"; fi
 }
 rm -f "$STATE/.quota-seq-idx"
 # one guard at a time (two hand starts, or a hand start racing the timer)

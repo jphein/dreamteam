@@ -13,7 +13,7 @@ Hardening (#193, post-merge xreview of #166):
 - every subprocess has a deadline (its process group is killed), inside a whole-run budget;
 - both files are written 0600 through a uniquely named temp file and os.replace.
 """
-import json, math, os, signal, subprocess, sys, datetime, pathlib, tempfile, time
+import json, math, os, re, signal, socket, subprocess, sys, datetime, pathlib, tempfile, time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 STATE = ROOT / "state"
@@ -185,16 +185,53 @@ def publish(path, text):
             pass
         raise
 
+CHECK_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")     # the Watch's NAME (plan checks.py)
+RUNS = ((4, 50), (10, 50), (16, 50), (21, 50))               # systemd/issues-queue.timer
+
+def check_name(base):
+    """<base> on familiar, <base>-<host> elsewhere (lower-cased, [a-z0-9-] only), as scripts/lib/check-line.sh."""
+    host = re.sub(r"[^a-z0-9-]", "", (os.environ.get("DREAMTEAM_CHECK_HOST") or socket.gethostname()).lower()) or "unknown-host"
+    return base if host == "familiar" else f"{base}-{host}"
+
+def check_line(status, fact):
+    """The one CHECK line (docs/CHECKS.md row issues-queue; same contract as scripts/lib/check-line.sh): exactly three
+    segments, the fact's " · " → ", " and newlines → spaces, an unknown status published as fail, a name the Watch would
+    not read never published, written through publish() (unique same-dir temp file, os.replace: a symlink at the
+    destination is replaced, a directory there refused). Returns the line; never raises."""
+    if status not in ("ok", "warn", "fail"):
+        fact, status = f"unknown status {status!r}: {fact}", "fail"
+    fact = re.sub(r"[\r\n]+", " ", str(fact))
+    fact = fact.replace(" · ", ", ").replace("·", ",")   # no "·" left: none can form a separator at any edge
+    now = datetime.datetime.now().astimezone()
+    nxt = min(now.replace(hour=h, minute=m, second=0, microsecond=0) + datetime.timedelta(days=d)
+              for d in (0, 1) for h, m in RUNS
+              if now.replace(hour=h, minute=m, second=0, microsecond=0) + datetime.timedelta(days=d) > now)
+    name = check_name("issues-queue")
+    line = f"CHECK {name} {status} · {fact} · next {nxt:%H:%M}, owner Sen"
+    print(line)
+    if not CHECK_NAME_RE.fullmatch(name):
+        print(f"issues-queue: check name {name!r} is not one the Watch reads; not published", file=sys.stderr)
+        return line
+    try:
+        d = pathlib.Path(os.environ.get("DREAMTEAM_CHECKS_DIR") or pathlib.Path.home() / ".local/state/checks")
+        d.mkdir(parents=True, exist_ok=True)
+        publish(d / f"{name}.line", line + "\n")
+    except OSError as e:
+        print(f"issues-queue: could not publish the CHECK line: {e}", file=sys.stderr)
+    return line
+
 def main():
     now = datetime.datetime.now().astimezone()
     if CONFIG_ERRORS:
         print(f"issues-queue: bad configuration, nothing published: {'; '.join(CONFIG_ERRORS)}", file=sys.stderr)
+        check_line("fail", f"bad configuration, nothing published: {'; '.join(CONFIG_ERRORS)}")
         return 2
     lanes = lane_map()
     try:
         names = repos()
     except RuntimeError as e:
         print(f"issues-queue: discovery failed, nothing published (previous snapshot kept): {e}", file=sys.stderr)
+        check_line("fail", f"discovery failed, nothing published (previous snapshot kept): {str(e)[:120]}")
         return 2
     out_repos, failed, bad = [], [], 0
     tot = {"open": 0, "dream": 0, "blocked_on_jp": 0, "fixed_last_night": 0}
@@ -244,7 +281,18 @@ def main():
         publish(PLAN_DATA / "issues-queue.json", text)
     print(f"issues-queue: {len(out_repos)} repos, open {tot['open']}, dream {tot['dream']}, on JP {tot['blocked_on_jp']}, next sweep {doc['next_sweep']['at']} [{mode}], bad rows {bad}"
           + (f", INCOMPLETE: {len(failed)} repo(s) failed: {' '.join(failed)}" if failed else ""))
+    fact = f"{len(out_repos)} repos, open {tot['open']}, dream {tot['dream']}, on JP {tot['blocked_on_jp']}, bad rows {bad}"
+    if failed:
+        check_line("warn", f"{fact}, INCOMPLETE: {len(failed)} repo(s) failed: {' '.join(failed)[:160]}")
+    else:
+        check_line("ok" if bad == 0 else "warn", f"{fact}, complete")
     return 1 if failed else 0
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        rc = main()
+    except BaseException as e:      # a crash still says so on the Watch, then propagates
+        if not isinstance(e, SystemExit):
+            check_line("fail", f"crashed: {type(e).__name__}: {str(e)[:120]}")
+        raise
+    sys.exit(rc)

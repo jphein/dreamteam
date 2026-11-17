@@ -63,6 +63,7 @@ esac
 S
 chmod +x "$BIN/gh" "$BIN/systemctl"
 export TMP FAKE
+export DREAMTEAM_CHECKS_DIR="$TMP/checks" DREAMTEAM_CHECK_HOST=familiar   # never a real check line
 
 # iss NUMBER TITLE [LABEL...] → one issue object
 iss(){ local n="$1" t="$2"; shift 2; jq -nc --argjson n "$n" --arg t "$t" --args '{number:$n, title:$t, labels:[$ARGS.positional[]|{name:.}]}' "$@"; }
@@ -199,6 +200,79 @@ done
 reset; disc jphein/a > "$FAKE/discovery"; seed
 IQB=nan run
 [ "$RC" = 2 ] && [ ! -e "$TMP/gh.log" ] && pass "ISSUES_QUEUE_BUDGET=nan → rc 2 before any gh call" || fail "budget=nan: rc=$RC"
+
+echo "── 5b. the CHECK line (issues-queue) ─────────────────────────────────"
+ql(){ cat "$TMP/checks/issues-queue.line" 2>/dev/null; }
+QSHAPE='^CHECK issues-queue (ok|warn|fail) · [^·]+ · next [0-9]{2}:50, owner Sen$'
+reset; rm -rf "$TMP/checks"; disc jphein/a > "$FAKE/discovery"; echo "[$(iss 1 one dream)]" > "$FAKE/jphein__a"; run
+[ "$RC" = 0 ] && [[ "$(ql)" =~ $QSHAPE ]] && [[ "$(ql)" == "CHECK issues-queue ok · 1 repos, open 1, dream 1, on JP 0, bad rows 0, complete · "* ]] \
+  && pass "line: complete run → ok with the counts" || fail "line ok: rc=$RC '$(ql)'"
+reset; rm -rf "$TMP/checks"; disc jphein/a jphein/b > "$FAKE/discovery"; touch "$FAKE/jphein__b.fail"; echo "[$(iss 1 one)]" > "$FAKE/jphein__a"; run
+[ "$RC" = 1 ] && [[ "$(ql)" == "CHECK issues-queue warn · "*"INCOMPLETE: 1 repo(s) failed: jphein/b · "* ]] && pass "line: a failed repo → warn naming it" || fail "line warn: rc=$RC '$(ql)'"
+reset; rm -rf "$TMP/checks"; disc jphein/a > "$FAKE/discovery"; export FAKE_DISCOVERY=fail; run
+[ "$RC" = 2 ] && [[ "$(ql)" == "CHECK issues-queue fail · discovery failed, nothing published (previous snapshot kept)"* ]] && pass "line: discovery failure → fail" || fail "line disc: rc=$RC '$(ql)'"
+reset; rm -rf "$TMP/checks"; disc jphein/a > "$FAKE/discovery"; IQT=nan run
+[ "$RC" = 2 ] && [[ "$(ql)" == "CHECK issues-queue fail · bad configuration"* ]] && pass "line: bad configuration → fail" || fail "line config: rc=$RC '$(ql)'"
+reset; rm -rf "$TMP/checks"; disc jphein/a > "$FAKE/discovery"; echo "[$(iss 1 one)]" > "$FAKE/jphein__a"; mkdir -p "$P"; rm -rf "$R/state"; : > "$R/state"; run
+[[ "$(ql)" == "CHECK issues-queue fail · crashed: "* ]] && [ "$RC" -ne 0 ] && pass "line: a crash (state path is a file) → fail, crashed: <type>" || fail "line crash: rc=$RC '$(ql)'"
+rm -f "$R/state"
+reset; rm -rf "$TMP/checks"; mkdir -p "$TMP/checks"; echo SENTINEL > "$TMP/qsent"; ln -s "$TMP/qsent" "$TMP/checks/issues-queue.line"
+disc jphein/a > "$FAKE/discovery"; echo "[$(iss 1 one)]" > "$FAKE/jphein__a"; run
+[ "$(cat "$TMP/qsent")" = SENTINEL ] && [ -f "$TMP/checks/issues-queue.line" ] && [ ! -L "$TMP/checks/issues-queue.line" ] && pass "line: a symlink at the destination is replaced, never followed" || fail "line symlink followed"
+reset; rm -rf "$TMP/checks"; mkdir -p "$TMP/checks/issues-queue.line"; disc jphein/a > "$FAKE/discovery"; echo "[$(iss 1 one)]" > "$FAKE/jphein__a"; run
+[ "$RC" = 0 ] && [ -z "$(ls -A "$TMP/checks/issues-queue.line")" ] && pass "line: a directory at the destination is refused; the run still succeeds" || fail "line dir: rc=$RC"
+rm -rf "$TMP/checks"
+reset; rm -rf "$TMP/checks"; disc jphein/a > "$FAKE/discovery"; echo "[$(iss 1 $'one \u00b7 two')]" > "$FAKE/jphein__a"; DREAMTEAM_CHECK_HOST=katana run
+[ -f "$TMP/checks/issues-queue-katana.line" ] && pass "line: off familiar the name carries the host" || fail "line host: $(ls "$TMP/checks")"
+
+# check_line() itself (the Python twin of scripts/lib/check-line.sh), called directly on the copied script
+pyline(){ (cd "$TMP" && DREAMTEAM_CHECKS_DIR="$TMP/pyc" DREAMTEAM_CHECK_HOST="${1:-familiar}" python3 -I - "$R/scripts/issues-queue.py" "${@:2}") 2>&1; }
+rm -rf "$TMP/pyc"
+out=$(pyline familiar <<'PY'
+import importlib.util as u, sys
+s = u.spec_from_file_location("iq", sys.argv[1]); m = u.module_from_spec(s); s.loader.exec_module(m)
+print(m.check_line("ok", "a · b\r\nc"))
+PY
+)
+[ "$(cat "$TMP/pyc/issues-queue.line")" = "$(head -1 <<<"$out")" ] && [[ "$(cat "$TMP/pyc/issues-queue.line")" == "CHECK issues-queue ok · a, b c · next "??":50, owner Sen" ]] \
+  && pass "py check_line: ' · ' → ', ' and CR/LF → one space, one fact segment, published" || fail "py sanitize: [$(cat "$TMP/pyc/issues-queue.line" 2>/dev/null)] out=[$out]"
+rm -rf "$TMP/pyc"; out=$(pyline familiar <<'PY'
+import importlib.util as u, sys
+s = u.spec_from_file_location("iq", sys.argv[1]); m = u.module_from_spec(s); s.loader.exec_module(m)
+for f in ("a · · b", "a ·", "· a"):
+    m.check_line("ok", f)
+    print(open(m.pathlib.Path(m.os.environ["DREAMTEAM_CHECKS_DIR"]) / "issues-queue.line").read().strip())
+PY
+)
+want=$'CHECK issues-queue ok · a, , b · next
+CHECK issues-queue ok · a , · next
+CHECK issues-queue ok · , a · next'
+got=$(grep '^CHECK' <<<"$out" | awk 'NR%2==0' | sed -E 's/ [0-9]{2}:50, owner Sen$//')
+[ "$got" = "$want" ] && pass "py check_line: 'a · · b', 'a ·', '· a' each stay ONE fact segment" || fail "py edges: [$got]"
+rm -rf "$TMP/pyc"; out=$(pyline familiar <<'PY'
+import importlib.util as u, sys
+s = u.spec_from_file_location("iq", sys.argv[1]); m = u.module_from_spec(s); s.loader.exec_module(m)
+m.check_line("maybe", "x")
+PY
+)
+[[ "$(cat "$TMP/pyc/issues-queue.line" 2>/dev/null)" == "CHECK issues-queue fail · unknown status 'maybe': x · "* ]] && pass "py check_line: unknown status → fail" || fail "py status: $(cat "$TMP/pyc/issues-queue.line" 2>/dev/null)"
+rm -rf "$TMP/pyc"; out=$(pyline familiar <<'PY'
+import importlib.util as u, sys
+s = u.spec_from_file_location("iq", sys.argv[1]); m = u.module_from_spec(s); s.loader.exec_module(m)
+for bad in ("../x", "Upper", "a_b", "-lead"):
+    m.check_name = lambda base, b=bad: b
+    m.check_line("ok", "x")
+PY
+)
+[ -z "$(ls -A "$TMP/pyc" 2>/dev/null)" ] && [ ! -e "$TMP/x.line" ] && [ "$(grep -c 'not one the Watch reads' <<<"$out")" = 4 ] \
+  && pass "py check_line: names the Watch would not read are never published (4 cases)" || fail "py names: $(ls -A "$TMP/pyc" 2>/dev/null) $out"
+rm -rf "$TMP/pyc"; pyline KATANA.lan >/dev/null <<'PY'
+import importlib.util as u, sys
+s = u.spec_from_file_location("iq", sys.argv[1]); m = u.module_from_spec(s); s.loader.exec_module(m)
+m.check_line("ok", "x")
+PY
+[ -f "$TMP/pyc/issues-queue-katanalan.line" ] && pass "py check_name: host lower-cased, [a-z0-9-] only" || fail "py host: $(ls "$TMP/pyc")"
+rm -rf "$TMP/pyc"
 
 echo "── 6. publication: unique temp names, atomic replace ───────────────"
 reset; disc jphein/a > "$FAKE/discovery"; seed

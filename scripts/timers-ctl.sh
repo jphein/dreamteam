@@ -26,6 +26,7 @@ RETIRED="dreamteam-nightly.timer dreamteam-nightly.service"
 UNITS="$TIMERS $SERVICES"
 
 uc() { systemctl --user "$@"; }
+. "$ROOT/scripts/lib/check-line.sh"
 
 # Retire the PILOT pair on this host. Asks SYSTEMD whether each unit is still enabled (a file test misses a
 # dangling link, and a unit loaded from outside the user dir), disables it --now if so, and removes any link or
@@ -49,7 +50,16 @@ retire_pilot() {
       else echo "retire-pilot: could not remove $USER_DIR/$u" >&2; return 3; fi
     fi
   done
-  [ "$any" -eq 1 ] || echo "pilot absent: nothing to retire"
+  if [ "$any" -eq 1 ]; then
+    # docs/CHECKS.md row dreamteam-nightly-pilot: the retired pilot says so instead of staying "none" (cadence
+    # "retired", so the Watch never calls it stale). Written only when this run retired something: an absent
+    # pilot never invents a retirement date.
+    check_line "$(check_name dreamteam-nightly-pilot)" ok \
+      "retired $(date +%F): dreamteam-nightly.timer and .service disabled and unlinked on $(hostname 2>/dev/null)" \
+      "no further runs (the guarded 23:30 sweep on familiar replaced it), owner Sen" >/dev/null || true
+  else
+    echo "pilot absent: nothing to retire"
+  fi
 }
 
 case "${1:-}" in

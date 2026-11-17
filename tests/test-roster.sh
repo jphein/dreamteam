@@ -68,7 +68,8 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 echo "== roster.sh: real current team (live integration) =="
 # No DREAMTEAM_TEAMS_DIR override → reads the real ~/.claude/teams newest config.
-RREAL="$(bash "$ROOT/scripts/roster.sh" --json 2>/dev/null)"
+# tests/run.sh gives suites a private HOME; the live team config is read (only read) from the real one.
+RREAL="$(DREAMTEAM_TEAMS_DIR="${DREAMTEAM_REAL_HOME:-$HOME}/.claude/teams" bash "$ROOT/scripts/roster.sh" --json 2>/dev/null)"
 if jqok "$RREAL"; then
   pass "roster real-team emits valid JSON"
   LEN="$(jqr "$RREAL" '.agents|length')"
