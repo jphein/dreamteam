@@ -84,7 +84,7 @@ exit 0
 S
 cat > "$BIN/claude-rec" <<'S'
 #!/bin/bash
-echo claude >> "${SEQ_LOG:-/dev/null}"
+echo claude >> "${SEQ_LOG:-/dev/null}"; echo $$ > "${CLAUDE_LOG%.log}.pid"
 { echo "CWD=$PWD"; echo "HTTPS_PROXY=${HTTPS_PROXY:-}"; echo "NODE_EXTRA_CA_CERTS=${NODE_EXTRA_CA_CERTS:-}";
   echo "ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-unset}"; echo "SCOPE=${DREAMTEAM_SCOPE_NAME:-unset}"; echo "OWNED=${DREAMTEAM_SCOPE_OWNED:-unset}"; echo "BGWAIT=${CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS:-unset}"; echo "DIRECT=${TEAMCLAUDE_ALLOW_DIRECT:-unset}${TEAMCLAUDE_BYPASS:-}"; echo "PATH1=${PATH%%:*}"
   printf 'ARG=%s\n' "$@"; echo "---"; } >> "$CLAUDE_LOG"
@@ -96,18 +96,23 @@ echo '{"type":"result","result":"done\nSWEEP-RESULT {\"fixed\":[{\"repo\":\"jphe
 S
 cat > "$BIN/tmux-probe" <<'S'
 #!/bin/bash
-# the runner's tmux session: FAKE_SESSION alive (default) | gone | weird (an answer the probe cannot read)
+# list-panes -F '#{pane_dead}' on the runner's session: FAKE_SESSION alive (default) | gone | noserver | deadpane |
+# denied | weird. The error texts are tmux 3.6's own words (checked against real tmux, 2026-11-17).
 echo "probe $*" >> "${PROBE_LOG:-/dev/null}"
 case "${FAKE_SESSION:-alive}" in
-  alive) exit 0;;
-  gone) echo "can't find session: ${@: -1}" >&2; exit 1;;
-  noserver) echo "Error connecting to /tmp/tmux-1000/dreamteam-nightly (No such file or directory)" >&2; exit 1;;   # tmux 3.6's words
+  alive) echo 0; exit 0;;
+  deadpane) echo 1; exit 0;;
+  gone) echo "can't find session: nightly-t" >&2; exit 1;;
+  noserver) echo "error connecting to /tmp/tmux-1000/dreamteam-nightly (No such file or directory)" >&2; exit 1;;
+  denied) echo "error connecting to /tmp/tmux-1000/dreamteam-nightly (Permission denied)" >&2; exit 1;;
   *) echo "lost server" >&2; exit 1;;
 esac
 S
 cat > "$BIN/notify-rec" <<'S'
 #!/bin/bash
+[ -n "${FAKE_NOTIFY_SLEEP:-}" ] && sleep "$FAKE_NOTIFY_SLEEP"
 printf '%s\n' "$*" >> "$NOTIFY_LOG"
+exit "${FAKE_NOTIFY_RC:-0}"
 S
 chmod +x "$BIN"/*
 
@@ -160,7 +165,8 @@ fi
 # the watch pair (2026-11-17): every 5 min through the night, installed by timers-ctl
 WT="$ROOT/systemd/dreamteam-nightly-watch.timer"; WS="$ROOT/systemd/dreamteam-nightly-watch.service"
 grep -q -- '--watch' "$WS" 2>/dev/null && grep -q '^Type=oneshot' "$WS" && grep -q 'dreamteam-nightly-watch.timer' "$ROOT/scripts/timers-ctl.sh" \
-  && [ "$(systemd-analyze calendar --iterations=2 "$(grep -m1 '^OnCalendar=' "$WT" | cut -d= -f2-)" 2>/dev/null | grep -c ':[0-5][05]:00')" -ge 2 ] \
+  && [ "$(grep '^OnCalendar=' "$WT" | cut -d= -f2- | tr '\n' '|')" = '*-*-* 23:35/5:00|*-*-* 00..06:00/5:00|*-*-* 07:00:00|' ] \
+  && systemd-analyze calendar '*-*-* 23:35/5:00' '*-*-* 00..06:00/5:00' '*-*-* 07:00:00' >/dev/null 2>&1 \
   && pass "watch pair: oneshot --watch, a 5-min calendar, installed by timers-ctl" || fail "watch pair shape"
 if command -v systemd-analyze >/dev/null 2>&1; then
   out=$(systemd-analyze --user verify "$WT" "$WS" 2>&1 | grep 'dreamteam-nightly-watch'); [ -z "$out" ] && pass "systemd-analyze --user verify: watch timer+service" || fail "systemd-analyze watch: $out"
@@ -734,14 +740,19 @@ for _ in $(seq 100); do kill -0 "$SUB" 2>/dev/null || break; sleep 0.1; done; ki
 grep -q "^FINISHED nightly-.*Stopped: runner killed (SIGHUP)" "$TMP/state/overnight-pending.md" 2>/dev/null \
   && [ "$(gj '.runs[] | select(.repo=="jphein/realmwatch") | .status')" = stopped ] \
   && [[ "$(cl)" == "CHECK nightly-guarded fail · "*"runner killed (SIGHUP)"* ]] \
-  && ! grep -q END-NOT-KILLED "$TMP/claude.log" \
+  && ! grep -q END-NOT-KILLED "$TMP/claude.log" && ! kill -0 "$(cat "$TMP/claude.pid" 2>/dev/null || echo 999999)" 2>/dev/null \
+  && [ -s "$TMP/state/overnight-runs/$(gj .run_id)/killed" ] \
   && pass "SIGHUP mid-coordinator: coordinator stopped, repo stopped, FINISHED names the signal, line FAIL" \
   || fail "sighup: runs=$(jq -c .runs "$TMP/state/overnight-guard.json") pid=$GPID pending=$(grep FINISHED "$TMP/state/overnight-pending.md" 2>/dev/null) status=$(gj '.runs[0].status') line='$(cl)'"
 # the watchdog: a started night whose runner session is gone before its cap is FAIL at once, not at 06:30
 OLD=$(date -Iseconds -d '-10 minutes'); FRESH=$(date -Iseconds -d '-30 seconds')
 FAKE_SESSION=gone rec started "$OLD" "guard passed" '[{"repo":"a/x","status":"started"}]' "$(( NOWE + 3*3600 ))"
-[[ "$(cl)" == "CHECK nightly-guarded fail · "*"runner gone before its "*"cap (no tmux session nightly-t)"* ]] && pass "watch: runner session gone before the cap → FAIL now" || fail "watch gone: '$(cl)'"
-grep -q -- "-L dreamteam-nightly has-session -t =nightly-t" "$TMP/probe.txt" && pass "watch: the probe asks the night's own tmux server for exactly this run's session" || fail "probe argv: $(cat "$TMP/probe.txt")"
+[[ "$(cl)" == "CHECK nightly-guarded fail · "*"runner gone before its "*"cap (no live runner pane in tmux session nightly-t)"* ]] && pass "watch: runner session gone before the cap → FAIL now" || fail "watch gone: '$(cl)'"
+grep -qF -- "-L dreamteam-nightly list-panes -t =nightly-t -F #{pane_dead}" "$TMP/probe.txt" && pass "watch: the probe asks the night's own tmux server for exactly this run's pane state" || fail "probe argv: $(cat "$TMP/probe.txt")"
+FAKE_SESSION=deadpane rec started "$OLD" "guard passed" '[{"repo":"a/x","status":"started"}]' "$(( NOWE + 3*3600 ))"
+[[ "$(cl)" == "CHECK nightly-guarded fail · "*"no live runner pane"* ]] && pass "watch: the session is there but its pane is dead (remain-on-exit) → FAIL" || fail "watch deadpane: '$(cl)'"
+FAKE_SESSION=denied rec started "$OLD" "guard passed" '[{"repo":"a/x","status":"started"}]' "$(( NOWE + 3*3600 ))"
+[[ "$(cl)" == "CHECK nightly-guarded warn · "*"runner liveness unmeasured"* ]] && pass "watch: a socket we cannot open (Permission denied) is unmeasured, not dead" || fail "watch denied: '$(cl)'"
 FAKE_SESSION=noserver rec started "$OLD" "guard passed" '[{"repo":"a/x","status":"started"}]' "$(( NOWE + 3*3600 ))"
 [[ "$(cl)" == "CHECK nightly-guarded fail · "*"runner gone before its "* ]] && pass "watch: the night's tmux SERVER gone (tmux 3.6: 'Error connecting to …', the 11-16 state) → FAIL" || fail "watch noserver: '$(cl)'"
 FAKE_SESSION=alive rec started "$OLD" "guard passed" '[{"repo":"a/x","status":"started"}]' "$(( NOWE + 3*3600 ))"
@@ -750,13 +761,28 @@ FAKE_SESSION=gone rec started "$FRESH" "guard passed" '[]' "$(( NOWE + 3*3600 ))
 [[ "$(cl)" == "CHECK nightly-guarded ok · "* ]] && pass "watch: a record under 2 min old is not judged dead (the launch is still starting)" || fail "watch grace: '$(cl)'"
 FAKE_SESSION=weird rec started "$OLD" "guard passed" '[{"repo":"a/x","status":"started"}]' "$(( NOWE + 3*3600 ))"
 [[ "$(cl)" == "CHECK nightly-guarded warn · "*"runner liveness unmeasured"* ]] && pass "watch: an answer the probe cannot read → warn, unmeasured (never ok, never a guess)" || fail "watch weird: '$(cl)'"
+# the run-level marker alone makes the night FAIL (a signal after the last repo record, or in a one-repo run)
+rec started "$RECENT" "guard passed" '[{"repo":"a/x","status":"finished"},{"repo":"a/y","status":"finished"},{"repo":"a/z","status":"finished"}]' "$(( NOWE + 3600 ))"
+printf 'SIGTERM 2026-11-17T23:59:00-08:00\n' > "$TMP/state/overnight-runs/nightly-t/killed"; run_g --check-line >/dev/null
+[[ "$(cl)" == "CHECK nightly-guarded fail · "*"finished 3"*"runner killed (SIGTERM)"* ]] && pass "line: the run-level killed marker → FAIL even when every repo reads finished" || fail "killed marker: '$(cl)'"
 # --watch tells the lead once per dead run, and never when the run is alive
 FAKE_SESSION=alive rec started "$OLD" "guard passed" '[{"repo":"a/x","status":"started"}]' "$(( NOWE + 3*3600 ))"; rm -f "$TMP/notify.txt"
 FAKE_SESSION=alive run_g --watch >/dev/null
 [ ! -s "$TMP/notify.txt" ] && pass "--watch: alive → the lead is not told" || fail "watch alive notified: $(cat "$TMP/notify.txt")"
 FAKE_SESSION=gone run_g --watch >/dev/null; FAKE_SESSION=gone run_g --watch >/dev/null
 [ "$(wc -l < "$TMP/notify.txt" 2>/dev/null)" = 1 ] && grep -q "nightly-t" "$TMP/notify.txt" && grep -q "runner gone" "$TMP/notify.txt" \
-  && pass "--watch: dead → the lead is told ONCE (run id and reason), not every 5 min" || fail "watch notify: $(cat "$TMP/notify.txt" 2>/dev/null)"
+  && pass "--watch: dead → the lead is told once per run (run id and reason), not every 5 min" || fail "watch notify: $(cat "$TMP/notify.txt" 2>/dev/null)"
+# a send that fails writes no stamp, so the next tick tries again
+FAKE_SESSION=gone rec started "$OLD" "guard passed" '[{"repo":"a/x","status":"started"}]' "$(( NOWE + 3*3600 ))"; rm -f "$TMP/notify.txt" "$TMP/state/.watch-told-"*
+FAKE_NOTIFY_RC=1 FAKE_SESSION=gone run_g --watch >/dev/null
+s1=$(ls "$TMP/state/.watch-told-"* 2>/dev/null | wc -l)
+FAKE_SESSION=gone run_g --watch >/dev/null
+[ "$s1" = 0 ] && [ "$(wc -l < "$TMP/notify.txt")" = 2 ] && [ -e "$TMP/state/.watch-told-nightly-t" ] \
+  && pass "--watch: a failed send leaves no stamp; the next tick sends again and stamps" || fail "watch retry: s1=$s1 sends=$(wc -l < "$TMP/notify.txt")"
+# two watches at once send once (check, send and stamp under one lock)
+FAKE_SESSION=gone rec started "$OLD" "guard passed" '[{"repo":"a/x","status":"started"}]' "$(( NOWE + 3*3600 ))"; rm -f "$TMP/notify.txt" "$TMP/state/.watch-told-"*
+( FAKE_NOTIFY_SLEEP=2 FAKE_SESSION=gone run_g --watch >/dev/null ) & ( FAKE_NOTIFY_SLEEP=2 FAKE_SESSION=gone run_g --watch >/dev/null ) & wait
+[ "$(wc -l < "$TMP/notify.txt")" = 1 ] && pass "--watch: two concurrent watches send once" || fail "watch concurrent: $(wc -l < "$TMP/notify.txt") sends"
 
 [ ! -s "$TMP/launch-attempts.txt" ] && pass "no test attempted a real scope/tmux launch" || fail "a test reached the launch: $(head -3 "$TMP/launch-attempts.txt")"
 echo "─────────────────────────────────────────────────────────────────"

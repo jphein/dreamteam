@@ -38,9 +38,10 @@ rm -f "$STATE/active"
 DT_SCOPE="$(command -v dreamteam_scope_name >/dev/null 2>&1 && dreamteam_scope_name || echo dreamteam-agents)"
 stop_scope_if_empty() {
   local scope="$1" pid
-  # A scope this session does not own is never its to stop (2026-11-16 23:41): a guarded night's scope
-  # (dreamteam-nightly-*) belongs to its runner, and any runner that hands its scope to a coordinator marks it
-  # DREAMTEAM_SCOPE_OWNED=1. "No claude process inside" is no proof of empty: tmux 3.6 moves every pane into its own
+  # Two scopes are never a SessionEnd's to stop (2026-11-16 23:41). The dreamteam-nightly-* prefix is RESERVED for
+  # the guarded nightly's runner scope: it is a name exemption, not an ownership check, and an orphan of it ends on its
+  # own RuntimeMaxSec (the night's cap). And a scope the caller marks DREAMTEAM_SCOPE_OWNED=1 (its runner owns it).
+  # Every other scope is still judged by the rule below, whose "no claude process" test is a weak proof of empty. "No claude process inside" is no proof of empty: tmux 3.6 moves every pane into its own
   # tmux-spawn-*.scope, so the night's scope held only its tmux server, and stopping it killed the runner.
   case "$scope" in dreamteam-nightly-*) return 0;; esac
   [ "${DREAMTEAM_SCOPE_OWNED:-0}" = 1 ] && [ "$scope" = "${DREAMTEAM_SCOPE_NAME:-}" ] && return 0
