@@ -37,6 +37,15 @@ SPAWN = re.compile(r"subprocess|\bos\s*\.\s*(system|popen|exec\w*|spawn\w*|posix
                    r"|pexpect|plumbum|__import__|importlib|\bexec\s*\(|\beval\s*\(|from\s+os\s+import"
                    r"|import\s+os\s+as|getattr\s*\(\s*os\b|\bctypes\b|multiprocessing|create_subprocess|runpy"
                    r"|__builtins__|\bbuiltins\s*\.|\bos\s*\.\s*__dict__|vars\s*\(\s*os\b")
+# modules a python edit script imports that cannot start a process by themselves (os is checked by SPAWN). Any
+# other import keeps the body: invoke, fabric, sh, plumbum, a project module ... (xreview r3). Measured on 14 days
+# of agent heredocs: json sys pathlib re os time datetime collections html yaml glob base64 hashlib csv lead.
+PY_DATA_MODULES = {"json", "sys", "pathlib", "re", "os", "time", "datetime", "collections", "html", "yaml", "glob",
+                   "base64", "hashlib", "csv", "io", "textwrap", "difflib", "string", "math", "itertools",
+                   "functools", "fnmatch", "unicodedata", "tomllib", "dataclasses", "typing", "__future__", "copy",
+                   "pprint", "enum", "decimal", "statistics", "uuid", "zoneinfo", "calendar", "struct", "bisect",
+                   "heapq", "operator", "shlex", "random", "secrets", "binascii", "codecs", "locale", "gzip", "zlib"}
+PY_IMPORT = re.compile(r"(?m)^[ \t]*(?:import[ \t]+([\w., \t]+)|from[ \t]+(\.*[\w.]*)[ \t]+import)")
 OPENERS = {"{": "}", "if": "fi", "while": "done", "until": "done", "for": "done", "select": "done"}
 CLOSERS = {"}", "fi", "done"}
 SKIP = {"!", "time", "then", "else", "elif", "do", "in"}
@@ -456,7 +465,7 @@ def mentions(word: str, name, body: str = "") -> bool:
         if "$" in word or "`" in word or any(ch in word for ch in "*?[~"):
             return True
         base = unq(word).rsplit("/", 1)[-1]
-        return len(base) >= 3 and re.search(r"[A-Za-z]", base) is not None and base in body
+        return bool(base) and not base.startswith("-") and base in body      # no length floor (xreview r3)
     if kind == "var":
         return ("$" + val) in word or ("${" + val) in word
     w = unq(word)
@@ -479,7 +488,14 @@ def is_sink(nd, program=None) -> bool:
         args = [unq(w) for w in nd.words]
         if any(a not in ("-",) and not re.fullmatch(r"-[IuBEsSOqbdv]+", a) for a in args):
             return False
-        return program is not None and not SPAWN.search(program)
+        if program is None or SPAWN.search(program):
+            return False
+        for m in PY_IMPORT.finditer(program):
+            for mod in (m.group(1) or m.group(2) or "").split(","):
+                top = mod.strip().split()[0].split(".")[0] if mod.strip() else ""
+                if top not in PY_DATA_MODULES:
+                    return False                      # an unknown (or relative) module may run anything
+        return True
     if first == "gh" and any(unq(w) in ("alias", "extension", "ext", "config") for w in nd.words):
         return False                                  # gh alias --shell, gh config set pager/editor: run later
     if first == "git" and any(unq(w) in ("config", "-c", "--config-env") or unq(w).startswith(("-c", "--config"))
