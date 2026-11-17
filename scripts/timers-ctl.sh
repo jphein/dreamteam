@@ -3,7 +3,9 @@
 #
 #   timers-ctl.sh install     # link the 6 units (retiring the 02:11 pilot pair) into the user manager, enable+start the timers
 #   timers-ctl.sh uninstall   # disable+stop the timers, unlink the units
-#   timers-ctl.sh retire-pilot  # on THIS host: disable --now the 02:11 pilot pair if systemd still has it, unlink it
+#   timers-ctl.sh retire-pilot [--retired-on YYYY-MM-DD]  # on THIS host: disable --now the 02:11 pilot pair if
+#                               # systemd still has it, unlink it; --retired-on records an earlier retirement of an
+#                               # absent pilot (a real, non-future date) so its CHECK line says when
 #                               # (host-local and idempotent; run it on every host that ever had the pilot)
 #   timers-ctl.sh start|stop  # start/stop all three timers
 #   timers-ctl.sh status      # list-timers + per-unit is-active
@@ -32,8 +34,30 @@ uc() { systemctl --user "$@"; }
 # dangling link, and a unit loaded from outside the user dir), disables it --now if so, and removes any link or
 # copy in the user dir, dangling or not. katana kept the 02:11 timer armed until 2026-11-17 because install ran
 # only on familiar and its old test was [ -e ], false for a dangling link.
-retire_pilot() {
-  local u st rc any=0
+# pilot_gone <unit>: rc 0 only when systemd ANSWERS that the unit is in no active state per is-active (active,
+# activating, reloading, deactivating, refreshing) and not enabled (is-enabled not-found or disabled); rc 1 when it
+# is; rc 3 when systemd cannot answer (empty stdout). A start job queued behind an inactive unit is not inspected.
+pilot_gone() {
+  local act en
+  act=$(uc is-active "$1" 2>/dev/null | head -n 1); en=$(uc is-enabled "$1" 2>/dev/null | head -n 1)
+  { [ -n "$act" ] && [ -n "$en" ]; } || return 3
+  case "$act" in active|activating|reloading|deactivating|refreshing) return 1 ;; esac
+  case "$en" in not-found|disabled) return 0 ;; *) return 1 ;; esac
+}
+
+retire_pilot() {   # retire_pilot [--retired-on YYYY-MM-DD]
+  local u st rc any=0 on=""
+  # exactly no arguments, or exactly `--retired-on DATE`; anything else is refused BEFORE systemd is asked anything
+  if [ "$#" -ne 0 ] && { [ "$#" -ne 2 ] || [ "$1" != "--retired-on" ]; }; then
+    echo "retire-pilot: usage: retire-pilot [--retired-on YYYY-MM-DD]" >&2; return 22
+  fi
+  if [ "$#" -eq 2 ]; then
+    on="$2"
+    # an operator's record of a retirement already done: a real date, not in the future
+    if ! [[ "$on" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || [ "$(date -d "$on" +%F 2>/dev/null)" != "$on" ] || [ "$on" \> "$(date +%F)" ]; then
+      echo "retire-pilot: --retired-on needs a real past date YYYY-MM-DD (got '${on//[^0-9-]/}')" >&2; return 22
+    fi
+  fi
   for u in $RETIRED; do
     st=$(uc is-enabled "$u" 2>/dev/null); rc=$?
     st=$(printf '%s' "$st" | head -n 1)
@@ -42,21 +66,38 @@ retire_pilot() {
     if [ -z "$st" ]; then echo "retire-pilot: cannot ask systemd about $u (rc=$rc); nothing changed" >&2; return 3; fi
     case "$st" in
       not-found) ;;
-      *) if uc disable --now "$u" >/dev/null 2>&1; then echo "retired $u (was $st)"; any=1
-         else echo "retire-pilot: disable --now $u failed" >&2; return 3; fi ;;
+      *) # disable's exit code decides NOTHING: on katana (2026-11-17) disabling a LINKED unit removed its link and
+         # still exited 1, and a "successful" disable can leave a unit running. The final gate below decides.
+         uc disable --now "$u" >/dev/null 2>&1; echo "disable --now $u attempted (was $st)"; any=1 ;;
     esac
     if [ -e "$USER_DIR/$u" ] || [ -L "$USER_DIR/$u" ]; then
       if rm -f -- "$USER_DIR/$u" 2>/dev/null && [ ! -e "$USER_DIR/$u" ] && [ ! -L "$USER_DIR/$u" ]; then echo "unlinked $u"; any=1
       else echo "retire-pilot: could not remove $USER_DIR/$u" >&2; return 3; fi
     fi
   done
+  # ONE final verification of BOTH units gates every outcome (retired, reported, absent): a unit can be not-found
+  # as a file yet still running; a leftover link is removed above, and retirement is claimed only after this gate.
+  for u in $RETIRED; do
+    pilot_gone "$u"; rc=$?
+    case "$rc" in
+      0) ;;
+      3) echo "retire-pilot: cannot ask systemd whether $u is gone; nothing claimed" >&2; return 3 ;;
+      *) echo "retire-pilot: $u is still running or enabled; nothing claimed" >&2; return 3 ;;
+    esac
+  done
   if [ "$any" -eq 1 ]; then
     # docs/CHECKS.md row dreamteam-nightly-pilot: the retired pilot says so instead of staying "none" (cadence
-    # "retired", so the Watch never calls it stale). Written only when this run retired something: an absent
-    # pilot never invents a retirement date.
+    # "retired", so the Watch never calls it stale). Written only when this run retired something (today's date), or
+    # when an operator REPORTS an earlier retirement (--retired-on) of a pilot this run verified absent: that date is
+    # the operator's word, and the line says so ("reported as"); only the absence is verified.
     check_line "$(check_name dreamteam-nightly-pilot)" ok \
       "retired $(date +%F): dreamteam-nightly.timer and .service disabled and unlinked on $(hostname 2>/dev/null)" \
       "no further runs (the guarded 23:30 sweep on familiar replaced it), owner Sen" >/dev/null || true
+  elif [ -n "$on" ]; then
+    check_line "$(check_name dreamteam-nightly-pilot)" ok \
+      "retirement reported as $on (recorded $(date +%F), date given by the operator): dreamteam-nightly.timer and .service verified absent on $(hostname 2>/dev/null)" \
+      "no further runs (the guarded 23:30 sweep on familiar replaced it), owner Sen" >/dev/null || true
+    echo "pilot absent: retirement recorded as reported, $on"
   else
     echo "pilot absent: nothing to retire"
   fi
@@ -84,7 +125,7 @@ case "${1:-}" in
     uc daemon-reload
     echo "uninstalled dreamteam timers"
     ;;
-  retire-pilot) retire_pilot; exit $?;;
+  retire-pilot) shift; retire_pilot "$@"; exit $?;;
   start)   for t in $TIMERS; do uc start "$t" && echo "started $t"; done;;
   stop)    for t in $TIMERS; do uc stop  "$t" && echo "stopped $t"; done;;
   status)
