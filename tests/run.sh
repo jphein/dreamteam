@@ -15,7 +15,9 @@ for t in "$DIR"/test-*.sh; do
   ran=$((ran + 1))
   name="$(basename "$t")"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ $name"
-  if bash "$t"; then
+  # TMUX unset for every suite: the weekly audit runs this under a systemd timer, where TMUX is never set, so an
+  # interactive run must see the same environment (self-audit 2026-11-15: test-standards.sh read the caller's tmux).
+  if env -u TMUX bash "$t"; then
     echo "  → $name: OK"
   else
     echo "  → $name: FAILED (exit $?)"

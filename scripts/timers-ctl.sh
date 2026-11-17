@@ -3,6 +3,8 @@
 #
 #   timers-ctl.sh install     # link the 6 units (retiring the 02:11 pilot pair) into the user manager, enable+start the timers
 #   timers-ctl.sh uninstall   # disable+stop the timers, unlink the units
+#   timers-ctl.sh retire-pilot  # on THIS host: disable --now the 02:11 pilot pair if systemd still has it, unlink it
+#                               # (host-local and idempotent; run it on every host that ever had the pilot)
 #   timers-ctl.sh start|stop  # start/stop all three timers
 #   timers-ctl.sh status      # list-timers + per-unit is-active
 #   timers-ctl.sh logs [N]    # last N journal lines per service (default 20)
@@ -25,12 +27,35 @@ UNITS="$TIMERS $SERVICES"
 
 uc() { systemctl --user "$@"; }
 
+# Retire the PILOT pair on this host. Asks SYSTEMD whether each unit is still enabled (a file test misses a
+# dangling link, and a unit loaded from outside the user dir), disables it --now if so, and removes any link or
+# copy in the user dir, dangling or not. katana kept the 02:11 timer armed until 2026-11-17 because install ran
+# only on familiar and its old test was [ -e ], false for a dangling link.
+retire_pilot() {
+  local u st rc any=0
+  for u in $RETIRED; do
+    st=$(uc is-enabled "$u" 2>/dev/null); rc=$?
+    st=$(printf '%s' "$st" | head -n 1)
+    # systemd answers a state word on stdout (exit 4 + "not-found" for an absent unit). Empty stdout means it could
+    # not answer (no user bus, a manager error): that is NOT absence, so stop rather than report "pilot absent".
+    if [ -z "$st" ]; then echo "retire-pilot: cannot ask systemd about $u (rc=$rc); nothing changed" >&2; return 3; fi
+    case "$st" in
+      not-found) ;;
+      *) if uc disable --now "$u" >/dev/null 2>&1; then echo "retired $u (was $st)"; any=1
+         else echo "retire-pilot: disable --now $u failed" >&2; return 3; fi ;;
+    esac
+    if [ -e "$USER_DIR/$u" ] || [ -L "$USER_DIR/$u" ]; then
+      if rm -f -- "$USER_DIR/$u" 2>/dev/null && [ ! -e "$USER_DIR/$u" ] && [ ! -L "$USER_DIR/$u" ]; then echo "unlinked $u"; any=1
+      else echo "retire-pilot: could not remove $USER_DIR/$u" >&2; return 3; fi
+    fi
+  done
+  [ "$any" -eq 1 ] || echo "pilot absent: nothing to retire"
+}
+
 case "${1:-}" in
   install)
     mkdir -p "$USER_DIR"
-    for u in $RETIRED; do   # the PILOT pair must not stay armed beside the guarded one
-      if [ -e "$USER_DIR/$u" ]; then uc disable --now "$u" >/dev/null 2>&1; rm -f "$USER_DIR/$u"; echo "retired $u"; fi
-    done
+    retire_pilot || { echo "install stopped: the 02:11 pilot could not be confirmed retired" >&2; exit 3; }   # one nightly start
     for u in $UNITS; do
       src="$ROOT/systemd/$u"
       [ -f "$src" ] || { echo "unit not found: $src" >&2; exit 1; }
@@ -49,6 +74,7 @@ case "${1:-}" in
     uc daemon-reload
     echo "uninstalled dreamteam timers"
     ;;
+  retire-pilot) retire_pilot; exit $?;;
   start)   for t in $TIMERS; do uc start "$t" && echo "started $t"; done;;
   stop)    for t in $TIMERS; do uc stop  "$t" && echo "stopped $t"; done;;
   status)
@@ -62,6 +88,6 @@ case "${1:-}" in
       journalctl --user -u "$s" -n "${2:-20}" --no-pager 2>/dev/null || echo "  (no journal)"
     done
     ;;
-  ""|-h|--help) sed -n '2,17p' "$0";;
-  *) echo "usage: timers-ctl.sh {install|uninstall|start|stop|status|logs [N]}" >&2; exit 2;;
+  ""|-h|--help) sed -n '2,19p' "$0";;
+  *) echo "usage: timers-ctl.sh {install|uninstall|retire-pilot|start|stop|status|logs [N]}" >&2; exit 2;;
 esac

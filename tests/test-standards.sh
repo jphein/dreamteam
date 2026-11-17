@@ -9,8 +9,13 @@ trap 'rm -rf "$TMP"' EXIT INT TERM
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); echo "PASS: $1"; }
 bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
-# run <json>  → uses repo config (enforce defaults on)
-run() { printf '%s' "$1" | DREAMTEAM_CONFIG="${2:-$ROOT/config.json}" CLAUDE_PLUGIN_ROOT="$ROOT" bash "$SS" 2>"$TMP/err"; }
+# Hermetic: the caller's tmux must not decide a result. Under the weekly audit's systemd timer TMUX is unset, so
+# the hook's rule 0 (teammates need tmux) fired first and the "unnamed teammate" case read the tmux message instead
+# of its own (self-audit 2026-11-15: FAILED 1/39, test-standards.sh). Every case states its tmux explicitly; run()
+# is "inside tmux" so the naming rules are what it exercises, and the rule-0 cases below pass env -u TMUX themselves.
+unset TMUX
+# run <json>  → uses repo config (enforce defaults on), inside a fake tmux
+run() { printf '%s' "$1" | TMUX=/tmp/fake,1,1 DREAMTEAM_CONFIG="${2:-$ROOT/config.json}" CLAUDE_PLUGIN_ROOT="$ROOT" bash "$SS" 2>"$TMP/err"; }
 
 bash -n "$SS" && ok "bash -n spawn-standards.sh" || bad "bash -n"
 
