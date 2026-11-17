@@ -467,7 +467,6 @@ End your reply with ONE line: SWEEP-RESULT {\"opened\":[N, ...PRs this run opene
     ( cd "$clone" && PATH="$cpath" CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 exec timeout -k 60 "$left" "$claude_bin" -p "$prompt" --dangerously-skip-permissions --output-format json ) \
       > "$dir/$name.json" 2> "$dir/$name.err" &
     local cpid=$! tick=0 killed=""; CPID=$cpid
-    [ -n "$RUNNER_SIG" ] && kill -TERM -- "-$cpid" 2>/dev/null   # a signal that landed during the launch
     # watchdog: re-probe the pool while the coordinator spends from it; under the floor → TERM it
     # (timeout forwards TERM to claude). One-second ticks so a finished run is noticed at once.
     while kill -0 "$cpid" 2>/dev/null; do
@@ -477,14 +476,20 @@ End your reply with ONE line: SWEEP-RESULT {\"opened\":[N, ...PRs this run opene
         log "runner $rid: stopping $name mid-run — $QREASON"; killed="$QREASON"; kill -TERM "$cpid" 2>/dev/null; break
       fi
     done
-    wait "$cpid"; local rc=$?
-    # a signal can cut `wait` short. Once a signal is in, the coordinator's group was TERMed: give it 60 s, then KILL
-    # the group, so it is gone (bounded) before anything is recorded
+    # (xreview r2) after a signal, stop the coordinator's WHOLE group, bounded, BEFORE any blocking wait: TERM the
+    # group (or the pid, in the instant before timeout has made its group; a signal that landed between the launch
+    # and CPID's assignment is caught here too), wait up to the grace for every member, then KILL what is left. A
+    # teammate that ignores TERM is a group member, so it goes too.
     if [ -n "$RUNNER_SIG" ]; then
-      local w=0
-      while kill -0 "$cpid" 2>/dev/null && [ "$w" -lt 60 ]; do sleep 1; w=$((w+1)); done
-      kill -0 "$cpid" 2>/dev/null && { log "runner $rid: $name did not stop in 60 s; KILL"; kill -KILL -- "-$cpid" 2>/dev/null; }
+      local w=0 grace="${DREAMTEAM_STOP_GRACE:-60}"
+      kill -TERM -- "-$cpid" 2>/dev/null || kill -TERM "$cpid" 2>/dev/null
+      while { kill -0 -- "-$cpid" 2>/dev/null || kill -0 "$cpid" 2>/dev/null; } && [ "$w" -lt "$grace" ]; do sleep 1; w=$((w+1)); done
+      if kill -0 -- "-$cpid" 2>/dev/null || kill -0 "$cpid" 2>/dev/null; then
+        log "runner $rid: $name's group did not stop in ${grace}s; KILL"
+        kill -KILL -- "-$cpid" 2>/dev/null; kill -KILL "$cpid" 2>/dev/null
+      fi
     fi
+    wait "$cpid"; local rc=$?
     while kill -0 "$cpid" 2>/dev/null; do wait "$cpid"; rc=$?; done
     CPID=""
     log "runner $rid: $name finished rc=$rc"

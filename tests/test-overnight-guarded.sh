@@ -88,6 +88,7 @@ echo claude >> "${SEQ_LOG:-/dev/null}"; echo $$ > "${CLAUDE_LOG%.log}.pid"
 { echo "CWD=$PWD"; echo "HTTPS_PROXY=${HTTPS_PROXY:-}"; echo "NODE_EXTRA_CA_CERTS=${NODE_EXTRA_CA_CERTS:-}";
   echo "ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-unset}"; echo "SCOPE=${DREAMTEAM_SCOPE_NAME:-unset}"; echo "OWNED=${DREAMTEAM_SCOPE_OWNED:-unset}"; echo "BGWAIT=${CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS:-unset}"; echo "DIRECT=${TEAMCLAUDE_ALLOW_DIRECT:-unset}${TEAMCLAUDE_BYPASS:-}"; echo "PATH1=${PATH%%:*}"
   printf 'ARG=%s\n' "$@"; echo "---"; } >> "$CLAUDE_LOG"
+if [ -n "${FAKE_STUBBORN:-}" ]; then ( trap '' TERM; exec sleep 300 ) & echo $! > "${CLAUDE_LOG%.log}.stubborn"; fi
 if [ -n "${FAKE_CLAUDE_SLEEP:-}" ]; then sleep "$FAKE_CLAUDE_SLEEP"; echo "END-NOT-KILLED" >> "$CLAUDE_LOG"; fi
 # like a real fixer: open a PR through whatever gh is first on PATH (the shim in a PR-only repo)
 gh pr create --fill --head fix/x >/dev/null 2>&1 || true
@@ -731,7 +732,7 @@ grep -qx 'BGWAIT=0' "$TMP/claude.log" && pass "coordinator: CLAUDE_CODE_PRINT_BG
 grep -qx 'OWNED=1' "$TMP/claude.log" && pass "coordinator: DREAMTEAM_SCOPE_OWNED=1 (its SessionEnd never stops the night's scope)" || fail "owned: $(grep OWNED "$TMP/claude.log")"
 # a runner killed by SIGHUP (its tmux server stopped) still writes its end: the repo stopped, FINISHED, a FAIL line
 reset; rm -rf "$TMP/checks"; mkqueue jphein/realmwatch:2
-( FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 FAKE_CLAUDE_SLEEP=30 run_g >/dev/null ) &
+( FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 FAKE_CLAUDE_SLEEP=30 FAKE_STUBBORN=1 DREAMTEAM_STOP_GRACE=2 run_g >/dev/null ) &
 SUB=$!
 for _ in $(seq 100); do grep -q '^---$' "$TMP/claude.log" 2>/dev/null && break; sleep 0.1; done
 GPID=$(pgrep -f -n "bash $G" 2>/dev/null)
@@ -741,8 +742,9 @@ grep -q "^FINISHED nightly-.*Stopped: runner killed (SIGHUP)" "$TMP/state/overni
   && [ "$(gj '.runs[] | select(.repo=="jphein/realmwatch") | .status')" = stopped ] \
   && [[ "$(cl)" == "CHECK nightly-guarded fail · "*"runner killed (SIGHUP)"* ]] \
   && ! grep -q END-NOT-KILLED "$TMP/claude.log" && ! kill -0 "$(cat "$TMP/claude.pid" 2>/dev/null || echo 999999)" 2>/dev/null \
+  && [ -s "$TMP/claude.stubborn" ] && ! kill -0 "$(cat "$TMP/claude.stubborn")" 2>/dev/null \
   && [ -s "$TMP/state/overnight-runs/$(gj .run_id)/killed" ] \
-  && pass "SIGHUP mid-coordinator: coordinator stopped, repo stopped, FINISHED names the signal, line FAIL" \
+  && pass "SIGHUP mid-coordinator: its whole group gone (a TERM-ignoring descendant KILLed after the grace), repo stopped, FINISHED names the signal, line FAIL" \
   || fail "sighup: runs=$(jq -c .runs "$TMP/state/overnight-guard.json") pid=$GPID pending=$(grep FINISHED "$TMP/state/overnight-pending.md" 2>/dev/null) status=$(gj '.runs[0].status') line='$(cl)'"
 # the watchdog: a started night whose runner session is gone before its cap is FAIL at once, not at 06:30
 OLD=$(date -Iseconds -d '-10 minutes'); FRESH=$(date -Iseconds -d '-30 seconds')
