@@ -7,7 +7,7 @@ Claude Code plugin for memory-gated parallel agent orchestration. Spawns named d
 - `plugin.json` — manifest (name, version, description)
 - `config.json` — tunables (perAgentMB, balloonReserveMB, hostReserveMB, maxAgents)
 - `hooks/hooks.json` — PreToolUse gates (reuse → mem-gate chain; `Bash|Monitor` → no-poll-guard, then gpu-guard), PostToolUse accounting, TeammateIdle/SubagentStop roster injection + `idle-assign.sh` (the freed agent's held context — recorded from its spawn prompt / last SendMessage by PostToolUse[Agent|SendMessage] — and the best-fit open item from `scratch/dreamteam/backlog.md` or `~/.claude/state/dreamteam-backlog.md`; `idle-assign.sh backlog add|list|done`), Pre/PostCompact HANDOFF guard, sync WorktreeCreate provision adapter (returns the worktree path, #26) + async Task*/WorktreeRemove event log, SessionStart/End lifecycle
-- `scripts/` — gate scripts, budget calculator, scope-attach (automatic cgroup containment), dashboard data generator, statusline (wired via user settings `statusLine`), local-model lane seam (optional ollama, `local-model.sh`), shared lib (`lib.sh`; `lib/pane-resolve.sh` = the canonical agent→pane resolver poke/pane-peek/fleet source, #53; `lib/agent-id.sh` = the canonical "which teammate am I?" /proc walk, shared by worktree-guard + no-poll-guard), PR tooling (`pr-gate.sh` / `pr-merge.sh` / `cascade.sh` — REST-only, no polling)
+- `scripts/` — gate scripts, budget calculator, scope-attach (automatic cgroup containment), dashboard data generator, statusline (wired via user settings `statusLine`), local-model lane seam (optional ollama, `local-model.sh`), shared lib (`lib.sh`; `lib/pane-resolve.sh` = the canonical agent→pane resolver poke/pane-peek/fleet source, #53; `lib/agent-id.sh` = the canonical "which teammate am I?" /proc walk, shared by worktree-guard + no-poll-guard; `lib/nopoll_text.py` = the no-poll guard's heredoc-data reader, #191), PR tooling (`pr-gate.sh` / `pr-merge.sh` / `cascade.sh` — REST-only, no polling)
 - **GPU fleet** (spec `docs/superpowers/specs/2026-09-29-gpu-fleet-design.md`):
   - `gpu/fleet.json`: every host and card with measured sizes, capabilities and the host's admission rules.
   - `bin/dreamteam` → `scripts/gpu.sh` → `scripts/lib/gpu_fleet.py`: `dreamteam gpu board|inventory|claim|release|window|admit|run`. The claims ledger is at `~/.claude/state/dreamteam/gpu/claims.json` (flock).
@@ -56,6 +56,15 @@ bash tests/run.sh          # runs every suite, exits non-zero on any failure
   file must still ENFORCE — an absent kill switch is not a disabled guard. `gh pr checks --watch`
   is pinned separately: it is a poller with no loop keyword, so a space-delimited " watch " pattern
   misses the single most dangerous form.
+  **Heredoc data (#191):** `scripts/lib/nopoll_text.py` removes a heredoc body from the judged text only
+  when every path its text can take ends as data (a sink such as cat/gh/git/read, a python program that
+  names no process API, no pipe/`$( )`/`<( )`/file/variable reaching a non-sink later). Allow controls:
+  the 11-14 incident (a python edit of overnight.js quoting its checks loop), an issue body posted with
+  `-F body=@file`, a PR body in `"$(cat <<'EOF' … EOF)"`, a commit message, a variable passed only to gh.
+  Deny controls: bash/ssh/sh owners, a pipe into sh, a script written then run (`bash f`, `./f`, `. f`),
+  read/`$( )`/variables into eval or `bash -c`, `source <( )`, an unquoted body's `$( )`, a group piped to
+  bash, `done <<EOF`, a python body using os.system, `gh alias set --shell`, and python3 failing (the
+  block stays). Each rule has a red perturbation (listed in PR #191's body).
 - `tests/test-pr-tools.sh` — `pr-gate.sh` / `pr-merge.sh` / `cascade.sh` against a stubbed `gh`
   (fixture JSON piped through the real `jq` with the caller's real `--jq` filter, mutating calls
   logged so the tests assert what the tools DID). Pins the two traps: **a blank conclusion is a

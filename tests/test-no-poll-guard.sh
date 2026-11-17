@@ -146,6 +146,60 @@ run "$LANE" Bash "$MEASURED" "$TMP/nonexistent.json"
 if blocked; then pass "still ENFORCES when the config file is missing (absent kill switch ≠ disabled guard)"
 else fail "a missing config silently disabled the guard — exit $GRC"; fi
 
+# ── HEREDOC DATA (#191): a heredoc body is data unless something runs it ──────────
+# The 2026-11-14 06:5x false blocks: a python heredoc that EDITED overnight.js quoted
+# the merge warden's checks-loop line, and a heredoc writing an issue body described
+# it. Nothing polled. The text is a mention; a poll is where a shell RUNS it. (The
+# first edit of this very block was itself blocked on 2026-11-17 04:5x.)
+LOOPLINE="$(grep -m1 'until gh pr checks' "$ROOT/workflows/overnight.js")"
+POLLBODY=$'while true; do\n  gh pr checks 458 --repo o/r\n  sleep 30\ndone'
+# allow <label> <command>  /  deny <label> <command>   (as the teammate, tool Bash)
+allow() { run "$LANE" Bash "$2"; if [ "$GRC" -eq 0 ]; then pass "ALLOWS $1"; else fail "false block: $1 — exit $GRC"; fi; }
+deny()  { run "$LANE" Bash "$2"; if blocked; then pass "BLOCKS $1"; else fail "missed a poll: $1 — exit $GRC"; fi; }
+
+if [ -n "$LOOPLINE" ]; then pass "fixture: overnight.js still holds the checks-loop line the incident quoted"
+else fail "fixture: the checks-loop line is gone from workflows/overnight.js"; fi
+allow "the 11-14 incident: a python3 - heredoc that edits overnight.js and quotes its checks loop" \
+  "cd $ROOT && python3 - <<'PY'"$'\np = "workflows/overnight.js"\ns = open(p).read()\nold = r"""'"$LOOPLINE"$'"""\nassert s.count(old) == 1\nopen(p, "w").write(s.replace(old, "   (the lead gates; no loop)"))\nPY\ngit diff --stat'
+allow "the 11-14 second hit: an issue body written by heredoc, then posted with gh api -F body=@file" \
+  $'cat > "$S/issue-191.md" <<\'EOF\'\nThe guard blocked a heredoc that quoted `until gh pr checks 1; do sleep 30; done`.\nEOF\ngh api repos/o/r/issues -X POST -F title=x -F body=@"$S/issue-191.md"'
+allow "a PR body passed as \"\$(cat <<'EOF' … EOF)\" to gh pr create" \
+  $'gh pr create --title t --body "$(cat <<\'EOF\'\nWe removed the old `while true; do gh pr checks 1; sleep 30; done` watcher.\nEOF\n)"'
+allow "a commit message fed to git commit -F - by heredoc" \
+  $'git commit -q -F - <<\'EOF\'\nfix: drop the `for i in $(seq 40); do gh pr checks 1; sleep 30; done` loop\nEOF'
+allow "a body kept in a variable and passed only to gh" \
+  $'body=$(cat <<\'EOF\'\nuntil gh pr checks 1; do sleep 30; done\nEOF\n)\ngh api repos/o/r/issues/1/comments -f body="$body"'
+allow "a <<- heredoc with tab-indented data, written to a file nothing runs" \
+  $'cat > notes.md <<-\'EOF\'\n\twhile :; do gh pr checks 1; sleep 30; done\n\tEOF\nwc -l notes.md'
+allow "this suite's own edit (python heredoc holding allow/deny lines that name poll loops)" \
+  "python3 - <<'PYEDIT'"$'\ns = open("t.sh").read()\ns += \'deny "x" $\\\'bash <<EOF\\nwhile :; do gh pr checks 1; sleep 30; done\\nEOF\\\'\\n\'\nopen("t.sh", "w").write(s)\nPYEDIT\nbash t.sh'
+
+deny "a heredoc fed to bash" $'bash <<\'EOF\'\n'"$POLLBODY"$'\nEOF'
+deny "a heredoc fed to bash -s over ssh" $'ssh gpu1 bash -s <<\'EOF\'\n'"$POLLBODY"$'\nEOF'
+deny "a heredoc piped into sh" $'cat <<\'EOF\' | sh\n'"$POLLBODY"$'\nEOF'
+deny "a script written by heredoc and then run" $'cat > poll.sh <<\'EOF\'\n'"$POLLBODY"$'\nEOF\nbash poll.sh'
+deny "a script written by heredoc, made executable and run by path" $'cat <<\'EOF\' > "$S/poll.sh" && chmod +x "$S/poll.sh" && "$S/poll.sh"\n'"$POLLBODY"$'\nEOF'
+deny "a script written by tee and then sourced" $'tee p.sh >/dev/null <<\'EOF\'\n'"$POLLBODY"$'\nEOF\n. ./p.sh'
+deny "a heredoc read into a variable, then eval'd" $'read -r -d \'\' s <<\'EOF\'\n'"$POLLBODY"$'\nEOF\neval "$s"'
+deny "a heredoc captured by \$(…) and run by bash -c" $'bash -c "$(cat <<\'EOF\'\n'"$POLLBODY"$'\nEOF\n)"'
+deny "a heredoc captured into a variable that bash -c runs" $'p=$(cat <<\'EOF\'\n'"$POLLBODY"$'\nEOF\n)\nbash -c "$p"'
+deny "a heredoc behind process substitution, sourced" $'source <(cat <<\'EOF\'\n'"$POLLBODY"$'\nEOF\n)'
+deny "a heredoc whose \$(…) runs when it expands (unquoted delimiter)" $'cat <<EOF\n$(while :; do gh pr checks 1; sleep 30; done)\nEOF'
+deny "a heredoc inside a group piped to bash" $'{ cat <<\'EOF\'\n'"$POLLBODY"$'\nEOF\n} | bash'
+deny "a heredoc feeding a while-read loop that evals each line" $'while read -r l; do eval "$l"; done <<\'EOF\'\n'"$POLLBODY"$'\nEOF'
+deny "a python heredoc that polls through os.system" $'python3 - <<\'PY\'\nimport os, time\nwhile True:\n    os.system("gh pr checks 458 --repo o/r")\n    time.sleep(30)\nPY'
+deny "a gh alias defined from a heredoc (gh runs it as shell)" $'gh alias set --shell w - <<\'EOF\'\n'"$POLLBODY"$'\nEOF\ngh w'
+deny "a real loop in the code, with a heredoc only as its input list" $'while read -r n; do gh pr checks "$n"; sleep 30; done <<\'EOF\'\n458\n459\nEOF'
+# python3 missing or failing: step (f) must keep the block (the pre-#191 behaviour), never allow
+mkdir -p "$TMP/nopy"; printf '#!/bin/sh\nexit 1\n' > "$TMP/nopy/python3"; chmod +x "$TMP/nopy/python3"
+GRC=0
+jq -nc --arg c $'cat > p.sh <<\'EOF\'\n'"$POLLBODY"$'\nEOF' '{tool_name:"Bash",tool_input:{command:$c}}' \
+  | PATH="$TMP/nopy:$PATH" DREAMTEAM_AGENT_ID="$LANE" DREAMTEAM_CONFIG="$TMP/on.json" bash "$GUARD" 2>"$TMP/err" || GRC=$?
+if blocked; then pass "KEEPS the block when python3 fails (no reader, no narrowing)"
+else fail "a failing python3 turned a heredoc block into an allow — exit $GRC"; fi
+deny "a heredoc written by a sink inside an if (its output is not followed)" $'if true; then cat <<\'EOF\'\n'"$POLLBODY"$'\nEOF\nfi | bash'
+deny "a poll on the header line of an unterminated heredoc" $'gh pr checks 1; sleep 30; gh pr checks 1; cat <<\'EOF\'\ntext'
+
 # truly-empty identity: only assertable when the suite is not itself a teammate.
 . "$ROOT/scripts/lib/agent-id.sh"
 if [ -n "$(DREAMTEAM_AGENT_ID='' dt_agent_id)" ]; then
