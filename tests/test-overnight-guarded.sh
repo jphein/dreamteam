@@ -88,8 +88,10 @@ echo claude >> "${SEQ_LOG:-/dev/null}"; echo $$ > "${CLAUDE_LOG%.log}.pid"
 { echo "CWD=$PWD"; echo "HTTPS_PROXY=${HTTPS_PROXY:-}"; echo "NODE_EXTRA_CA_CERTS=${NODE_EXTRA_CA_CERTS:-}";
   echo "ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-unset}"; echo "SCOPE=${DREAMTEAM_SCOPE_NAME:-unset}"; echo "OWNED=${DREAMTEAM_SCOPE_OWNED:-unset}"; echo "BGWAIT=${CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS:-unset}"; echo "DIRECT=${TEAMCLAUDE_ALLOW_DIRECT:-unset}${TEAMCLAUDE_BYPASS:-}"; echo "PATH1=${PATH%%:*}"
   printf 'ARG=%s\n' "$@"; echo "---"; } >> "$CLAUDE_LOG"
+# FAKE_TERM_DELAY: the coordinator takes that long to exit on TERM (so a signal can land while the runner waits)
+[ -n "${FAKE_TERM_DELAY:-}" ] && trap 'sleep "$FAKE_TERM_DELAY"; exit 143' TERM
 if [ -n "${FAKE_STUBBORN:-}" ]; then ( trap '' TERM; exec sleep 300 ) & echo $! > "${CLAUDE_LOG%.log}.stubborn"; fi
-if [ -n "${FAKE_CLAUDE_SLEEP:-}" ]; then sleep "$FAKE_CLAUDE_SLEEP"; echo "END-NOT-KILLED" >> "$CLAUDE_LOG"; fi
+if [ -n "${FAKE_CLAUDE_SLEEP:-}" ]; then sleep "$FAKE_CLAUDE_SLEEP" & wait $!; echo "END-NOT-KILLED" >> "$CLAUDE_LOG"; fi
 # like a real fixer: open a PR through whatever gh is first on PATH (the shim in a PR-only repo)
 gh pr create --fill --head fix/x >/dev/null 2>&1 || true
 if [ -n "${FAKE_CLAUDE_RC:-}" ]; then echo "[claude] teamclaude proxy :3456 down" >&2; exit "$FAKE_CLAUDE_RC"; fi
@@ -746,6 +748,20 @@ grep -q "^FINISHED nightly-.*Stopped: runner killed (SIGHUP)" "$TMP/state/overni
   && [ -s "$TMP/state/overnight-runs/$(gj .run_id)/killed" ] \
   && pass "SIGHUP mid-coordinator: its whole group gone (a TERM-ignoring descendant KILLed after the grace), repo stopped, FINISHED names the signal, line FAIL" \
   || fail "sighup: runs=$(jq -c .runs "$TMP/state/overnight-guard.json") pid=$GPID pending=$(grep FINISHED "$TMP/state/overnight-pending.md" 2>/dev/null) status=$(gj '.runs[0].status') line='$(cl)'"
+# a signal that lands while the runner WAITS (here after a quota stop) still gets the bounded group stop
+reset; rm -rf "$TMP/checks"; mkqueue jphein/realmwatch:2; rm -f "$TMP/claude.stubborn"
+( FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 DREAMTEAM_QUOTA_SEQ="0.92 0.92 0.30" DREAMTEAM_WATCH_SEC=1 \
+  FAKE_CLAUDE_SLEEP=30 FAKE_TERM_DELAY=20 FAKE_STUBBORN=1 DREAMTEAM_STOP_GRACE=2 run_g >/dev/null ) &
+SUB=$!
+for _ in $(seq 200); do grep -q "stopping realmwatch mid-run" "$TMP/state/dreamteam.log" 2>/dev/null && break; sleep 0.1; done
+sleep 0.5; GPID=$(pgrep -f -n "bash $G" 2>/dev/null); T0=$(date +%s); [ -n "$GPID" ] && kill -HUP "$GPID"
+for _ in $(seq 300); do kill -0 "$SUB" 2>/dev/null || break; sleep 0.1; done; T1=$(date +%s); kill -0 "$SUB" 2>/dev/null && kill "$SUB"
+[ $(( T1 - T0 )) -lt 12 ] && [ -s "$TMP/claude.stubborn" ] && ! kill -0 "$(cat "$TMP/claude.stubborn")" 2>/dev/null \
+  && grep -q "Stopped: runner killed (SIGHUP)" "$TMP/state/overnight-pending.md" \
+  && pass "SIGHUP during the runner's wait (after a quota stop): bounded by the grace ($(( T1 - T0 ))s, not the coordinator's 20 s), stubborn descendant gone, FINISHED names it" \
+  || fail "late signal: took $(( T1 - T0 ))s stubborn=$(cat "$TMP/claude.stubborn" 2>/dev/null) alive=$(kill -0 "$(cat "$TMP/claude.stubborn" 2>/dev/null)" 2>/dev/null && echo yes) pending=$(grep FINISHED "$TMP/state/overnight-pending.md")"
+kill "$(cat "$TMP/claude.stubborn" 2>/dev/null)" 2>/dev/null
+
 # the watchdog: a started night whose runner session is gone before its cap is FAIL at once, not at 06:30
 OLD=$(date -Iseconds -d '-10 minutes'); FRESH=$(date -Iseconds -d '-30 seconds')
 FAKE_SESSION=gone rec started "$OLD" "guard passed" '[{"repo":"a/x","status":"started"}]' "$(( NOWE + 3*3600 ))"

@@ -480,17 +480,25 @@ End your reply with ONE line: SWEEP-RESULT {\"opened\":[N, ...PRs this run opene
     # group (or the pid, in the instant before timeout has made its group; a signal that landed between the launch
     # and CPID's assignment is caught here too), wait up to the grace for every member, then KILL what is left. A
     # teammate that ignores TERM is a group member, so it goes too.
-    if [ -n "$RUNNER_SIG" ]; then
-      local w=0 grace="${DREAMTEAM_STOP_GRACE:-60}"
-      kill -TERM -- "-$cpid" 2>/dev/null || kill -TERM "$cpid" 2>/dev/null
-      while { kill -0 -- "-$cpid" 2>/dev/null || kill -0 "$cpid" 2>/dev/null; } && [ "$w" -lt "$grace" ]; do sleep 1; w=$((w+1)); done
-      if kill -0 -- "-$cpid" 2>/dev/null || kill -0 "$cpid" 2>/dev/null; then
+    # (xreview r3) every wait is re-checked: a signal at ANY point (before the wait, during it, after a quota stop)
+    # sends the loop through the bounded group stop; once the leader has exited, a final stop sweeps members it left.
+    stop_group() { # pgid: TERM the group (or the pid), up to the grace for every member, then KILL; idempotent
+      local g="$1" w=0 grace="${DREAMTEAM_STOP_GRACE:-60}"
+      { kill -0 -- "-$g" 2>/dev/null || kill -0 "$g" 2>/dev/null; } || return 0
+      kill -TERM -- "-$g" 2>/dev/null || kill -TERM "$g" 2>/dev/null
+      while { kill -0 -- "-$g" 2>/dev/null || kill -0 "$g" 2>/dev/null; } && [ "$w" -lt "$grace" ]; do sleep 1; w=$((w+1)); done
+      if kill -0 -- "-$g" 2>/dev/null || kill -0 "$g" 2>/dev/null; then
         log "runner $rid: $name's group did not stop in ${grace}s; KILL"
-        kill -KILL -- "-$cpid" 2>/dev/null; kill -KILL "$cpid" 2>/dev/null
+        kill -KILL -- "-$g" 2>/dev/null; kill -KILL "$g" 2>/dev/null
       fi
-    fi
-    wait "$cpid"; local rc=$?
-    while kill -0 "$cpid" 2>/dev/null; do wait "$cpid"; rc=$?; done
+    }
+    local rc=0
+    while :; do
+      [ -n "$RUNNER_SIG" ] && stop_group "$cpid"
+      wait "$cpid"; rc=$?
+      kill -0 "$cpid" 2>/dev/null || break
+    done
+    [ -n "$RUNNER_SIG" ] && stop_group "$cpid"
     CPID=""
     log "runner $rid: $name finished rc=$rc"
     local repo_full; repo_full=$(jq -r .repo <<<"$r")
