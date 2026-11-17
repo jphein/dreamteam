@@ -11,7 +11,7 @@ before any merge; costs about 50 seat-points a night". This page is the contract
 | Guard, launcher and runner | `scripts/overnight-guarded.sh` |
 | Per-repo loop (with `issues`, `prOnly` and `prGate` args) | `workflows/overnight.js` |
 | Tunables, production list | `config.json` → `.overnight` |
-| Install, status, uninstall (an install retires the 02:11 pilot pair, so only one nightly start exists) | `scripts/timers-ctl.sh` |
+| Install, status, uninstall (an install retires the 02:11 pilot pair, so only one nightly start exists); `retire-pilot` does that alone on any other host that ever had the pilot (katana kept it armed until 2026-11-17) | `scripts/timers-ctl.sh` |
 | Tests | `tests/test-overnight-guarded.sh` (98 checks), `tests/test-overnight-workflow.sh` (13 checks) |
 
 ## What happens at 23:30

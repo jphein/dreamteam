@@ -67,6 +67,94 @@ for pair in briefing audit nightly; do
   fi
 done
 
+echo "── retire-pilot (timers-ctl.sh): the 02:11 pilot must not stay armed on ANY host ──"
+# katana kept dreamteam-nightly.timer enabled until 2026-11-17: install retired it only where install ran, and its
+# file test ([ -e ]) is false for a dangling link while systemd still has the unit enabled. retire-pilot asks systemd.
+SC="$TMP/sc"; mkdir -p "$SC/bin"
+cat > "$SC/bin/systemctl" <<'S'
+#!/bin/bash
+# stub: logs every call; is-enabled answers from $SC_STATE/<unit> (absent file = not-found, exit 4)
+echo "$*" >> "$SC_LOG"
+[ "$1" = --user ] && shift
+case "$1" in
+  is-enabled) [ -n "${SC_NOBUS:-}" ] && { echo "Failed to connect to user scope bus" >&2; exit 1; }; f="$SC_STATE/$2"; [ -f "$f" ] && { cat "$f"; [ "$(cat "$f")" = enabled ] && exit 0 || exit 1; }; echo not-found; exit 4 ;;
+  disable) shift; [ "$1" = --now ] && shift; for u in "$@"; do rm -f "$SC_STATE/$u"; done ;;
+  list-timers|daemon-reload|link|enable|stop|start|is-active) : ;;
+esac
+exit 0
+S
+chmod +x "$SC/bin/systemctl"
+ctl(){ # ctl <verb>  (fresh log; XDG_CONFIG_HOME in the temp dir)
+  : > "$SC/log"
+  SC_LOG="$SC/log" SC_STATE="$SC/state" XDG_CONFIG_HOME="$SC/cfg" CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$SC/bin:$PATH" \
+    bash "$CTL" "$@" > "$SC/out" 2>&1
+}
+reset_sc(){ rm -rf "$SC/state" "$SC/cfg"; mkdir -p "$SC/state" "$SC/cfg/systemd/user"; }
+UD="$SC/cfg/systemd/user"
+
+# a) live symlink, enabled → disabled --now, link removed
+reset_sc; echo enabled > "$SC/state/dreamteam-nightly.timer"; ln -s "$SD/dreamteam-nightly.timer" "$UD/dreamteam-nightly.timer"; ln -s "$SD/dreamteam-nightly.service" "$UD/dreamteam-nightly.service"
+ctl retire-pilot
+grep -q -- "--user disable --now dreamteam-nightly.timer" "$SC/log" && [ ! -e "$UD/dreamteam-nightly.timer" ] && [ ! -L "$UD/dreamteam-nightly.service" ] \
+  && pass "retire-pilot: enabled pilot (live link) disabled --now and unlinked" || fail "retire-pilot live link: $(tr '\n' ';' < "$SC/log")"
+
+# b) DANGLING link while systemd still reports it enabled → still disabled and the link removed
+reset_sc; echo enabled > "$SC/state/dreamteam-nightly.timer"; ln -s "$SC/gone/dreamteam-nightly.timer" "$UD/dreamteam-nightly.timer"
+ctl retire-pilot
+grep -q -- "--user disable --now dreamteam-nightly.timer" "$SC/log" && [ ! -L "$UD/dreamteam-nightly.timer" ] \
+  && pass "retire-pilot: dangling link + enabled unit is still disabled and removed" || fail "retire-pilot dangling: $(tr '\n' ';' < "$SC/log") link=$([ -L "$UD/dreamteam-nightly.timer" ] && echo kept)"
+
+# c) enabled with NO file in the user dir (unit loaded from elsewhere) → disabled anyway
+reset_sc; echo enabled > "$SC/state/dreamteam-nightly.timer"
+ctl retire-pilot
+grep -q -- "--user disable --now dreamteam-nightly.timer" "$SC/log" \
+  && pass "retire-pilot: enabled unit with no user-dir file is disabled" || fail "retire-pilot no-file: $(tr '\n' ';' < "$SC/log")"
+
+# d) already absent → no disable call, says so, exit 0
+reset_sc
+ctl retire-pilot; rc=$?
+! grep -q "disable" "$SC/log" && grep -q "pilot absent" "$SC/out" && [ "$rc" -eq 0 ] \
+  && pass "retire-pilot: absent pilot → no disable, 'pilot absent', exit 0" || fail "retire-pilot absent: rc=$rc $(cat "$SC/out")"
+
+# e) BOTH pilot units enabled + an unrelated enabled unit with its own link: exactly the pilot calls, nothing else
+reset_sc; echo enabled > "$SC/state/dreamteam-nightly.timer"; echo enabled > "$SC/state/dreamteam-nightly.service"
+echo enabled > "$SC/state/dreamteam-audit.timer"; ln -s "$SD/dreamteam-audit.timer" "$UD/dreamteam-audit.timer"
+ctl retire-pilot
+expect=$(printf '%s\n' "--user disable --now dreamteam-nightly.service" "--user disable --now dreamteam-nightly.timer" "--user is-enabled dreamteam-nightly.service" "--user is-enabled dreamteam-nightly.timer")
+extra=$(diff <(sort "$SC/log") <(echo "$expect") | tr '\n' ';')
+[ -z "$extra" ] \
+  && [ -f "$SC/state/dreamteam-audit.timer" ] && [ -L "$UD/dreamteam-audit.timer" ] \
+  && pass "retire-pilot: exactly the two pilot units disabled; the unrelated unit and its link untouched" || fail "retire-pilot call set: extra='$extra' log=$(tr '\n' ';' < "$SC/log")"
+
+# i) the link cannot be removed (a directory sits at the unit path) → fail, no false "unlinked", install links nothing
+reset_sc; echo enabled > "$SC/state/dreamteam-nightly.timer"; mkdir -p "$UD/dreamteam-nightly.timer/x"
+ctl retire-pilot; rc=$?
+[ "$rc" -ne 0 ] && ! grep -q "unlinked dreamteam-nightly.timer" "$SC/out" \
+  && pass "retire-pilot: a path it cannot remove fails (rc=$rc), never reports 'unlinked'" || fail "retire-pilot rm failure: rc=$rc $(cat "$SC/out")"
+reset_sc; mkdir -p "$UD/dreamteam-nightly.timer/x"
+ctl install; rc=$?
+[ "$rc" -ne 0 ] && ! grep -q -E "(^| )(link|enable) " "$SC/log" \
+  && pass "install: stops (rc=$rc) when the pilot's path cannot be removed" || fail "install rm failure: rc=$rc $(tr '\n' ';' < "$SC/log")"
+
+# g) systemd cannot answer (no user bus: empty stdout, rc 1) → NOT "pilot absent": exit non-zero, nothing disabled
+reset_sc; echo enabled > "$SC/state/dreamteam-nightly.timer"
+SC_NOBUS=1 ctl retire-pilot; rc=$?
+[ "$rc" -ne 0 ] && ! grep -q "pilot absent" "$SC/out" && ! grep -q "disable" "$SC/log" \
+  && pass "retire-pilot: an unanswerable systemd query fails (rc=$rc), never reads as absence" || fail "retire-pilot no-bus: rc=$rc $(cat "$SC/out")"
+
+# h) install with an unanswerable query stops before linking anything
+reset_sc
+SC_NOBUS=1 ctl install; rc=$?
+[ "$rc" -ne 0 ] && ! grep -q "link " "$SC/log" && ! grep -q "enable " "$SC/log" \
+  && pass "install: stops (rc=$rc) before linking when the pilot cannot be confirmed retired" || fail "install no-bus: rc=$rc $(tr '\n' ';' < "$SC/log")"
+
+# f) install runs the same retire (dangling case), before linking anything
+reset_sc; echo enabled > "$SC/state/dreamteam-nightly.timer"; ln -s "$SC/gone/x" "$UD/dreamteam-nightly.timer"
+ctl install
+first_disable=$(grep -n -- "disable --now dreamteam-nightly.timer" "$SC/log" | head -1 | cut -d: -f1); first_link=$(grep -n "link " "$SC/log" | head -1 | cut -d: -f1)
+[ -n "$first_disable" ] && [ -n "$first_link" ] && [ "$first_disable" -lt "$first_link" ] && [ ! -L "$UD/dreamteam-nightly.timer" ] \
+  && pass "install: retires the pilot (dangling case) before linking" || fail "install retire: disable@${first_disable:-none} link@${first_link:-none}"
+
 echo "── nightly PILOT gate (overnight-launch.sh) ─────────────────────"
 
 # no dream issues → silent: exit 0, NO pending file, log records the skip
