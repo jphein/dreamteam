@@ -172,7 +172,9 @@ allow "a body kept in a variable and passed only to gh" \
 allow "a <<- heredoc with tab-indented data, written to a file nothing runs" \
   $'cat > notes.md <<-\'EOF\'\n\twhile :; do gh pr checks 1; sleep 30; done\n\tEOF\nwc -l notes.md'
 allow "this suite's own edit (python heredoc holding allow/deny lines that name poll loops)" \
-  "python3 - <<'PYEDIT'"$'\ns = open("t.sh").read()\ns += \'deny "x" $\\\'bash <<EOF\\nwhile :; do gh pr checks 1; sleep 30; done\\nEOF\\\'\\n\'\nopen("t.sh", "w").write(s)\nPYEDIT\nbash t.sh'
+  "python3 - <<'PYEDIT'"$'\ns = open("t.sh").read()\ns += \'deny "x" $\\\'bash <<EOF\\nwhile :; do gh pr checks 1; sleep 30; done\\nEOF\\\'\\n\'\nopen("t.sh", "w").write(s)\nPYEDIT\ngit diff --stat t.sh'
+deny "an edit script whose edited file is then run (it may now hold a poll)" \
+  "python3 - <<'PYEDIT'"$'\ns = open("t.sh").read()\ns += "while :; do gh pr checks 1; sleep 30; done\\n"\nopen("t.sh", "w").write(s)\nPYEDIT\nbash t.sh'
 
 deny "a heredoc fed to bash" $'bash <<\'EOF\'\n'"$POLLBODY"$'\nEOF'
 deny "a heredoc fed to bash -s over ssh" $'ssh gpu1 bash -s <<\'EOF\'\n'"$POLLBODY"$'\nEOF'
@@ -198,6 +200,20 @@ jq -nc --arg c $'cat > p.sh <<\'EOF\'\n'"$POLLBODY"$'\nEOF' '{tool_name:"Bash",t
 if blocked; then pass "KEEPS the block when python3 fails (no reader, no narrowing)"
 else fail "a failing python3 turned a heredoc block into an allow — exit $GRC"; fi
 deny "a heredoc written by a sink inside an if (its output is not followed)" $'if true; then cat <<\'EOF\'\n'"$POLLBODY"$'\nEOF\nfi | bash'
+# xreview r1 (2026-11-17): each of these was allowed by the first cut
+deny "code after an ANSI-C-quoted delimiter (<<\$'EOF' ends at EOF, not \$EOF)" $'cat <<$\'EOF\'\nnotes\nEOF\n'"$POLLBODY"
+deny "an ANSI-C delimiter where the literal \$EOF line also exists further down" $'cat <<$\'EOF\'\nnotes\nEOF\n'"$POLLBODY"$'\n$EOF'
+deny "a script written now for a LATER call to run (no data extension): the body stays judged" $'cat > "$HOME/bin/ci-wait" <<\'EOF\'\n'"$POLLBODY"$'\nEOF'
+allow "a heredoc written to a .md file that nothing runs" $'cat > "$S/notes.md" <<\'EOF\'\n'"$POLLBODY"$'\nEOF'
+deny "an unterminated heredoc (its delimiter may be misread): kept, never cut" $'cat <<\'EOF\'\n'"$POLLBODY"
+deny "a python program that writes a script with Path.write_text, then bash runs it" $'python3 - <<\'PY\'\nfrom pathlib import Path\nPath("poll.sh").write_text("while true; do gh pr checks 458 --repo o/r; sleep 30; done\\n")\nPY\nbash poll.sh'
+deny "a patch applied by git apply that creates a script, then bash runs it" $'git apply <<\'PATCH\'\ndiff --git a/poll.sh b/poll.sh\nnew file mode 100644\n--- /dev/null\n+++ b/poll.sh\n@@ -0,0 +1 @@\n+while true; do gh pr checks 458 --repo o/r; sleep 30; done\nPATCH\nbash poll.sh'
+deny "a captured body copied into a second variable that bash -c runs" $'poll=$(cat <<\'EOF\'\n'"$POLLBODY"$'\nEOF\n)\ncommand="set -e; $poll"\nbash -c "$command"'
+deny "a captured body copied by local/export into a variable that eval runs" $'poll=$(cat <<\'EOF\'\n'"$POLLBODY"$'\nEOF\n)\nexport CMD2="$poll"\neval "$CMD2"'
+deny "a body copied by printf -v into a variable that eval runs" $'read -r -d \'\' a <<\'EOF\'\n'"$POLLBODY"$'\nEOF\nprintf -v b \'%s\' "$a"\neval "$b"'
+deny "a body put on the clipboard, then pasted into bash" $'xclip -selection clipboard <<\'EOF\'\n'"$POLLBODY"$'\nEOF\nxclip -o -selection clipboard | bash'
+allow "a python edit whose later command only reads (git diff) the file it names" \
+  $'python3 - <<\'PY\'\np = "notes.md"\nopen(p, "a").write("old: while :; do gh pr checks 1; sleep 30; done\\n")\nPY\ngit diff --stat notes.md'
 deny "a poll on the header line of an unterminated heredoc" $'gh pr checks 1; sleep 30; gh pr checks 1; cat <<\'EOF\'\ntext'
 
 # truly-empty identity: only assertable when the suite is not itself a teammate.

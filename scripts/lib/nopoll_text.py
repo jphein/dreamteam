@@ -28,8 +28,8 @@ import re
 import sys
 
 # programs that treat stdin and arguments as data and never run them (gh/python have conditions below)
-SINKS = {"cat", "tee", "gh", "git", "jq", "wc", "head", "tail", "base64", "sort", "uniq", "grep", "diff", "cmp",
-         "read", "mapfile", "readarray", "echo", "printf", "xclip", "wl-copy", "cut", "tr", "md5sum", "sha256sum",
+SINKS = {"cat", "tee", "gh", "git", "jq", "wc", "head", "tail", "base64", "grep", "diff", "cmp",
+         "read", "mapfile", "readarray", "echo", "printf", "cut", "tr", "md5sum", "sha256sum",
          "true", ":", "export", "local", "declare", "typeset", "readonly"}
 PY = re.compile(r"python[0-9.]*$")
 # a python program that can start a process (the natural ways an agent would poll from python)
@@ -43,6 +43,8 @@ SKIP = {"!", "time", "then", "else", "elif", "do", "in"}
 BAIL_WORDS = {"case", "esac", "function", "coproc", ";;"}
 DECL = {"export", "local", "declare", "typeset", "readonly"}
 ASSIGN = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)(\[[^\]]*\])?\+?=")
+DATA_EXT = {"md", "txt", "json", "jsonl", "csv", "tsv", "log", "yaml", "yml", "toml", "html", "xml", "diff",
+            "patch", "rst", "msg"}
 REDIR = re.compile(r"(&>>|&>|<<<|<<-|<<|>>|>&|<&|>\||<>|>|<)")
 META = " \t\n;&|()<>"
 
@@ -61,6 +63,7 @@ class Node:
         self.idx, self.frame, self.in_group, self.closer = idx, frame, in_group, closer
         self.first, self.words, self.mentions, self.targets = None, [], [], []
         self.pipe_to, self.unknown_out, self.header = None, False, False
+        self.assigns = []                              # NAME= words before the command, or a declaration's
 
 
 class Frame:
@@ -145,6 +148,8 @@ def scan(s: str):
                         nd.targets.append(raw)
             elif kind in ("<<", "<<-"):
                 quoted = any(c in raw for c in "'\"\\")
+                if "$" in raw or "`" in raw:
+                    raise Bail("unmodelled delimiter quoting")
                 delim = unq(raw)
                 if not delim:
                     raise Bail("empty delimiter")
@@ -178,6 +183,7 @@ def scan(s: str):
                 return
             m = ASSIGN.match(raw)
             if m:
+                nd.assigns.append(m.group(1))
                 return                             # NAME=value before the command
             nd.first = bare
             return
@@ -185,6 +191,10 @@ def scan(s: str):
             return
         if nd.first in DECL and raw.startswith("-") and "n" in raw:
             raise Bail("nameref")
+        if nd.first in DECL:
+            m = ASSIGN.match(raw)
+            if m:
+                nd.assigns.append(m.group(1))
         nd.words.append(raw)
 
     def read_balanced(j, open_c, close_c):
@@ -232,7 +242,9 @@ def scan(s: str):
                     j = n if k >= n else k + 1
                     break
                 j = n if k >= n else k + 1
-            h["end"] = end_of_body if end_of_body is not None else n
+            if end_of_body is None:
+                raise Bail("heredoc without its delimiter line")
+            h["end"] = end_of_body
         pending.clear()
         return j
 
@@ -431,13 +443,17 @@ def scan(s: str):
     finish_word()
     if len(modes) != 1 or len(frames) != 1 or frames[0].opens or redir_next is not None:
         raise Bail("unterminated construct")
-    for h in pending:                                # a header on the last line: its body is empty
-        h["start"] = h["end"] = n
+    if pending:
+        raise Bail("heredoc header on the last line")
     return nodes, heredocs
 
 
-def mentions(word: str, name) -> bool:
+def mentions(word: str, name, body: str = "") -> bool:
     kind, val = name
+    if kind == "body":
+        # a later word whose file name the body spells (a python program or a patch writes that file)
+        base = unq(word).rsplit("/", 1)[-1]
+        return len(base) >= 3 and re.search(r"[A-Za-z]", base) is not None and base in body
     if kind == "var":
         return ("$" + val) in word or ("${" + val) in word
     w = unq(word)
@@ -478,19 +494,29 @@ def runs(nd, nodes, body, seen, program=None) -> bool:
     if nd.unknown_out:
         return True
     names = []
-    for t in nd.targets:
-        b = unq(t)
+    files = [unq(t) for t in nd.targets]
+    if nd.first == "tee":
+        files += [unq(w) for w in nd.words if not unq(w).startswith("-")]
+    for b in files:
         if b == "/dev/null":
             continue
         if b.startswith("/dev/"):
             if b in ("/dev/stdout", "/dev/stderr", "/dev/fd/1", "/dev/fd/2", "/dev/tty"):
                 continue
             return True
-        names.append(("file", b.rsplit("/", 1)[-1] or b))
-    if nd.first == "tee":
-        for w in nd.words:
-            if not unq(w).startswith("-"):
-                names.append(("file", unq(w).rsplit("/", 1)[-1]))
+        base = b.rsplit("/", 1)[-1] or b
+        # a file outlives this command: a later call can run it, so only a data file is data (security review r1)
+        if "." not in base or base.rsplit(".", 1)[-1].lower() not in DATA_EXT:
+            return True
+        names.append(("file", base))
+    # file and variable writes that no redirection shows (xreview r1)
+    if nd.first == "git" or (nd.first and PY.fullmatch(nd.first)):
+        names.append(("body", None))                   # git apply / a python program: files named in the body
+    if nd.first is None or nd.first in DECL:
+        names += [("var", a) for a in nd.assigns]      # x="$tainted"; export y="$tainted"
+    if nd.first == "printf":
+        ws = [unq(w) for w in nd.words]
+        names += [("var", ws[k + 1]) for k, w in enumerate(ws[:-1]) if w == "-v"]
     if nd.first in ("read", "mapfile", "readarray"):
         for w in nd.words:
             b = unq(w)
@@ -524,7 +550,7 @@ def runs(nd, nodes, body, seen, program=None) -> bool:
         for later in nodes:
             if later.idx <= nd.idx or later is nd:
                 continue
-            if any(mentions(w, name) for w in later.mentions + ([later.first] if later.first else [])):
+            if any(mentions(w, name, body) for w in later.mentions + ([later.first] if later.first else [])):
                 if runs(later, nodes, body, seen, program=None):
                     return True
     return False
