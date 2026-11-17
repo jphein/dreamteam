@@ -20,7 +20,7 @@ printf '%s\n' '#!/bin/bash' 'printf "%s" "${FAKE_PALACE_CODE:-200}"' > "$TMP/bin
 
 mkroot() {  # mkroot <name> <run.sh body or "">  → a fake root with a palace env file (URL only; curl is stubbed)
   local r="$TMP/$1"; mkdir -p "$r/scripts" "$r/tests" "$r/home/.config/palace-daemon" "$r/state" "$r/checks"
-  cp "$SA" "$r/scripts/self-audit.sh"
+  cp "$SA" "$r/scripts/self-audit.sh"; mkdir -p "$r/scripts/lib"; cp "$ROOT/scripts/lib/check-line.sh" "$r/scripts/lib/"
   echo 'PALACE_DAEMON_URL=http://palace.invalid' > "$r/home/.config/palace-daemon/env"
   [ -n "$2" ] && printf '%s\n' "$2" > "$r/tests/run.sh"
   echo "$r"
@@ -31,7 +31,7 @@ audit() {  # audit <root> [name]  → stdout+stderr to $root/out, rc to $root/rc
     DREAMTEAM_CHECK_NAME="${2-dreamteam-audit}" bash "$r/scripts/self-audit.sh" > "$r/out" 2>&1; echo $? > "$r/rc"
 }
 line() { cat "$1/checks/dreamteam-audit.line" 2>/dev/null; }
-SHAPE='^CHECK dreamteam-audit (ok|warn|fail) · .+ · .+$'
+SHAPE='^CHECK dreamteam-audit (ok|warn|fail) · [^·]+ · [^·]+$'   # exactly three segments: the Watch splits at the FIRST " · "
 GREEN='echo "━━━ test-a.sh"; echo "PASS: a"; echo "═══"; echo "ALL SUITES PASS (40/40)"; exit 0'
 
 bash -n "$SA" && ok "bash -n self-audit.sh" || bad "bash -n"
@@ -39,7 +39,7 @@ bash -n "$SA" && ok "bash -n self-audit.sh" || bad "bash -n"
 # 1. all green, palace answering, no statusline capture → ok with the suite count, one line, no temp file left
 R=$(mkroot green "$GREEN"); audit "$R"; L=$(line "$R")
 [[ "$L" =~ $SHAPE ]] && ok "green: line has the fleet shape" || bad "green: shape: '$L'"
-[[ "$L" == "CHECK dreamteam-audit ok · suites 40/40 · "* ]] && ok "green: ok · suites 40/40" || bad "green: '$L'"
+[[ "$L" == "CHECK dreamteam-audit ok · suites 40/40, "* ]] && ok "green: ok · suites 40/40" || bad "green: '$L'"
 [ "$(cat "$R/rc")" = 0 ] && ok "green: exit 0" || bad "green: rc $(cat "$R/rc")"
 [ "$(wc -l < "$R/checks/dreamteam-audit.line")" = 1 ] && ok "green: exactly one line" || bad "green: line count"
 [ "$(ls -A "$R/checks")" = "dreamteam-audit.line" ] && ok "green: no temp file left in the checks dir" || bad "green: leftovers: $(ls -A "$R/checks" | tr '\n' ' ')"
@@ -49,7 +49,7 @@ BODY='echo "━━━ test-standards.sh"; echo "PASS: s1"; echo "FAIL: wrong mes
 BODY="$BODY"'; for i in $(seq 1 80); do echo "PASS: later suite line $i"; done; echo "═══"; echo "FAILED: 1/39 suites — test-standards.sh"; exit 1'
 R=$(mkroot red "$BODY"); audit "$R"; L=$(line "$R")
 [[ "$L" =~ $SHAPE ]] && ok "red: line has the fleet shape" || bad "red: shape: '$L'"
-[[ "$L" == "CHECK dreamteam-audit fail · suites 38/39, failing test-standards.sh · "* ]] && ok "red: fail · suites 38/39, failing test-standards.sh" || bad "red: '$L'"
+[[ "$L" == "CHECK dreamteam-audit fail · suites 38/39, failing test-standards.sh, "* ]] && ok "red: fail · suites 38/39, failing test-standards.sh (one fact segment)" || bad "red: '$L'"
 [[ "$L" == *"fix test-standards.sh, owner Sen" ]] && ok "red: next names the suite to fix" || bad "red: next: '$L'"
 grep -q "FAIL: wrong message: NOT inside tmux" "$R/out" && ok "red: the failing suite's FAIL line survives 80 later lines" || bad "red: FAIL line cut from the report"
 [ "$(cat "$R/rc")" = 0 ] && ok "red: still exit 0 (a report, not a gate)" || bad "red: rc $(cat "$R/rc")"
@@ -74,12 +74,12 @@ unreadable namecount 'echo "FAILED: 2/40 suites — test-a.sh"; exit 1'
 unreadable hugecount 'echo "FAILED: 1/9999999999999999999999 suites — test-x.sh"; exit 1'
 # leading zeros are decimal, never a shell octal abort: published, exit 0
 R=$(mkroot octal 'echo "FAILED: 1/09 suites — test-x.sh"; exit 1'); audit "$R"; L=$(line "$R")
-[ "$(cat "$R/rc")" = 0 ] && [[ "$L" == "CHECK dreamteam-audit fail · suites 8/9, failing test-x.sh · "* ]] \
+[ "$(cat "$R/rc")" = 0 ] && [[ "$L" == "CHECK dreamteam-audit fail · suites 8/9, failing test-x.sh, "* ]] \
   && ok "counts: '1/09' reads as decimal (8/9), published, exit 0" || bad "octal: rc=$(cat "$R/rc") '$L'"
 
 # 4. health: green suites with the palace down, or statusline drift, are warn (naming what), never ok
 R=$(mkroot palace-down "$GREEN"); FAKE_PALACE_CODE=000 audit "$R"; L=$(line "$R")
-[[ "$L" == "CHECK dreamteam-audit warn · suites 40/40 · "*"palace UNREACHABLE"*"check palace, owner Sen" ]] && ok "health: palace unreachable → warn naming the palace" || bad "palace-down: '$L'"
+[[ "$L" == "CHECK dreamteam-audit warn · suites 40/40, "*"palace UNREACHABLE"*"check palace, owner Sen" ]] && ok "health: palace unreachable → warn naming the palace" || bad "palace-down: '$L'"
 R=$(mkroot palace-noenv "$GREEN"); rm "$R/home/.config/palace-daemon/env"; audit "$R"; L=$(line "$R")
 [[ "$L" == "CHECK dreamteam-audit warn · "*"palace no-env-file"* ]] && ok "health: palace unmeasured (no env) → warn" || bad "palace-noenv: '$L'"
 R=$(mkroot drift "$GREEN"); echo '{"x":1}' > "$R/state/statusline-payload.json"; audit "$R"; L=$(line "$R")
@@ -125,6 +125,35 @@ H="$TMP/hermetic"; mkdir -p "$H/tests"; cp "$ROOT/tests/run.sh" "$H/tests/run.sh
 printf '%s\n' '#!/usr/bin/env bash' '[ -z "${TMUX:-}" ] && echo "PASS: no TMUX" || { echo "FAIL: TMUX leaked: $TMUX"; exit 1; }' > "$H/tests/test-probe.sh"
 TMUX=/tmp/fake,1,1 bash "$H/tests/run.sh" > "$H/out" 2>&1 \
   && ok "run.sh: a suite never sees the caller's TMUX (timer and interactive runs agree)" || bad "run.sh leaks TMUX: $(grep FAIL "$H/out" | head -1)"
+
+# 8. tests/run.sh never lets a suite write a REAL check line: each suite gets a throwaway DREAMTEAM_CHECKS_DIR
+H2="$TMP/realdir"; mkdir -p "$H2/tests"; cp "$ROOT/tests/run.sh" "$H2/tests/run.sh"
+printf '%s\n' '#!/usr/bin/env bash' ': > "$PROBE_RAN"' 'd="${DREAMTEAM_CHECKS_DIR:-}"' \
+  '[ -n "$d" ] && [ -d "$d" ] && [ "${d#"$DREAMTEAM_REAL_HOME"/.local/state}" = "$d" ] && echo "PASS: throwaway $d" || { echo "FAIL: checks dir is \"$d\""; exit 1; }' > "$H2/tests/test-probe.sh"
+export PROBE_RAN="$TMP/probe-ran"
+env -u DREAMTEAM_CHECKS_DIR bash "$H2/tests/run.sh" > "$H2/out" 2>&1 \
+  && ok "run.sh: every suite gets a throwaway checks dir (no test can overwrite a real line)" || bad "run.sh checks dir: $(grep FAIL "$H2/out" | head -1)"
+# NEVER a real path here: on 2026-11-17 a mutated run.sh kept an inherited "$HOME/.local/state/checks" from this very
+# case and its EXIT trap rm -rf'd the fleet's real checks folder. The inherited dir is a DECOY with a sentinel; the
+# probe fails if it is handed the decoy, and the decoy must survive whatever run.sh does.
+DECOY="$TMP/decoy-checks"; mkdir -p "$DECOY"; echo KEEP > "$DECOY/sentinel"
+printf '%s\n' '#!/usr/bin/env bash' 'd="${DREAMTEAM_CHECKS_DIR:-}"' \
+  '[ -n "$d" ] && [ -d "$d" ] && [ "$d" != "$DECOY_DIR" ] && echo "PASS: private $d" || { echo "FAIL: checks dir is \"$d\""; exit 1; }' > "$H2/tests/test-probe.sh"
+DECOY_DIR="$DECOY" DREAMTEAM_CHECKS_DIR="$DECOY" bash "$H2/tests/run.sh" > "$H2/out2" 2>&1; rc=$?
+[ "$rc" = 0 ] && ok "run.sh: an INHERITED checks dir is replaced by a private one" || bad "run.sh inherited dir leaked: $(grep FAIL "$H2/out2" | head -1)"
+[ "$(cat "$DECOY/sentinel" 2>/dev/null)" = KEEP ] && ok "run.sh: an inherited dir is never removed (its sentinel survives)" || bad "run.sh REMOVED the inherited dir"
+printf '%s\n' '#!/usr/bin/env bash' ': > "$PROBE_RAN"' 'echo "PASS: ran"' > "$H2/tests/test-probe.sh"; rm -f "$PROBE_RAN"
+TMPDIR="$TMP/no/such/dir" bash "$H2/tests/run.sh" > "$H2/out3" 2>&1; rc=$?
+[ "$rc" -ne 0 ] && grep -q "cannot create a private test home" "$H2/out3" && [ ! -e "$PROBE_RAN" ] \
+  && ok "run.sh: no private home possible → exit $rc, and the probe suite never ran (its sentinel is absent)" || bad "run.sh mktemp failure: rc=$rc ran=$([ -e "$PROBE_RAN" ] && echo yes) $(head -2 "$H2/out3")"
+# every suite sees a private HOME, never the caller's
+printf '%s\n' '#!/usr/bin/env bash' '[ "$HOME" != "$DREAMTEAM_REAL_HOME" ] && [ -d "$HOME" ] && echo "PASS: private home" || { echo "FAIL: HOME is $HOME"; exit 1; }' > "$H2/tests/test-probe.sh"
+bash "$H2/tests/run.sh" > "$H2/out4" 2>&1 && ok "run.sh: every suite runs with a private HOME" || bad "run.sh HOME: $(grep FAIL "$H2/out4" | head -1)"
+# an inherited XDG dir (a DECOY) never reaches a suite: config, state, data and cache all live under the private HOME
+XD="$TMP/decoy-xdg"; mkdir -p "$XD"; echo KEEP > "$XD/sentinel"
+printf '%s\n' '#!/usr/bin/env bash' 'for v in XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME XDG_CACHE_HOME; do d="${!v}"; [ "${d#"$HOME"/}" != "$d" ] || { echo "FAIL: $v=$d"; exit 1; }; done; echo "PASS: xdg private"' > "$H2/tests/test-probe.sh"
+XDG_CONFIG_HOME="$XD" XDG_STATE_HOME="$XD" XDG_DATA_HOME="$XD" XDG_CACHE_HOME="$XD" bash "$H2/tests/run.sh" > "$H2/out5" 2>&1 \
+  && [ "$(cat "$XD/sentinel")" = KEEP ] && ok "run.sh: inherited XDG dirs are replaced by private ones (decoy untouched)" || bad "run.sh XDG: $(grep FAIL "$H2/out5" | head -1)"
 
 echo "─────────────────────────────────────────"
 echo "SUMMARY: $PASS passed, $FAIL failed, $((PASS+FAIL)) total"

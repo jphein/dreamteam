@@ -27,6 +27,7 @@ pass(){ echo "PASS: $1"; PASS=$((PASS+1)); }
 fail(){ echo "FAIL: $1"; FAIL=$((FAIL+1)); }
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+export DREAMTEAM_CHECKS_DIR="$TMP/checks" DREAMTEAM_CHECK_HOST=familiar   # never a real check line
 BIN="$TMP/bin"; mkdir -p "$BIN"
 
 cat > "$BIN/curl" <<'S'
@@ -537,6 +538,159 @@ mode, at = m.next_sweep(datetime.datetime.now().astimezone()); print(mode, at.st
 [ "$(ns 0 | cut -d' ' -f1)" = "pilot" ] && pass "guarded timer inactive → pilot (unchanged fallback)" || fail "next_sweep fallback: $(ns 0)"
 
 # hermetic: no test reached the (stubbed) real systemd-run / tmux launch
+echo "── the CHECK line (nightly-guarded; one derivation from the guard record) ──"
+cl(){ cat "$TMP/checks/nightly-guarded.line" 2>/dev/null; }
+NSHAPE='^CHECK nightly-guarded (ok|warn|fail) · [^·]+ · next 23:30, owner Sen$'
+reset; rm -rf "$TMP/checks"; mkqueue jphein/starcharts:0
+FAKE_QUOTA="$Q_OK" run_g >/dev/null
+[[ "$(cl)" =~ $NSHAPE ]] && [[ "$(cl)" == "CHECK nightly-guarded ok · night "*": nothing queued (no open dream issues) · "* ]] && pass "line: no-work → ok, nothing queued" || fail "line no-work: '$(cl)'"
+reset; rm -rf "$TMP/checks"; mkqueue jphein/starcharts:2
+FAKE_GH_starcharts="$I2" FAKE_QUOTA='{"aggregate":{"fiveHour":{"utilization":0.31},"sevenDay":{"utilization":0.2}}}' run_g >/dev/null
+[[ "$(cl)" == "CHECK nightly-guarded warn · night "*": held, "* ]] && pass "line: quota-held night → warn, held + reason" || fail "line held: '$(cl)' decision=$(gj .decision)"
+reset; rm -rf "$TMP/checks"; mkqueue jphein/realmwatch:2
+FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 run_g >/dev/null
+[[ "$(cl)" == "CHECK nightly-guarded ok · night "*"finished 1, stopped 0, skipped 0"* ]] && pass "line: INLINE run finished → ok after the runner's finish" || fail "line finished: '$(cl)'"
+# crafted records through --check-line (nothing run)
+rec(){ # rec <decision> <at> <reason> <runs-json> <deadline-epoch or "">
+  reset; rm -rf "$TMP/checks"
+  jq -n --arg d "$1" --arg at "$2" --arg r "$3" --argjson runs "$4" \
+    '{at:$at, decision:$d, reason:$r, issues:15, repos:["a/x","a/y","a/z"], run_id:"nightly-t", runs:$runs}' > "$TMP/state/overnight-guard.json"
+  if [ -n "$5" ]; then mkdir -p "$TMP/state/overnight-runs/nightly-t"; jq -n --argjson dl "$5" '{deadline_epoch:$dl, repos:[{repo:"a/x"},{repo:"a/y"},{repo:"a/z"}]}' > "$TMP/state/overnight-runs/nightly-t/plan.json"; fi
+  run_g --check-line >/dev/null
+}
+NOWE=$(date +%s); RECENT=$(date -Iseconds -d '-8 hours')
+rec started "$RECENT" "guard passed" '[{"repo":"a/x","status":"started"}]' "$(( NOWE - 3600 ))"
+[[ "$(cl)" == "CHECK nightly-guarded fail · "*"finished 0, stopped 0, skipped 0"*"cap passed with 3 repo(s) never finished (runner gone)"* ]] \
+  && pass "line: started, cap passed, repos unfinished → FAIL (the 11-16 dead runner)" || fail "line dead runner: '$(cl)'"
+rec started "$RECENT" "guard passed" '[{"repo":"a/x","status":"started"}]' "$(( NOWE + 3600 ))"
+[[ "$(cl)" == "CHECK nightly-guarded ok · "*"running until "* ]] && pass "line: started, before its cap → ok, running" || fail "line running: '$(cl)'"
+rec started "$RECENT" "guard passed" '[{"repo":"a/x","status":"stopped"},{"repo":"a/y","status":"started"}]' "$(( NOWE + 3600 ))"
+[[ "$(cl)" == "CHECK nightly-guarded warn · "*"stopped 1"*"running until "* ]] && pass "line: before the cap with a repo already stopped → warn" || fail "line running+stopped: '$(cl)'"
+rec started "$RECENT" "guard passed" '[{"repo":"a/x","status":"skipped"},{"repo":"a/y","status":"finished"}]' "$(( NOWE + 3600 ))"
+[[ "$(cl)" == "CHECK nightly-guarded warn · "*"skipped 1"*"running until "* ]] && pass "line: before the cap with a repo skipped → warn" || fail "line running+skipped: '$(cl)'"
+rec started "$RECENT" "guard passed" '[{"repo":"a/x","status":"finished","prs_opened":[1,2],"merged":[1]},{"repo":"a/y","status":"stopped"},{"repo":"a/z","status":"skipped"}]' "$(( NOWE - 60 ))"
+[[ "$(cl)" == "CHECK nightly-guarded warn · "*"finished 1, stopped 1, skipped 1; PRs opened 2, merged 1"* ]] && pass "line: all repos ended, one stopped/skipped → warn with PR counts" || fail "line stopped: '$(cl)'"
+rec started "$RECENT" "guard passed" '[{"repo":"a/x","status":"finished"}]' ""
+[[ "$(cl)" == "CHECK nightly-guarded fail · "*"no readable plan.json"* ]] && pass "line: started with no plan.json → fail (cap unknown)" || fail "line noplan: '$(cl)'"
+rec started "$RECENT" "guard passed" '[{"repo":"a/x","status":"finished"},{"repo":"a/y","status":"finished"},{"repo":"a/z","status":"finished"}]' ""
+[[ "$(cl)" == "CHECK nightly-guarded fail · "*"no readable plan.json"* ]] && pass "line: every repo finished but no plan.json → still fail (plan validated first)" || fail "line allfin-noplan: '$(cl)'"
+rec started "$RECENT" "guard passed" '[{"repo":"a/x","status":"finished"},{"repo":"a/x","status":"finished"},{"repo":"a/x","status":"finished"}]' "$(( NOWE - 60 ))"
+[[ "$(cl)" == "CHECK nightly-guarded fail · "*"finished 1, stopped 0, skipped 0"*"2 repo(s) never finished"* ]] \
+  && pass "line: three results for ONE repo don't stand for three planned repos → fail" || fail "line dup: '$(cl)'"
+rec started "$RECENT" "guard passed" '[{"repo":"a/x","status":"stopped"},{"repo":"a/x","status":"finished"},{"repo":"a/y","status":"finished"},{"repo":"a/z","status":"finished"}]' "$(( NOWE - 60 ))"
+[[ "$(cl)" == "CHECK nightly-guarded ok · "*"finished 3, stopped 0"* ]] && pass "line: a repo's LAST result counts (stopped then finished → finished)" || fail "line last: '$(cl)'"
+rec no-start "$RECENT" "the contained launch failed (systemd-run/tmux)" '[]' ""
+[[ "$(cl)" == "CHECK nightly-guarded fail · "*"held, the contained launch failed"* ]] && pass "line: launch failed → fail" || fail "line launch: '$(cl)'"
+rec no-work "$(date -Iseconds -d '-50 hours')" "" '[]' ""
+[[ "$(cl)" == "CHECK nightly-guarded warn · "*"record is 50 h old"* ]] && pass "line: a 50 h old record → warn (the timer has not decided since)" || fail "line old: '$(cl)'"
+rec mystery "$RECENT" "" '[]' ""
+[[ "$(cl)" == "CHECK nightly-guarded fail · "*"unknown decision 'mystery'"* ]] && pass "line: unknown decision → fail" || fail "line unknown: '$(cl)'"
+reset; rm -rf "$TMP/checks"; run_g --check-line >/dev/null
+[[ "$(cl)" == "CHECK nightly-guarded fail · no readable guard record"* ]] && pass "line: no guard record → fail" || fail "line norecord: '$(cl)'"
+# a guard record that cannot be written never re-publishes the previous decision as fresh
+reset; rm -rf "$TMP/checks"; mkqueue jphein/starcharts:0
+jq -n --arg at "$(date -Iseconds)" '{at:$at, decision:"no-work", reason:"", issues:0, repos:[]}' > "$TMP/state/overnight-guard.json"
+mkdir -p "$TMP/state/overnight-guard.json.d"; rm -f "$TMP/state/overnight-guard.json"; mv "$TMP/state/overnight-guard.json.d" "$TMP/state/overnight-guard.json"; : > "$TMP/state/overnight-guard.json/keep"
+FAKE_QUOTA="$Q_OK" run_g >/dev/null
+[[ "$(cl)" == "CHECK nightly-guarded fail · could not write the guard record for decision no-work"* ]] && [ -z "$(ls "$TMP/state/overnight-guard.json" | grep -v keep)" ] \
+  && pass "line: guard record unwritable (a directory) → fail, nothing moved into it" || fail "line recwrite: '$(cl)' $(ls "$TMP/state/overnight-guard.json")"
+rm -rf "$TMP/state/overnight-guard.json"
+# a plan must be an object with a positive numeric deadline and a non-empty list of unique owner/name repo strings
+badplan() {  # badplan <label> <plan json>
+  rec started "$RECENT" "guard passed" '[{"repo":"a/x","status":"finished"}]' "$(( NOWE - 60 ))"
+  printf '%s' "$2" > "$TMP/state/overnight-runs/nightly-t/plan.json"; rm -rf "$TMP/checks"; run_g --check-line >/dev/null
+  [[ "$(cl)" == "CHECK nightly-guarded fail · "*"no readable plan.json"* ]] && pass "line: plan $1 → fail" || fail "line plan $1: '$(cl)'"
+}
+badplan "not an object" '[{"repo":"a/x"}]'
+badplan "with no repos" '{"deadline_epoch":1,"repos":[]}'
+badplan "repo 'a b/x' (not owner/name)" "{\"deadline_epoch\":$(( NOWE - 60 )),\"repos\":[{\"repo\":\"a b/x\"}]}"
+badplan "repo 'ax' (no owner)" "{\"deadline_epoch\":$(( NOWE - 60 )),\"repos\":[{\"repo\":\"ax\"}]}"
+badplan "deadline 0" '{"deadline_epoch":0,"repos":[{"repo":"a/x"}]}'
+badplan "deadline -5" '{"deadline_epoch":-5,"repos":[{"repo":"a/x"}]}'
+badplan "deadline 'x'" '{"deadline_epoch":"x","repos":[{"repo":"a/x"}]}'
+badplan "deadline 1e20 (exponent form)" '{"deadline_epoch":1e20,"repos":[{"repo":"a/x"}]}'
+badplan "deadline 5000000000 (past 2100)" '{"deadline_epoch":5000000000,"repos":[{"repo":"a/x"}]}'
+badplan "deadline 1.5" '{"deadline_epoch":1.5,"repos":[{"repo":"a/x"}]}'
+# deadlines inside [1e9, 4102444800) are accepted whatever their JSON form (floored); the upper bound is excluded
+goodplan() {  # goodplan <label> <deadline json>  → accepted: the cap (in the past) passed with repos unfinished
+  rec started "$RECENT" "guard passed" '[{"repo":"a/x","status":"started"}]' "$(( NOWE - 60 ))"
+  printf '{"deadline_epoch":%s,"repos":[{"repo":"a/x"}]}' "$2" > "$TMP/state/overnight-runs/nightly-t/plan.json"; rm -rf "$TMP/checks"; run_g --check-line >/dev/null
+  [[ "$(cl)" == "CHECK nightly-guarded fail · "*"never finished (runner gone)"* ]] && pass "line: deadline $1 accepted (judged against its cap)" || fail "line goodplan $1: '$(cl)'"
+}
+goodplan "1000000019.5 (fraction)" 1000000019.5
+[[ "$(cl)" == *"the $(date -d @1000000019 +%H:%M) cap passed"* ]] && [ "$(date -d @1000000019 +%H:%M)" != "$(date -d @1000000020 +%H:%M)" ] \
+  && pass "line: a fractional deadline is FLOORED (1000000019.5 → :19's minute, not the next one)" || fail "line floor: '$(cl)'"
+goodplan "1e9 (exponent form, in range)" 1e9
+badplan "deadline 4102444800 (the excluded upper bound)" '{"deadline_epoch":4102444800,"repos":[{"repo":"a/x"}]}'
+# the record's timestamp must be a real ISO time (GNU date reads "" as today's midnight)
+badat() {  # badat <label> <at json fragment>
+  reset; rm -rf "$TMP/checks"
+  printf '{%s"decision":"no-work","reason":"","issues":0,"repos":[]}' "$2" > "$TMP/state/overnight-guard.json"; run_g --check-line >/dev/null
+  [[ "$(cl)" == "CHECK nightly-guarded fail · guard record has no valid timestamp (decision no-work)"* ]] && pass "line: record $1 → fail, never an invented fresh night" || fail "line badat $1: '$(cl)'"
+}
+badat "with no at" ''
+badat "with at null" '"at":null,'
+badat "with at 'garbage'" '"at":"garbage",'
+badat "with at 7" '"at":7,'
+badat "with at 'ISO +1 day' (a relative suffix)" '"at":"2026-11-17T00:00:00-08:00 +1 day",'
+badat "with at '2026-11-17' (date only)" '"at":"2026-11-17",'
+# a plan whose repos are not usable owner/name strings is no plan: [{}] + an anonymous finished run must not read ok
+rec started "$RECENT" "guard passed" '[{"status":"finished"}]' "$(( NOWE - 60 ))"
+jq -n --argjson dl "$(( NOWE - 60 ))" '{deadline_epoch:$dl, repos:[{}]}' > "$TMP/state/overnight-runs/nightly-t/plan.json"; rm -rf "$TMP/checks"; run_g --check-line >/dev/null
+[[ "$(cl)" == "CHECK nightly-guarded fail · "*"no readable plan.json"* ]] && pass "line: plan repos [{}] → fail, never matched against anonymous results" || fail "line badplan: '$(cl)'"
+jq -n --argjson dl "$(( NOWE - 60 ))" '{deadline_epoch:$dl, repos:[{repo:"a/x"},{repo:"a/x"}]}' > "$TMP/state/overnight-runs/nightly-t/plan.json"; rm -rf "$TMP/checks"; run_g --check-line >/dev/null
+[[ "$(cl)" == "CHECK nightly-guarded fail · "*"no readable plan.json"* ]] && pass "line: duplicate planned repos → fail" || fail "line dupplan: '$(cl)'"
+# the lock is required: a caller that cannot take it publishes nothing
+rec no-work "$RECENT" "" '[]' ""; rm -rf "$TMP/checks"
+rm -f "$TMP/lock-ready"
+( exec 8>"$TMP/state/.nightly-line.lock"; flock 8; : > "$TMP/lock-ready"; exec sleep 30 ) & HOLDER=$!   # the holder IS the fd owner
+for _ in $(seq 200); do [ -e "$TMP/lock-ready" ] && break; sleep 0.05; done
+DREAMTEAM_LOCK_WAIT=1 run_g --check-line >/dev/null; rc=$?
+kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null
+[ "$rc" = 0 ] && [ -z "$(cl)" ] && pass "line: lock held elsewhere → nothing published (rc 0)" || fail "line lock: rc=$rc '$(cl)'"
+run_g --check-line >/dev/null
+[[ "$(cl)" == "CHECK nightly-guarded ok · "* ]] && pass "line: lock free again → published" || fail "line relock: '$(cl)'"
+
+# --check-line's stdout: exactly the line it published; nothing when the lock was held elsewhere
+rec no-work "$RECENT" "" '[]' ""; rm -rf "$TMP/checks"
+out=$(run_g --check-line)
+[ "$(grep -c '^CHECK ' <<<"$out")" = 1 ] && [ "$out" = "$(cl)" ] && pass "--check-line prints exactly the line it published" || fail "--check-line stdout: '$out'"
+rm -f "$TMP/lock-ready"
+# Another publisher replaces the line file WHILE this call waits for the lock: the call must print nothing. Sequenced:
+# the holder takes the lock; the caller starts and signals; only then (0.5 s later, inside the caller's 3 s wait) does
+# the holder replace the file. An implementation that compared the file before and after would print it.
+rm -f "$TMP/lock-ready" "$TMP/caller-started"; rec no-work "$RECENT" "" '[]' ""; rm -rf "$TMP/checks"; mkdir -p "$TMP/checks"
+( exec 8>"$TMP/state/.nightly-line.lock"; flock 8; : > "$TMP/lock-ready"
+  for _ in $(seq 200); do [ -e "$TMP/caller-started" ] && break; sleep 0.05; done; sleep 0.5
+  echo "CHECK nightly-guarded ok · OTHER publisher · next 23:30, owner Sen" > "$TMP/checks/nightly-guarded.line.new"
+  mv -T "$TMP/checks/nightly-guarded.line.new" "$TMP/checks/nightly-guarded.line"; exec sleep 30 ) & HOLDER=$!
+for _ in $(seq 200); do [ -e "$TMP/lock-ready" ] && break; sleep 0.05; done
+out=$( : > "$TMP/caller-started"; DREAMTEAM_LOCK_WAIT=3 run_g --check-line ); kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null
+[ -z "$out" ] && [[ "$(cl)" == *"OTHER publisher"* ]] && pass "--check-line prints nothing when another publisher replaced the file while it waited" || fail "--check-line printed: '$out' line='$(cl)'"
+# a record-write failure is published only under the lock too
+reset; rm -rf "$TMP/checks"; mkqueue jphein/starcharts:0; mkdir -p "$TMP/state/overnight-guard.json/x"; rm -f "$TMP/lock-ready"
+( exec 8>"$TMP/state/.nightly-line.lock"; flock 8; : > "$TMP/lock-ready"; exec sleep 30 ) & HOLDER=$!
+for _ in $(seq 200); do [ -e "$TMP/lock-ready" ] && break; sleep 0.05; done
+DREAMTEAM_LOCK_WAIT=1 FAKE_QUOTA="$Q_OK" run_g >/dev/null; kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null
+[ -z "$(cl)" ] && pass "record-write failure while the lock is held elsewhere → no line (never published around the lock)" || fail "recfail around lock: '$(cl)'"
+rm -rf "$TMP/state/overnight-guard.json"
+# a no-work guard run stays silent on stdout (its line goes only to the file)
+reset; rm -rf "$TMP/checks"; mkqueue jphein/starcharts:0; out=$(FAKE_QUOTA="$Q_OK" run_g)
+[ -z "$out" ] && [ -n "$(cl)" ] && pass "a no-work run prints nothing; its line is in the file" || fail "no-work stdout: '$out'"
+# the guard record's temp file is exclusive: a planted symlink at the old predictable name is never followed
+reset; rm -rf "$TMP/checks"; mkqueue jphein/starcharts:0; echo SENTINEL > "$TMP/gsent"
+ln -s "$TMP/gsent" "$TMP/state/overnight-guard.json.tmp"; ln -s "$TMP/gsent" "$TMP/state/.overnight-guard.json.tmp"
+FAKE_QUOTA="$Q_OK" run_g >/dev/null
+[ "$(cat "$TMP/gsent")" = SENTINEL ] && [ "$(gj .decision)" = no-work ] && pass "guard record: planted symlinks at predictable temp names untouched" || fail "guard temp followed: $(cat "$TMP/gsent")"
+
+# white box: the line comes from ONE read of the record (a replacement mid-read can't mix two runs)
+gl=$(sed -n '/^guard_line() {/,/^}/p' "$G"); nl=$(sed -n '/^nightly_lock() {/,/^}/p' "$G")
+[ "$(grep -c 'cat "$g"' <<<"$gl")" = 1 ] && ! grep -q 'jq[^|]*"\$g"' <<<"$gl" && grep -q '^  nightly_lock ||' <<<"$gl" && grep -q 'flock -w' <<<"$nl" \
+  && pass "guard_line reads the record once (one cat, every jq on the snapshot) under nightly_lock (flock)" || fail "guard_line reads the record more than once, or outside the lock"
+[ "$(grep -c 'check_line "$(check_name nightly-guarded)"' "$G")" = 1 ] && sed -n '/^publish_nightly() {/,/^}/p' "$G" | grep -q 'check_line "$(check_name nightly-guarded)"' \
+  && pass "every nightly publication goes through publish_nightly (one check_line call site)" || fail "a nightly check_line outside publish_nightly"
+[ -z "$(ls "$TMP/state/overnight-runs" 2>/dev/null)" ] && [ ! -s "$TMP/claude.log" ] && pass "--check-line runs nothing (no run dir, no coordinator)" || fail "--check-line ran something"
+
 [ ! -s "$TMP/launch-attempts.txt" ] && pass "no test attempted a real scope/tmux launch" || fail "a test reached the launch: $(head -3 "$TMP/launch-attempts.txt")"
 echo "─────────────────────────────────────────────────────────────────"
 echo "SUMMARY: $PASS passed, $FAIL failed, $((PASS+FAIL)) total"

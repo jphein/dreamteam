@@ -86,10 +86,11 @@ S
 chmod +x "$SC/bin/systemctl"
 ctl(){ # ctl <verb>  (fresh log; XDG_CONFIG_HOME in the temp dir)
   : > "$SC/log"
-  SC_LOG="$SC/log" SC_STATE="$SC/state" XDG_CONFIG_HOME="$SC/cfg" CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$SC/bin:$PATH" \
+  SC_LOG="$SC/log" SC_STATE="$SC/state" XDG_CONFIG_HOME="$SC/cfg" CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$SC/bin:$PATH" DREAMTEAM_CHECKS_DIR="$SC/checks" DREAMTEAM_CHECK_HOST="${DREAMTEAM_CHECK_HOST:-familiar}" \
     bash "$CTL" "$@" > "$SC/out" 2>&1
 }
-reset_sc(){ rm -rf "$SC/state" "$SC/cfg"; mkdir -p "$SC/state" "$SC/cfg/systemd/user"; }
+reset_sc(){ rm -rf "$SC/state" "$SC/cfg" "$SC/checks"; mkdir -p "$SC/state" "$SC/cfg/systemd/user"; }
+pl(){ cat "$SC/checks/dreamteam-nightly-pilot.line" 2>/dev/null; }
 UD="$SC/cfg/systemd/user"
 
 # a) live symlink, enabled → disabled --now, link removed
@@ -110,11 +111,20 @@ ctl retire-pilot
 grep -q -- "--user disable --now dreamteam-nightly.timer" "$SC/log" \
   && pass "retire-pilot: enabled unit with no user-dir file is disabled" || fail "retire-pilot no-file: $(tr '\n' ';' < "$SC/log")"
 
+[[ "$(pl)" == "CHECK dreamteam-nightly-pilot ok · retired $(date +%F): dreamteam-nightly.timer and .service disabled and unlinked on "*" · no further runs"*", owner Sen" ]] \
+  && pass "retire-pilot: writes the 'retired <date>' CHECK line" || fail "pilot line: '$(pl)'"
+
+reset_sc; echo enabled > "$SC/state/dreamteam-nightly.timer"
+DREAMTEAM_CHECK_HOST=katana ctl retire-pilot
+[ -f "$SC/checks/dreamteam-nightly-pilot-katana.line" ] && [ ! -e "$SC/checks/dreamteam-nightly-pilot.line" ] \
+  && pass "retire-pilot on katana writes dreamteam-nightly-pilot-katana.line (host-suffixed like every line)" || fail "pilot katana name: $(ls "$SC/checks" 2>/dev/null)"
+
 # d) already absent → no disable call, says so, exit 0
 reset_sc
 ctl retire-pilot; rc=$?
 ! grep -q "disable" "$SC/log" && grep -q "pilot absent" "$SC/out" && [ "$rc" -eq 0 ] \
   && pass "retire-pilot: absent pilot → no disable, 'pilot absent', exit 0" || fail "retire-pilot absent: rc=$rc $(cat "$SC/out")"
+[ -z "$(pl)" ] && pass "retire-pilot: an absent pilot invents no retirement line" || fail "absent wrote a line: '$(pl)'"
 
 # e) BOTH pilot units enabled + an unrelated enabled unit with its own link: exactly the pilot calls, nothing else
 reset_sc; echo enabled > "$SC/state/dreamteam-nightly.timer"; echo enabled > "$SC/state/dreamteam-nightly.service"

@@ -22,14 +22,14 @@
 # Always exits 0 (a cron-invoked reporter must never fail the session).
 set -uo pipefail
 ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-STATE="${DREAMTEAM_STATE:-$ROOT/state}"
-mkdir -p "$STATE"
+STATE="${DREAMTEAM_STATE:-$ROOT/state}"   # created only after the --check-only exit below (it changes nothing else)
 
-REPO="$PWD"; QUIET=0
+REPO="$PWD"; QUIET=0; CHECK_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo)  REPO="${2:-$PWD}"; shift 2;;
     --quiet) QUIET=1; shift;;
+    --check-only) CHECK_ONLY=1; shift;;   # write today's CHECK line from the briefing already on disk; change nothing else
     -h|--help) sed -n '2,20p' "$0"; exit 0;;
     *) shift;;
   esac
@@ -40,6 +40,54 @@ NOW=$(date +%s)
 CUTOFF=$(date -d '12 hours ago' +%FT%T 2>/dev/null || echo "")   # GNU date (this host)
 SINCE_DATE=$(date -d '12 hours ago' +%F 2>/dev/null || date +%F)
 BRIEF="$STATE/briefing-$DATE.md"
+
+# ── the CHECK line (docs/CHECKS.md rows dreamteam-briefing[-<host>]; scripts/lib/check-line.sh) ──────────────
+# ok: today's briefing exists (written by THIS run, unless --check-only) and carries the nightly sweep line.
+# warn: it exists but has no nightly sweep line (no guard record in the last 12 h) or reports an OOM kill.
+# fail: no briefing for today (or, after a run, one this run did not write). Runs on every exit (trap).
+. "$ROOT/scripts/lib/check-line.sh"
+BRIEF_OK=0
+write_brief() {  # stdin → $BRIEF atomically (unique same-dir temp, mv -T); rc 0 only when it landed whole.
+  # Called as the LAST stage of a pipeline (a subshell): the caller sets BRIEF_OK from ${PIPESTATUS[1]}.
+  local tmp
+  tmp=$(mktemp "$STATE/.briefing-$DATE.md.XXXXXX" 2>/dev/null) || { cat >/dev/null; return 1; }
+  if cat > "$tmp" && mv -T -f "$tmp" "$BRIEF" 2>/dev/null; then return 0; fi
+  rm -f "$tmp"; return 1
+}
+# The nightly line's post-cap reconciliation: the guard and the runner write nightly-guarded.line, but a runner that
+# dies never writes again, so its "running until 06:30" ok would stand. The 07:03 briefing is the first timer after
+# the cap: on the host whose guarded timer is enabled it re-reads the record (overnight-guarded.sh --check-line),
+# which turns a dead night into fail. DREAMTEAM_RECONCILE_NIGHTLY=1 forces it, 0 skips it (tests).
+reconcile_nightly() {
+  # no existence gate: a MISSING record on the timer's host must turn the line to fail, not leave a stale ok
+  case "${DREAMTEAM_RECONCILE_NIGHTLY:-auto}" in
+    0) return 0 ;;
+    1) ;;
+    *) systemctl --user is-enabled --quiet dreamteam-nightly-guarded.timer 2>/dev/null || return 0 ;;
+  esac
+  bash "$ROOT/scripts/overnight-guarded.sh" --check-line >/dev/null 2>&1 || true
+}
+brief_check() {
+  local name st fact n at nightly
+  [ "$CHECK_ONLY" -eq 1 ] || reconcile_nightly   # --check-only changes nothing but its own line
+  name="${DREAMTEAM_CHECK_NAME:-$(check_name dreamteam-briefing)}"
+  if [ ! -f "$BRIEF" ]; then
+    st=fail; fact="no $(basename "$BRIEF") (today's briefing was not written)"
+  elif [ "$CHECK_ONLY" -eq 0 ] && [ "$BRIEF_OK" -ne 1 ]; then
+    st=fail; fact="this run did not write $(basename "$BRIEF") (the one on disk is older)"
+  else
+    n=$(grep -c . "$BRIEF" 2>/dev/null || echo 0); at=$(date -r "$BRIEF" +%H:%M 2>/dev/null || echo "?")
+    nightly=$(grep -m1 '^- \*\*Nightly sweep\*\*: ' "$BRIEF" 2>/dev/null | sed 's/^- \*\*Nightly sweep\*\*: //' | cut -c1-90)
+    fact="$(basename "$BRIEF") written $at, $n lines, nightly sweep: ${nightly:-no record in the last 12 h}"
+    if [ -z "$nightly" ] || grep -q -E 'OOM kill overnight|OOM unmeasured' "$BRIEF" 2>/dev/null; then st=warn; else st=ok; fi
+    grep -q 'OOM kill overnight' "$BRIEF" 2>/dev/null && fact="$fact, OOM kill overnight"
+    grep -q 'OOM unmeasured' "$BRIEF" 2>/dev/null && fact="$fact, OOM unmeasured (journal unreadable)"
+  fi
+  check_line "$name" "$st" "$fact" "next 07:03, owner Sen" >/dev/null || true
+}
+if [ "$CHECK_ONLY" -eq 1 ]; then brief_check; exit 0; fi
+mkdir -p "$STATE"
+trap brief_check EXIT
 
 # ── contract shims (silent no-op until the real scripts land) ──────────────
 speak() {   # lucid: scripts/speak.sh "<text>" --voice davis
@@ -97,12 +145,24 @@ if [ -f "$GREC" ]; then
   fi
 fi
 
+# last systemd-oomd kill overnight (same source as incident-report.sh). Measured BEFORE the quiet-night exit below, so
+# an OOM night with no other activity still says so (and its CHECK line warns).
+# A journal that cannot be read is NOT "no OOM" (unknown is never ok): it is said, and the CHECK line warns.
+# journalctl can also exit 0 while hiding system messages from a user without journal access (its hint goes to
+# stderr): that is unmeasured too. One call, stderr merged; the hint never matches the kill pattern.
+OOMJ=$(journalctl -u systemd-oomd --since '12 hours ago' --no-pager 2>&1); OOMJ_RC=$?
+grep -q -i 'not seeing messages from other users and the system' <<<"$OOMJ" && OOMJ_RC=${OOMJ_RC/#0/77}
+OOMD=$(printf '%s\n' "$OOMJ" | grep -E 'Killed .* due to' | tail -1 || true)
+if [ "$OOMJ_RC" -ne 0 ]; then OOMD=""; OOMD_NOTE="? OOM unmeasured (journalctl exit $OOMJ_RC$( [ "$OOMJ_RC" = 77 ] && echo ', no system journal access'))"
+elif [ -n "$OOMD" ]; then OOMD_NOTE="⚠ OOM kill overnight: ${OOMD##*]: }"; else OOMD_NOTE="✓ no OOM kills overnight"; fi
+
 # ── nothing ran overnight → one-liner, no voice, exit 0 ──────────────────────
 if [ "$HANDOFF_FRESH" -eq 0 ] && [ "$EV_COUNT" -eq 0 ] && [ "$NIGHTLY_DEC" != "started" ]; then
   { echo "# Dreamteam briefing — $DATE"; echo ""
     echo "_No overnight dreamteam activity (no fresh HANDOFF-auto, no agent events in the last 12h)._"
+    echo "- **Memory**: ${OOMD_NOTE}"
     [ -n "$NIGHTLY" ] && echo "- **Nightly sweep**: $NIGHTLY"
-  } > "$BRIEF"
+  } | write_brief; [ "${PIPESTATUS[1]}" -eq 0 ] && BRIEF_OK=1
   echo "no overnight activity — briefing: $BRIEF"
   exit 0
 fi
@@ -132,10 +192,6 @@ if [ -f "$ENVF" ]; then
   fi
 fi
 
-# 5. last systemd-oomd kill overnight (same source as incident-report.sh)
-OOMD=$(journalctl -u systemd-oomd --since '12 hours ago' --no-pager 2>/dev/null \
-       | grep -E 'Killed .* due to' | tail -1 || true)
-if [ -n "$OOMD" ]; then OOMD_NOTE="⚠ OOM kill overnight: ${OOMD##*]: }"; else OOMD_NOTE="✓ no OOM kills overnight"; fi
 
 # ── compose: markdown record ─────────────────────────────────────────────────
 {
@@ -148,10 +204,12 @@ if [ -n "$OOMD" ]; then OOMD_NOTE="⚠ OOM kill overnight: ${OOMD##*]: }"; else 
   echo "- **Memory**: ${OOMD_NOTE}"
   [ -n "$NIGHTLY" ] && echo "- **Nightly sweep**: $NIGHTLY"
   if [ -n "$OPEN_TITLES" ]; then echo ""; echo "## Open PRs"; printf '%s\n' "$OPEN_TITLES"; fi
-} > "$BRIEF"
+} | write_brief; [ "${PIPESTATUS[1]}" -eq 0 ] && BRIEF_OK=1
 
 # ── compose: spoken summary (≤4 sentences, davis) ────────────────────────────
-MEM_SENTENCE=$([ -n "$OOMD" ] && echo "Heads up — there was an OOM kill overnight" || echo "No memory incidents overnight")
+if [ "$OOMJ_RC" -ne 0 ]; then MEM_SENTENCE="Memory incidents could not be measured — the journal was unreadable"
+elif [ -n "$OOMD" ]; then MEM_SENTENCE="Heads up — there was an OOM kill overnight"
+else MEM_SENTENCE="No memory incidents overnight"; fi
 SPOKEN="Good morning. Overnight the dream team merged ${MERGED_N} and left ${OPEN_N} pull requests open, across ${EV_COUNT} agent events. ${MEM_SENTENCE}. The full briefing is saved for ${DATE}."
 
 echo "briefing written: $BRIEF"
