@@ -64,7 +64,7 @@ bash tests/run.sh          # runs every suite, exits non-zero on any failure
   Deny controls: bash/ssh/sh owners, a pipe into sh, a script written then run (`bash f`, `./f`, `. f`),
   read/`$( )`/variables into eval or `bash -c`, `source <( )`, an unquoted body's `$( )`, a group piped to
   bash, `done <<EOF`, a python body using os.system, `gh alias set --shell`, and python3 failing (the
-  block stays). Each rule has a red perturbation (listed in PR #191's body).
+  block stays). Each rule has a red perturbation (listed in PR #215's body).
 - `tests/test-pr-tools.sh` — `pr-gate.sh` / `pr-merge.sh` / `cascade.sh` against a stubbed `gh`
   (fixture JSON piped through the real `jq` with the caller's real `--jq` filter, mutating calls
   logged so the tests assert what the tools DID). Pins the two traps: **a blank conclusion is a
