@@ -212,7 +212,7 @@ deny "a python body that writes a script, then a glob runs it" $'python3 - <<\'P
 deny "a git alias defined from a heredoc, then run" $'git config alias.wait-checks "$(cat <<\'EOF\'\n!gh pr checks 458 --repo o/r --watch\nEOF\n)"\ngit wait-checks'
 deny "a git -c alias from a heredoc" $'git -c alias.w="$(cat <<\'EOF\'\n!while :; do gh pr checks 1; sleep 30; done\nEOF\n)" w'
 deny "gh config set pager from a heredoc" $'gh config set pager "$(cat <<\'EOF\'\nsh -c \'while :; do gh pr checks 1; sleep 30; done\'\nEOF\n)"\ngh pr view 1'
-allow "a python edit followed by a test run that names no file the body spells" \
+deny "a python edit followed by a test run: the edit may have written what runs (kept)" \
   $'python3 - <<\'PY\'\np = "workflows/overnight.js"\ns = open(p).read()\ns = s.replace("until gh pr checks 1; do sleep 30; done", "")\nopen(p, "w").write(s)\nPY\nbash tests/test-overnight-workflow.sh'
 # xreview r3
 deny "a python body that polls through a third-party runner (invoke.run)" $'python3 - <<\'PY\'\nfrom invoke import run\nrun("gh pr checks 458 --repo o/r --watch")\nPY'
@@ -220,6 +220,17 @@ deny "a python body that imports a runner by plain import (import sh)" $'python3
 deny "a python body that writes a script with a two-letter name, then bash runs it" $'python3 - <<\'PY\'\nfrom pathlib import Path\nPath("ci").write_text("gh pr checks 458 --repo o/r --watch\\n")\nPY\nbash ci'
 allow "a python edit importing only stdlib text modules (json, re, pathlib, textwrap)" \
   $'python3 - <<\'PY\'\nimport json, re, textwrap\nfrom pathlib import Path\np = Path("notes.md")\np.write_text(textwrap.dedent("""\n    old: until gh pr checks 1; do sleep 30; done\n"""))\nPY\ngit add notes.md'
+# xreview r4
+deny "a heredoc captured by \$( ) in command position (its words run as a command)" $'$(cat <<\'EOF\'\ngh pr checks 458 --repo o/r --watch\nEOF\n)'
+deny "a python body that builds the script name (with_suffix), then bash runs it" $'python3 - <<\'PY\'\nfrom pathlib import Path\nscript = Path("ci-wait").with_suffix(".sh")\nscript.write_text("gh pr checks 458 --repo o/r --watch\\n")\nPY\nbash ci-wait.sh'
+deny "an import after a semicolon (import time; from invoke import run)" $'python3 - <<\'PY\'\nimport time; from invoke import run\nwhile True:\n    run("gh pr checks 458 --repo o/r")\n    time.sleep(30)\nPY'
+deny "an import inside a function body" $'python3 - <<\'PY\'\nimport time\ndef go():\n    from invoke import run\n    run("gh pr checks 458 --repo o/r")\nwhile True:\n    go(); time.sleep(30)\nPY'
+deny "a python body that does not parse (kept: its imports cannot be read)" $'python3 - <<\'PY\'\nimport json\nwhile True:\n    print "gh pr checks 1"\n    sleep 30\nPY'
+allow "a python edit followed only by git add / git commit (sinks)" \
+  $'python3 - <<\'PY\'\np = "workflows/overnight.js"\ns = open(p).read()\nopen(p, "w").write(s.replace("until gh pr checks 1; do sleep 30; done", ""))\nPY\ngit add workflows/overnight.js && git commit -q -m "drop loop"'
+allow "a commit message by heredoc, then a test run (git commit writes no file that runs)" \
+  $'git commit -q -F - <<\'EOF\'\nfix: drop the `until gh pr checks 1; do sleep 30; done` loop\nEOF\nbash tests/run.sh'
+deny "a patch by git apply, then any test run (the patch may have written it)" $'git apply <<\'PATCH\'\n--- a/t.sh\n+++ b/t.sh\n@@ -1 +1 @@\n-x\n+while :; do gh pr checks 1; sleep 30; done\nPATCH\nbash tests/run.sh'
 deny "an unterminated heredoc (its delimiter may be misread): kept, never cut" $'cat <<\'EOF\'\n'"$POLLBODY"
 deny "a python program that writes a script with Path.write_text, then bash runs it" $'python3 - <<\'PY\'\nfrom pathlib import Path\nPath("poll.sh").write_text("while true; do gh pr checks 458 --repo o/r; sleep 30; done\\n")\nPY\nbash poll.sh'
 deny "a patch applied by git apply that creates a script, then bash runs it" $'git apply <<\'PATCH\'\ndiff --git a/poll.sh b/poll.sh\nnew file mode 100644\n--- /dev/null\n+++ b/poll.sh\n@@ -0,0 +1 @@\n+while true; do gh pr checks 458 --repo o/r; sleep 30; done\nPATCH\nbash poll.sh'

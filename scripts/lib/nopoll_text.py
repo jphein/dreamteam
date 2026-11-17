@@ -23,9 +23,11 @@ Threat model: the guard is a speed bump against an agent NATURALLY writing a CI 
 already evadable on purpose (`gh  pr checks`). This reader must not make a natural poll slip, and is not meant
 to stop deliberate evasion. Pure: no subprocess, no file reads. Usage: stdin = raw command; stdout = text.
 """
+import ast
 import fnmatch
 import re
 import sys
+import warnings
 
 # programs that treat stdin and arguments as data and never run them (gh/python have conditions below)
 SINKS = {"cat", "tee", "gh", "git", "jq", "wc", "head", "tail", "base64", "grep", "diff", "cmp",
@@ -45,7 +47,39 @@ PY_DATA_MODULES = {"json", "sys", "pathlib", "re", "os", "time", "datetime", "co
                    "functools", "fnmatch", "unicodedata", "tomllib", "dataclasses", "typing", "__future__", "copy",
                    "pprint", "enum", "decimal", "statistics", "uuid", "zoneinfo", "calendar", "struct", "bisect",
                    "heapq", "operator", "shlex", "random", "secrets", "binascii", "codecs", "locale", "gzip", "zlib"}
-PY_IMPORT = re.compile(r"(?m)^[ \t]*(?:import[ \t]+([\w., \t]+)|from[ \t]+(\.*[\w.]*)[ \t]+import)")
+# git subcommands that read a heredoc as a MESSAGE and write no working-tree file
+GIT_MESSAGE = {"commit", "tag", "notes", "hash-object", "interpret-trailers", "check-ignore", "check-attr", "mktag",
+               "stripspace", "var", "log", "show", "diff", "status", "rev-parse", "ls-files", "grep"}
+
+
+def py_imports_ok(program: str) -> bool:
+    """Every module the program imports (anywhere: after ;, in a block) is on PY_DATA_MODULES; parse failure = no."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")           # a SyntaxWarning in an edit script's text is not ours
+            tree = ast.parse(program)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            mods = [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                return False                          # a relative import: a project module
+            mods = [node.module or ""]
+        else:
+            continue
+        if any(m.split(".")[0] not in PY_DATA_MODULES for m in mods):
+            return False
+    return True
+
+
+def git_sub(nd) -> str:
+    ws = [unq(w) for w in nd.words]
+    k = 0
+    while k < len(ws) and ws[k].startswith("-"):
+        k += 2 if ws[k] in ("-C", "--git-dir", "--work-tree", "--namespace") else 1
+    return ws[k] if k < len(ws) else ""
 OPENERS = {"{": "}", "if": "fi", "while": "done", "until": "done", "for": "done", "select": "done"}
 CLOSERS = {"}", "fi", "done"}
 SKIP = {"!", "time", "then", "else", "elif", "do", "in"}
@@ -78,7 +112,7 @@ class Node:
 class Frame:
     """Code read at one level: the top, or the inside of $( ) / <( )."""
     def __init__(self, kind, container=None, dest=None):
-        self.kind, self.container, self.dest = kind, container, dest    # dest: arg | exec | ("var", name)
+        self.kind, self.container, self.dest = kind, container, dest    # dest: arg | file | ("var", name)
         self.opens = []                                                  # open groups / compounds here
         self.node = None
         self.pipe_from = None
@@ -118,9 +152,7 @@ def scan(s: str):
         m = ASSIGN.match("".join(word))
         if m and redir_next is None and (nd.first is None or nd.first in DECL):
             return ("var", m.group(1))
-        if nd.first is None and redir_next is None:
-            return "exec"                          # $(...) in command position (or a for header): run or unknown
-        return "arg"
+        return "arg"                               # in command position the container's word is the $( ): no sink
 
     def push(kind, dest):
         nonlocal word, redir_next
@@ -457,15 +489,8 @@ def scan(s: str):
     return nodes, heredocs
 
 
-def mentions(word: str, name, body: str = "") -> bool:
+def mentions(word: str, name) -> bool:
     kind, val = name
-    if kind == "body":
-        # a later word whose file name the body spells (a python program or a patch writes that file), or a
-        # word whose path the reader cannot resolve: a variable, a substitution, a glob, ~ (xreview r2)
-        if "$" in word or "`" in word or any(ch in word for ch in "*?[~"):
-            return True
-        base = unq(word).rsplit("/", 1)[-1]
-        return bool(base) and not base.startswith("-") and base in body      # no length floor (xreview r3)
     if kind == "var":
         return ("$" + val) in word or ("${" + val) in word
     w = unq(word)
@@ -490,12 +515,7 @@ def is_sink(nd, program=None) -> bool:
             return False
         if program is None or SPAWN.search(program):
             return False
-        for m in PY_IMPORT.finditer(program):
-            for mod in (m.group(1) or m.group(2) or "").split(","):
-                top = mod.strip().split()[0].split(".")[0] if mod.strip() else ""
-                if top not in PY_DATA_MODULES:
-                    return False                      # an unknown (or relative) module may run anything
-        return True
+        return py_imports_ok(program)                 # an unknown module may run anything (xreview r3, r4)
     if first == "gh" and any(unq(w) in ("alias", "extension", "ext", "config") for w in nd.words):
         return False                                  # gh alias --shell, gh config set pager/editor: run later
     if first == "git" and any(unq(w) in ("config", "-c", "--config-env") or unq(w).startswith(("-c", "--config"))
@@ -532,8 +552,11 @@ def runs(nd, nodes, body, seen, program=None) -> bool:
             return True
         names.append(("file", base))
     # file and variable writes that no redirection shows (xreview r1)
-    if nd.first == "git" or (nd.first and PY.fullmatch(nd.first)):
-        names.append(("body", None))                   # git apply / a python program: files named in the body
+    if (nd.first == "git" and git_sub(nd) not in GIT_MESSAGE) or (nd.first and PY.fullmatch(nd.first)):
+        # a python program or a patch can write any file under a name the text cannot resolve
+        # (Path("x").with_suffix(".sh")), so any later command that is not a sink keeps the body (xreview r4)
+        if any(later.idx > nd.idx and not is_sink(later) for later in nodes):
+            return True
     if nd.first is None or nd.first in DECL:
         names += [("var", a) for a in nd.assigns]      # x="$tainted"; export y="$tainted"
     if nd.first == "printf":
@@ -560,8 +583,6 @@ def runs(nd, nodes, body, seen, program=None) -> bool:
         return True                                    # into a group's stdout, which we do not follow
     elif nd.frame.kind == "sub":
         d = nd.frame.dest
-        if d == "exec":
-            return True
         if isinstance(d, tuple):
             names.append(d)
             if nd.frame.container.first is not None and runs(nd.frame.container, nodes, body, seen):
@@ -576,7 +597,7 @@ def runs(nd, nodes, body, seen, program=None) -> bool:
         for later in nodes:
             if later.idx <= nd.idx or later is nd:
                 continue
-            if any(mentions(w, name, body) for w in later.mentions + ([later.first] if later.first else [])):
+            if any(mentions(w, name) for w in later.mentions + ([later.first] if later.first else [])):
                 if runs(later, nodes, body, seen, program=None):
                     return True
     return False
