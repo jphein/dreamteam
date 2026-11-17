@@ -74,6 +74,38 @@ def py_imports_ok(program: str) -> bool:
     return True
 
 
+# git subcommands measured (git 2.53, 2026-11-17) to run no hook and write no index: a writer body before them
+# stays data. status and add ran post-index-change; commit, push, merge, checkout ... run hooks by design.
+GIT_NO_HOOK = {"diff", "log", "show", "rev-parse", "ls-files", "grep"}
+
+
+def getopts(words, with_arg: str):
+    """bash-builtin style option parse: ([(flag, arg)], operands). Clustered flags; an argument attached or next."""
+    opts, ops, k = [], [], 0
+    while k < len(words):
+        w = words[k]
+        if w == "--":
+            ops += words[k + 1:]
+            break
+        if w.startswith("-") and len(w) > 1 and not ops:
+            j = 1
+            while j < len(w):
+                c = w[j]
+                if c in with_arg:
+                    arg = w[j + 1:]
+                    if not arg and k + 1 < len(words):
+                        k += 1
+                        arg = words[k]
+                    opts.append((c, arg))
+                    break
+                opts.append((c, None))
+                j += 1
+        else:
+            ops.append(w)
+        k += 1
+    return opts, ops
+
+
 def git_sub(nd) -> str:
     ws = [unq(w) for w in nd.words]
     k = 0
@@ -555,7 +587,10 @@ def runs(nd, nodes, body, seen, program=None) -> bool:
     if (nd.first == "git" and git_sub(nd) not in GIT_MESSAGE) or (nd.first and PY.fullmatch(nd.first)):
         # a python program or a patch can write any file under a name the text cannot resolve
         # (Path("x").with_suffix(".sh")), so any later command that is not a sink keeps the body (xreview r4)
-        if any(later.idx > nd.idx and not is_sink(later) for later in nodes):
+        # a later git or gh may run a hook the body wrote (git push -> pre-push; gh pr create pushes) (xreview r5)
+        if any(later.idx > nd.idx and (not is_sink(later) or later.first == "gh" or
+                                       (later.first == "git" and git_sub(later) not in GIT_NO_HOOK))
+               for later in nodes):
             return True
     if nd.first is None or nd.first in DECL:
         names += [("var", a) for a in nd.assigns]      # x="$tainted"; export y="$tainted"
@@ -567,14 +602,17 @@ def runs(nd, nodes, body, seen, program=None) -> bool:
             elif w.startswith("-v") and len(w) > 2:
                 names.append(("var", w[2:]))          # printf -vNAME (bash's getopt takes the attached form)
     if nd.first in ("read", "mapfile", "readarray"):
-        for w in nd.words:
-            b = unq(w)
-            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", b):
-                names.append(("var", b))
-        if nd.first != "read" and not any(re.fullmatch(r"[A-Za-z_]\w*", unq(w)) for w in nd.words):
-            names.append(("var", "MAPFILE"))
-        if nd.first == "read" and not any(re.fullmatch(r"[A-Za-z_]\w*", unq(w)) for w in nd.words):
-            names.append(("var", "REPLY"))
+        # option operands are not destinations: read -p PROMPT, -d DELIM; read -a NAME is one (xreview r5)
+        ws = [unq(w) for w in nd.words]
+        if nd.first == "read":
+            opts, ops = getopts(ws, "adinNptu")
+            dests = ops + [a for f, a in opts if f == "a" and a]
+            names += [("var", d) for d in dests] or [("var", "REPLY")]
+        else:
+            opts, ops = getopts(ws, "dnOsuCc")
+            if any(f == "C" for f, _ in opts):
+                return True                            # mapfile -C CALLBACK runs each chunk through the callback
+            names.append(("var", ops[0] if ops else "MAPFILE"))
     # stdout
     if nd.pipe_to is not None:
         if runs(nd.pipe_to, nodes, body, seen, program=body):

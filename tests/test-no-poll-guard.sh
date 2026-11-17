@@ -219,18 +219,30 @@ deny "a python body that polls through a third-party runner (invoke.run)" $'pyth
 deny "a python body that imports a runner by plain import (import sh)" $'python3 - <<\'PY\'\nimport sh\nsh.bash("-c", "gh pr checks 458 --repo o/r --watch")\nPY'
 deny "a python body that writes a script with a two-letter name, then bash runs it" $'python3 - <<\'PY\'\nfrom pathlib import Path\nPath("ci").write_text("gh pr checks 458 --repo o/r --watch\\n")\nPY\nbash ci'
 allow "a python edit importing only stdlib text modules (json, re, pathlib, textwrap)" \
-  $'python3 - <<\'PY\'\nimport json, re, textwrap\nfrom pathlib import Path\np = Path("notes.md")\np.write_text(textwrap.dedent("""\n    old: until gh pr checks 1; do sleep 30; done\n"""))\nPY\ngit add notes.md'
+  $'python3 - <<\'PY\'\nimport json, re, textwrap\nfrom pathlib import Path\np = Path("notes.md")\np.write_text(textwrap.dedent("""\n    old: until gh pr checks 1; do sleep 30; done\n"""))\nPY\ngit diff --stat notes.md'
 # xreview r4
 deny "a heredoc captured by \$( ) in command position (its words run as a command)" $'$(cat <<\'EOF\'\ngh pr checks 458 --repo o/r --watch\nEOF\n)'
 deny "a python body that builds the script name (with_suffix), then bash runs it" $'python3 - <<\'PY\'\nfrom pathlib import Path\nscript = Path("ci-wait").with_suffix(".sh")\nscript.write_text("gh pr checks 458 --repo o/r --watch\\n")\nPY\nbash ci-wait.sh'
 deny "an import after a semicolon (import time; from invoke import run)" $'python3 - <<\'PY\'\nimport time; from invoke import run\nwhile True:\n    run("gh pr checks 458 --repo o/r")\n    time.sleep(30)\nPY'
 deny "an import inside a function body" $'python3 - <<\'PY\'\nimport time\ndef go():\n    from invoke import run\n    run("gh pr checks 458 --repo o/r")\nwhile True:\n    go(); time.sleep(30)\nPY'
 deny "a python body that does not parse (kept: its imports cannot be read)" $'python3 - <<\'PY\'\nimport json\nwhile True:\n    print "gh pr checks 1"\n    sleep 30\nPY'
-allow "a python edit followed only by git add / git commit (sinks)" \
+deny "a python edit followed by git add / git commit (both run hooks the edit may have written)" \
   $'python3 - <<\'PY\'\np = "workflows/overnight.js"\ns = open(p).read()\nopen(p, "w").write(s.replace("until gh pr checks 1; do sleep 30; done", ""))\nPY\ngit add workflows/overnight.js && git commit -q -m "drop loop"'
 allow "a commit message by heredoc, then a test run (git commit writes no file that runs)" \
   $'git commit -q -F - <<\'EOF\'\nfix: drop the `until gh pr checks 1; do sleep 30; done` loop\nEOF\nbash tests/run.sh'
 deny "a patch by git apply, then any test run (the patch may have written it)" $'git apply <<\'PATCH\'\n--- a/t.sh\n+++ b/t.sh\n@@ -1 +1 @@\n-x\n+while :; do gh pr checks 1; sleep 30; done\nPATCH\nbash tests/run.sh'
+# xreview r5
+deny "a python edit followed by git add (measured: add runs post-index-change)" $'python3 - <<\'PY\'\nopen(".git/hooks/post-index-change", "w").write("gh pr checks 1 --watch\\n")\nPY\ngit add notes.md'
+deny "a python body that installs a pre-push hook, then git push runs it" $'python3 - <<\'PY\'\nfrom pathlib import Path\nhook = Path(".git/hooks/pre-push")\nhook.write_text("#!/bin/sh\\ngh pr checks 458 --repo o/r --watch\\n")\nhook.chmod(0o755)\nPY\ngit push'
+deny "a python body that writes, then gh pr create (it pushes, and so runs hooks)" $'python3 - <<\'PY\'\nopen(".git/hooks/pre-push", "w").write("gh pr checks 1 --watch\\n")\nPY\ngh pr create --fill'
+allow "a python edit followed by git diff (measured: diff runs no hook and writes no index)" \
+  $'python3 - <<\'PY\'\np = "workflows/overnight.js"\ns = open(p).read()\nopen(p, "w").write(s.replace("until gh pr checks 1; do sleep 30; done", ""))\nPY\ngit diff --stat && git log --oneline -1'
+deny "read -p PROMPT with no name: the body lands in REPLY, which bash -c runs" $'read -r -p CI <<\'EOF\'\ngh pr checks 458 --repo o/r --watch\nEOF\nbash -c "$REPLY"'
+deny "read -a NAME: the array is the destination" $'read -r -a parts <<\'EOF\'\ngh pr checks 458 --repo o/r --watch\nEOF\n"${parts[@]}"'
+deny "read -rpCI line (attached prompt): the name after it is the destination" $'read -rpCI line <<\'EOF\'\ngh pr checks 458 --repo o/r --watch\nEOF\neval "$line"'
+deny "mapfile -C CALLBACK runs each line through the callback" $'mapfile -C eval -c 1 x <<\'EOF\'\nwhile :; do gh pr checks 1; sleep 30; done\nEOF'
+deny "mapfile -t -O 0 with no name: MAPFILE" $'mapfile -t -O 0 <<\'EOF\'\n'"$POLLBODY"$'\nEOF\neval "${MAPFILE[*]}"'
+allow "read into a named variable that only gh receives" $'read -r -d \'\' -p x body <<\'EOF\'\nuntil gh pr checks 1; do sleep 30; done\nEOF\ngh api repos/o/r/issues/1/comments -f body="$body"'
 deny "an unterminated heredoc (its delimiter may be misread): kept, never cut" $'cat <<\'EOF\'\n'"$POLLBODY"
 deny "a python program that writes a script with Path.write_text, then bash runs it" $'python3 - <<\'PY\'\nfrom pathlib import Path\nPath("poll.sh").write_text("while true; do gh pr checks 458 --repo o/r; sleep 30; done\\n")\nPY\nbash poll.sh'
 deny "a patch applied by git apply that creates a script, then bash runs it" $'git apply <<\'PATCH\'\ndiff --git a/poll.sh b/poll.sh\nnew file mode 100644\n--- /dev/null\n+++ b/poll.sh\n@@ -0,0 +1 @@\n+while true; do gh pr checks 458 --repo o/r; sleep 30; done\nPATCH\nbash poll.sh'
