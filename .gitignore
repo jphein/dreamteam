@@ -10,3 +10,5 @@ state/*
 
 # Python bytecode (scripts/lib/*.py is imported from the source tree)
 __pycache__/
+scripts/quota_resume_state.*.json
+scripts/quota_resume.log
