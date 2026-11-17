@@ -1,0 +1,13 @@
+[Unit]
+Description=dreamteam nightly WATCH — every 5 min from 23:35 to 07:00 (a dead sweep is reported within 10 min)
+Documentation=https://github.com/jphein/dreamteam/blob/main/docs/CHECKS.md
+
+[Timer]
+OnCalendar=*-*-* 23:35/5:00
+OnCalendar=*-*-* 00..06:00/5:00
+OnCalendar=*-*-* 07:00:00
+Persistent=false
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
