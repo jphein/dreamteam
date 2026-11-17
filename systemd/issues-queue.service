@@ -5,3 +5,5 @@ Type=oneshot
 WorkingDirectory=%h/Projects/dreamteam
 ExecStart=/usr/bin/python3 -I %h/Projects/dreamteam/scripts/issues-queue.py
 Nice=10
+# a stuck run must not hold every later activation (#193); the script's own budget (420 s) ends first
+TimeoutStartSec=10min
