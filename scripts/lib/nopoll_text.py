@@ -451,7 +451,10 @@ def scan(s: str):
 def mentions(word: str, name, body: str = "") -> bool:
     kind, val = name
     if kind == "body":
-        # a later word whose file name the body spells (a python program or a patch writes that file)
+        # a later word whose file name the body spells (a python program or a patch writes that file), or a
+        # word whose path the reader cannot resolve: a variable, a substitution, a glob, ~ (xreview r2)
+        if "$" in word or "`" in word or any(ch in word for ch in "*?[~"):
+            return True
         base = unq(word).rsplit("/", 1)[-1]
         return len(base) >= 3 and re.search(r"[A-Za-z]", base) is not None and base in body
     if kind == "var":
@@ -477,8 +480,11 @@ def is_sink(nd, program=None) -> bool:
         if any(a not in ("-",) and not re.fullmatch(r"-[IuBEsSOqbdv]+", a) for a in args):
             return False
         return program is not None and not SPAWN.search(program)
-    if first == "gh" and any(unq(w) in ("alias", "extension", "ext") for w in nd.words):
-        return False
+    if first == "gh" and any(unq(w) in ("alias", "extension", "ext", "config") for w in nd.words):
+        return False                                  # gh alias --shell, gh config set pager/editor: run later
+    if first == "git" and any(unq(w) in ("config", "-c", "--config-env") or unq(w).startswith(("-c", "--config"))
+                              for w in nd.words):
+        return False                                  # git alias.x = "!cmd", core.pager, ...: run later (xreview r2)
     return first in SINKS
 
 
@@ -516,7 +522,11 @@ def runs(nd, nodes, body, seen, program=None) -> bool:
         names += [("var", a) for a in nd.assigns]      # x="$tainted"; export y="$tainted"
     if nd.first == "printf":
         ws = [unq(w) for w in nd.words]
-        names += [("var", ws[k + 1]) for k, w in enumerate(ws[:-1]) if w == "-v"]
+        for k, w in enumerate(ws):
+            if w == "-v" and k + 1 < len(ws):
+                names.append(("var", ws[k + 1]))
+            elif w.startswith("-v") and len(w) > 2:
+                names.append(("var", w[2:]))          # printf -vNAME (bash's getopt takes the attached form)
     if nd.first in ("read", "mapfile", "readarray"):
         for w in nd.words:
             b = unq(w)

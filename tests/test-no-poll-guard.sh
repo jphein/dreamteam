@@ -205,6 +205,15 @@ deny "code after an ANSI-C-quoted delimiter (<<\$'EOF' ends at EOF, not \$EOF)" 
 deny "an ANSI-C delimiter where the literal \$EOF line also exists further down" $'cat <<$\'EOF\'\nnotes\nEOF\n'"$POLLBODY"$'\n$EOF'
 deny "a script written now for a LATER call to run (no data extension): the body stays judged" $'cat > "$HOME/bin/ci-wait" <<\'EOF\'\n'"$POLLBODY"$'\nEOF'
 allow "a heredoc written to a .md file that nothing runs" $'cat > "$S/notes.md" <<\'EOF\'\n'"$POLLBODY"$'\nEOF'
+# xreview r2
+deny "a body copied by printf -vNAME (attached) into a variable that eval runs" $'read -r -d \'\' a <<\'EOF\'\n'"$POLLBODY"$'\nEOF\nprintf -vb \'%s\' "$a"\neval "$b"'
+deny "a python body that writes to a path from an env var, then bash runs \"\$VAR\"" $'export POLL_SCRIPT="$S/ci-wait.sh"\npython3 - <<\'PY\'\nimport os\nfrom pathlib import Path\nPath(os.environ["POLL_SCRIPT"]).write_text("while true; do gh pr checks 458 --repo o/r; sleep 30; done\\n")\nPY\nbash "$POLL_SCRIPT"'
+deny "a python body that writes a script, then a glob runs it" $'python3 - <<\'PY\'\nopen("ci-wait.sh", "w").write("while true; do gh pr checks 1; sleep 30; done\\n")\nPY\nbash ./ci-*.sh'
+deny "a git alias defined from a heredoc, then run" $'git config alias.wait-checks "$(cat <<\'EOF\'\n!gh pr checks 458 --repo o/r --watch\nEOF\n)"\ngit wait-checks'
+deny "a git -c alias from a heredoc" $'git -c alias.w="$(cat <<\'EOF\'\n!while :; do gh pr checks 1; sleep 30; done\nEOF\n)" w'
+deny "gh config set pager from a heredoc" $'gh config set pager "$(cat <<\'EOF\'\nsh -c \'while :; do gh pr checks 1; sleep 30; done\'\nEOF\n)"\ngh pr view 1'
+allow "a python edit followed by a test run that names no file the body spells" \
+  $'python3 - <<\'PY\'\np = "workflows/overnight.js"\ns = open(p).read()\ns = s.replace("until gh pr checks 1; do sleep 30; done", "")\nopen(p, "w").write(s)\nPY\nbash tests/test-overnight-workflow.sh'
 deny "an unterminated heredoc (its delimiter may be misread): kept, never cut" $'cat <<\'EOF\'\n'"$POLLBODY"
 deny "a python program that writes a script with Path.write_text, then bash runs it" $'python3 - <<\'PY\'\nfrom pathlib import Path\nPath("poll.sh").write_text("while true; do gh pr checks 458 --repo o/r; sleep 30; done\\n")\nPY\nbash poll.sh'
 deny "a patch applied by git apply that creates a script, then bash runs it" $'git apply <<\'PATCH\'\ndiff --git a/poll.sh b/poll.sh\nnew file mode 100644\n--- /dev/null\n+++ b/poll.sh\n@@ -0,0 +1 @@\n+while true; do gh pr checks 458 --repo o/r; sleep 30; done\nPATCH\nbash poll.sh'
