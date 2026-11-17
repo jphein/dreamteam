@@ -243,6 +243,12 @@ deny "read -rpCI line (attached prompt): the name after it is the destination" $
 deny "mapfile -C CALLBACK runs each line through the callback" $'mapfile -C eval -c 1 x <<\'EOF\'\nwhile :; do gh pr checks 1; sleep 30; done\nEOF'
 deny "mapfile -t -O 0 with no name: MAPFILE" $'mapfile -t -O 0 <<\'EOF\'\n'"$POLLBODY"$'\nEOF\neval "${MAPFILE[*]}"'
 allow "read into a named variable that only gh receives" $'read -r -d \'\' -p x body <<\'EOF\'\nuntil gh pr checks 1; do sleep 30; done\nEOF\ngh api repos/o/r/issues/1/comments -f body="$body"'
+# xreview r6
+allow "mapfile -t -O 0 lines (the 0 is -O's operand, lines the name) feeding only gh" $'mapfile -t -O 0 lines <<\'EOF\'\nuntil gh pr checks 1; do sleep 30; done\nEOF\ngh api repos/o/r/issues/1/comments -f body="${lines[*]}"'
+deny "read into an array element, then bash -c \"\${commands[*]}\"" $'read -r \'commands[0]\' <<\'EOF\'\ngh pr checks 458 --repo o/r --watch\nEOF\nbash -c "${commands[*]}"'
+deny "read into an array element, then eval \"\${commands[@]}\"" $'read -r \'commands[0]\' <<\'EOF\'\ngh pr checks 458 --repo o/r --watch\nEOF\neval "${commands[@]}"'
+deny "printf -v into an array element, then eval" $'read -r -d \'\' a <<\'EOF\'\n'"$POLLBODY"$'\nEOF\nprintf -v \'c[1]\' \'%s\' "$a"\neval "${c[1]}"'
+deny "mapfile into an array named by a variable (unresolvable destination)" $'mapfile -t "$n" <<\'EOF\'\n'"$POLLBODY"$'\nEOF\neval "${lines[*]}"'
 deny "an unterminated heredoc (its delimiter may be misread): kept, never cut" $'cat <<\'EOF\'\n'"$POLLBODY"
 deny "a python program that writes a script with Path.write_text, then bash runs it" $'python3 - <<\'PY\'\nfrom pathlib import Path\nPath("poll.sh").write_text("while true; do gh pr checks 458 --repo o/r; sleep 30; done\\n")\nPY\nbash poll.sh'
 deny "a patch applied by git apply that creates a script, then bash runs it" $'git apply <<\'PATCH\'\ndiff --git a/poll.sh b/poll.sh\nnew file mode 100644\n--- /dev/null\n+++ b/poll.sh\n@@ -0,0 +1 @@\n+while true; do gh pr checks 458 --repo o/r; sleep 30; done\nPATCH\nbash poll.sh'

@@ -106,6 +106,12 @@ def getopts(words, with_arg: str):
     return opts, ops
 
 
+def dest_var(d: str):
+    """The variable a destination word names: commands[0] -> commands. None when it cannot be resolved ($n)."""
+    m = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)(\[[^\]$`]*\])?", d)
+    return m.group(1) if m else None
+
+
 def git_sub(nd) -> str:
     ws = [unq(w) for w in nd.words]
     k = 0
@@ -594,25 +600,30 @@ def runs(nd, nodes, body, seen, program=None) -> bool:
             return True
     if nd.first is None or nd.first in DECL:
         names += [("var", a) for a in nd.assigns]      # x="$tainted"; export y="$tainted"
+    dests = []
     if nd.first == "printf":
         ws = [unq(w) for w in nd.words]
         for k, w in enumerate(ws):
             if w == "-v" and k + 1 < len(ws):
-                names.append(("var", ws[k + 1]))
+                dests.append(ws[k + 1])
             elif w.startswith("-v") and len(w) > 2:
-                names.append(("var", w[2:]))          # printf -vNAME (bash's getopt takes the attached form)
+                dests.append(w[2:])                    # printf -vNAME (bash's getopt takes the attached form)
     if nd.first in ("read", "mapfile", "readarray"):
         # option operands are not destinations: read -p PROMPT, -d DELIM; read -a NAME is one (xreview r5)
         ws = [unq(w) for w in nd.words]
         if nd.first == "read":
             opts, ops = getopts(ws, "adinNptu")
-            dests = ops + [a for f, a in opts if f == "a" and a]
-            names += [("var", d) for d in dests] or [("var", "REPLY")]
+            dests += ops + [a for f, a in opts if f == "a" and a] or ["REPLY"]
         else:
             opts, ops = getopts(ws, "dnOsuCc")
             if any(f == "C" for f, _ in opts):
                 return True                            # mapfile -C CALLBACK runs each chunk through the callback
-            names.append(("var", ops[0] if ops else "MAPFILE"))
+            dests.append(ops[0] if ops else "MAPFILE")
+    for d in dests:
+        v = dest_var(d)
+        if v is None:
+            return True                                # a destination this reader cannot name (xreview r6)
+        names.append(("var", v))
     # stdout
     if nd.pipe_to is not None:
         if runs(nd.pipe_to, nodes, body, seen, program=body):
