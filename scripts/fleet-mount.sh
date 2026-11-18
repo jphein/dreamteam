@@ -21,6 +21,10 @@
 # - It never installs a package: without mount.nfs4 it stops and names the apt line (apt is a visible, separate step).
 # - It never writes over, stops, disables or removes a unit file it did not write (first line = its own header):
 #   install and uninstall both check the two paths BEFORE any change and stop with exit 3 on a foreign file.
+# - One run at a time (flock in the unit dir). A unit path that was absent is published with a hard link, which
+#   never replaces: a file another administrator creates there mid-run survives and the run stops. Replacing or
+#   removing one of OUR OWN files is check-then-act; another root process editing the same two unit files at the
+#   same moment, outside this script, is outside what it guards against.
 # Seams for the tests: FLEET_MOUNT_ROOT (a fake /), FLEET_MOUNT_SYSTEMCTL and FLEET_MOUNT_ESCAPE (stubs),
 # FLEET_MOUNT_SKIP_ROOT=1.
 # Exit: 0 ok · 1 drift (check) · 2 precondition (not root, no nfs client, bad argument) · 3 a step did not work.
@@ -36,11 +40,11 @@ SC="${FLEET_MOUNT_SYSTEMCTL:-systemctl}"
 # the values go into unit files: one plain token each, nothing a unit parser could read as a second directive
 case "$SRC" in *[!A-Za-z0-9._:/-]*|"") echo "fleet-mount: source has characters outside [A-Za-z0-9._:/-]" >&2; exit 2 ;; esac
 case "$MP" in /*) ;; *) echo "fleet-mount: the mount point must be absolute" >&2; exit 2 ;; esac
-case "$MP" in *[!A-Za-z0-9._/-]*|*/../*|*/..|*//*) echo "fleet-mount: mount point has characters outside [A-Za-z0-9._/-]" >&2; exit 2 ;; esac
-[ "$MP" != / ] || { echo "fleet-mount: the mount point cannot be /" >&2; exit 2; }
+case "$MP" in *[!A-Za-z0-9._/-]*|*/../*|*/..|*//*|*/./*|*/.|*/) echo "fleet-mount: the mount point must be a plain absolute path (no ., .., // or trailing /)" >&2; exit 2 ;; esac
 # The unit NAME must be systemd's own escaping of the path (a hyphen in the path becomes \x2d): never guess it.
 unit="$("${FLEET_MOUNT_ESCAPE:-systemd-escape}" --path "$MP" 2>/dev/null)" || unit=""
 [ -n "$unit" ] || { echo "fleet-mount: systemd-escape could not name the unit for $MP" >&2; exit 2; }
+[ "$unit" != - ] || { echo "fleet-mount: $MP is the root mount; refusing" >&2; exit 2; }   # -.mount is the root filesystem's unit
 UDIR="$ROOT/etc/systemd/system"
 MOUNT_U="$UDIR/$unit.mount"; AUTO_U="$UDIR/$unit.automount"
 
@@ -84,6 +88,10 @@ foreign() {   # 0 when either unit path holds something this script did not writ
   done
   return "$bad"
 }
+lock() {   # one install/uninstall at a time on this host; the lock file lives in the root-owned unit dir
+  exec 8>> "$UDIR/.fleet-mount.lock" || { echo "fleet-mount: cannot open the lock in $UDIR" >&2; exit 3; }
+  flock -n 8 || { echo "fleet-mount: another fleet-mount run holds the lock; nothing changed" >&2; exit 3; }
+}
 need_root() {
   [ "${FLEET_MOUNT_SKIP_ROOT:-0}" = 1 ] || [ "$(id -u)" = 0 ] || { echo "fleet-mount: $MODE needs root (sudo)" >&2; exit 2; }
 }
@@ -102,15 +110,22 @@ case "$MODE" in
     need_root
     command -v mount.nfs4 >/dev/null 2>&1 || [ -x "$ROOT/sbin/mount.nfs4" ] || [ -x "$ROOT/usr/sbin/mount.nfs4" ] \
       || { echo "fleet-mount: no NFS client on this host; first: sudo apt-get install -y nfs-common" >&2; exit 2; }
+    mkdir -p "$UDIR" "$ROOT$MP" || exit 3
+    lock
     # Preflight BOTH paths before changing either: only an absent path or a file we wrote may be (re)written.
     ! foreign || { echo "fleet-mount: nothing changed" >&2; exit 3; }
-    mkdir -p "$UDIR" "$ROOT$MP" || exit 3
     for pair in "mount:$MOUNT_U" "auto:$AUTO_U"; do
       kind="${pair%%:*}"; dst="${pair#*:}"
       text="$([ "$kind" = mount ] && mount_text || auto_text)"
       if same "$text" "$dst"; then echo "ok    $dst"; continue; fi
-      tmp="$(mktemp "$UDIR/.fleet-mount.XXXXXX")" && printf '%s\n' "$text" > "$tmp" && chmod 644 "$tmp" && mv -T -f -- "$tmp" "$dst" \
-        || { rm -f -- "${tmp:-}"; echo "fleet-mount: could not write $dst" >&2; exit 3; }
+      tmp="$(mktemp "$UDIR/.fleet-mount.XXXXXX")" && printf '%s\n' "$text" > "$tmp" && chmod 644 "$tmp" \
+        || { rm -f -- "${tmp:-}"; echo "fleet-mount: could not write a temp file in $UDIR" >&2; exit 3; }
+      if ours "$dst"; then
+        mv -T -f -- "$tmp" "$dst" || { rm -f -- "$tmp"; echo "fleet-mount: could not replace $dst" >&2; exit 3; }
+      else   # absent at preflight: a hard link never replaces, so a file that appeared since then survives
+        ln -T -- "$tmp" "$dst" 2>/dev/null || { rm -f -- "$tmp"; echo "fleet-mount: $dst appeared during the install; nothing written there" >&2; exit 3; }
+        rm -f -- "$tmp"
+      fi
       echo "wrote $dst"
     done
     # Reload on EVERY install: a reload that did not work last time must not leave stale definitions to be enabled.
@@ -120,9 +135,15 @@ case "$MODE" in
     ;;
   uninstall)
     need_root
+    [ -d "$UDIR" ] || { echo "nothing installed by this script; nothing changed"; exit 0; }
+    lock
     # Ownership first: a unit this script did not write is not stopped, disabled or removed.
     ! foreign || { echo "fleet-mount: nothing changed" >&2; exit 3; }
-    if ! ours "$MOUNT_U" && ! ours "$AUTO_U"; then echo "nothing installed by this script; nothing changed"; exit 0; fi
+    if ! ours "$MOUNT_U" && ! ours "$AUTO_U"; then
+      # still reload: an earlier uninstall may have removed the files and then seen its reload not work
+      "$SC" daemon-reload || { echo "fleet-mount: daemon-reload did not work" >&2; exit 3; }
+      echo "nothing installed by this script; reloaded"; exit 0
+    fi
     failed=0
     step() { "$SC" "$@" >/dev/null 2>&1 || { echo "fleet-mount: 'systemctl $*' did not work" >&2; failed=1; }; }
     ours "$AUTO_U" && step disable --now "$unit.automount"

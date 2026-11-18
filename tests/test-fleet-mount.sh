@@ -111,7 +111,33 @@ out=$(run uninstall); rc=$?
 [ "$(tr '\n' '|' < "$TMP/sc.log")" = "disable --now srv-fleet.automount|stop srv-fleet.mount|disable srv-fleet.mount|daemon-reload|" ] \
   && ok "uninstall: disable the automount, stop and disable the mount, reload (in that order)" || bad "uninstall calls: $(tr '\n' '|' < "$TMP/sc.log")"
 : > "$TMP/sc.log"; out=$(run uninstall); rc=$?
-[ "$rc" = 0 ] && [ ! -s "$TMP/sc.log" ] && grep -q "nothing installed" <<< "$out" && ok "uninstall with nothing installed: says so, calls no systemctl" || bad "empty uninstall: rc=$rc"
+[ "$rc" = 0 ] && [ "$(tr '\n' '|' < "$TMP/sc.log")" = "daemon-reload|" ] && grep -q "nothing installed" <<< "$out" && ok "uninstall with nothing installed: says so, only reloads" || bad "empty uninstall: rc=$rc $(tr '\n' '|' < "$TMP/sc.log")"
+# a reload that did not work at the END of an uninstall is retried by the next uninstall, not reported as done
+run install >/dev/null; touch "$TMP/reload.broken"; run uninstall >/dev/null 2>&1; rc1=$?
+[ "$rc1" = 3 ] && [ ! -e "$U/srv-fleet.mount" ] && ok "uninstall whose final reload does not work: exit 3 (files already gone)" || bad "uninstall, final reload: rc=$rc1"
+run uninstall >/dev/null 2>&1; [ $? = 3 ] && ok "retrying while the reload still does not work: still exit 3" || bad "retry reported success with a broken reload"
+rm -f "$TMP/reload.broken"; : > "$TMP/sc.log"; run uninstall >/dev/null; rc=$?
+[ "$rc" = 0 ] && grep -qx "daemon-reload" "$TMP/sc.log" && ok "once the reload works, the retry reloads and succeeds" || bad "retry after the reload works: rc=$rc"
+# one run at a time
+run install >/dev/null
+( exec 8>> "$U/.fleet-mount.lock"; flock -n 8 || exit 9; : > "$TMP/sc.log"; PATH="$BASE_PATH" bash "$S" uninstall 8>&- >/dev/null 2>&1; echo $? > "$TMP/locked.rc" )
+[ "$(cat "$TMP/locked.rc")" = 3 ] && [ -f "$U/srv-fleet.mount" ] && [ ! -s "$TMP/sc.log" ] && ok "a second run while one holds the lock: exit 3, nothing changed" || bad "lock: rc=$(cat "$TMP/locked.rc")"
+
+# --- a file that APPEARS at an absent unit path after the preflight is not replaced (xreview r2) -----------------
+run uninstall >/dev/null 2>&1; rm -f "$U/srv-fleet.mount" "$U/srv-fleet.automount"
+mkdir -p "$TMP/racebin"; REALCHMOD="$(command -v chmod)"
+cat > "$TMP/racebin/chmod" <<EOF
+#!/bin/sh
+# stands in for "another administrator": creates the mount unit between the preflight and the publication
+[ -e "$U/srv-fleet.mount" ] || printf '[Unit]\nDescription=appeared mid-run\n' > "$U/srv-fleet.mount"
+exec "$REALCHMOD" "\$@"
+EOF
+chmod +x "$TMP/racebin/chmod"; : > "$TMP/sc.log"
+PATH="$TMP/racebin:$BASE_PATH" bash "$S" install >/dev/null 2>&1; rc=$?
+[ "$rc" = 3 ] && grep -qx "Description=appeared mid-run" "$U/srv-fleet.mount" && [ ! -s "$TMP/sc.log" ] \
+  && ok "a unit that appears mid-install survives; exit 3; nothing reloaded or enabled" || bad "mid-install file: rc=$rc $(head -2 "$U/srv-fleet.mount" | tr '\n' '|')"
+[ -z "$(ls -A "$U" | grep '^\.fleet-mount\.[A-Za-z0-9]\{6\}$')" ] && ok "no temp file is left behind" || bad "temp file left: $(ls -A "$U")"
+rm -f "$U/srv-fleet.mount" "$U/srv-fleet.automount"; run install >/dev/null
 
 # --- arguments and values --------------------------------------------------------------------------------------
 run >/dev/null 2>&1; [ $? = 2 ] && ok "no argument: exit 2" || bad "no argument rc"
@@ -121,6 +147,12 @@ FLEET_SHARE_SOURCE='host:/a b' run install >/dev/null 2>&1; [ $? = 2 ] && ok "a 
 FLEET_SHARE_MOUNTPOINT='srv/fleet' run install >/dev/null 2>&1; [ $? = 2 ] && ok "a relative mount point is refused" || bad "relative mount point"
 FLEET_SHARE_MOUNTPOINT='/srv/../etc' run install >/dev/null 2>&1; [ $? = 2 ] && ok "a mount point with .. is refused" || bad "dotdot mount point"
 FLEET_SHARE_MOUNTPOINT='/' run install >/dev/null 2>&1; [ $? = 2 ] && ok "the mount point / is refused" || bad "root mount point"
+for mp in /. /./ /srv/ /srv/./fleet; do
+  : > "$TMP/sc.log"; FLEET_SHARE_MOUNTPOINT="$mp" run install >/dev/null 2>&1; rc=$?
+  [ "$rc" = 2 ] && [ ! -e "$U/-.mount" ] && [ ! -s "$TMP/sc.log" ] && ok "mount point '$mp' is refused: no unit written, no systemctl call" || bad "mount point '$mp': rc=$rc"
+done
+printf '#!/bin/sh\necho -\n' > "$TMP/bin/rootescape"; chmod +x "$TMP/bin/rootescape"
+FLEET_MOUNT_ESCAPE="$TMP/bin/rootescape" run install >/dev/null 2>&1; [ $? = 2 ] && [ ! -e "$U/-.mount" ] && ok "an escaped name of '-' (the root unit) is refused whatever the path" || bad "root unit name"
 printf '#!/bin/sh\nexit 1\n' > "$TMP/bin/noescape"; chmod +x "$TMP/bin/noescape"
 FLEET_MOUNT_ESCAPE="$TMP/bin/noescape" run install >/dev/null 2>&1; [ $? = 2 ] && ok "no working systemd-escape: exit 2, no guessed unit name" || bad "escape fallback"
 if command -v systemd-escape >/dev/null 2>&1; then
