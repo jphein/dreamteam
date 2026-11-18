@@ -35,6 +35,7 @@ cat > "$BIN/busctl" <<'S'
 #!/bin/bash
 echo "$*" >> "${BUSCTL_LOG:-/dev/null}"
 [ "${FAKE_BUSCTL_FAIL:-0}" = 1 ] && { echo "Failed to attach" >&2; exit 1; }
+[ "${FAKE_BUSCTL_NOMOVE:-0}" = 1 ] && exit 0   # "success" without the move (Oracle 11-17: the re-read must decide)
 [ -n "${DREAMTEAM_CGROUP_FILE:-}" ] && echo "0::/user.slice/app.slice/$8" > "$DREAMTEAM_CGROUP_FILE"
 exit 0
 S
@@ -401,6 +402,13 @@ FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_TEST=1 DREAMTEAM_QUOTA_SEQ
   && jq -e '[.runs[]? | select(.repo=="jphein/realmwatch")] | last | .status=="skipped" and (.reason|test("#225"))' "$Q/overnight-guard.json" >/dev/null; } \
   && pass "#225: a refused attach stops the night: no coordinator, the repo skipped with the reason, FINISHED says why" \
   || fail "#225 refused: claude=$(wc -l < "$TMP/claude.log") pending=$(tail -1 "$Q/overnight-pending.md" 2>/dev/null) runs=$(jq -c .runs "$Q/overnight-guard.json" 2>/dev/null | cut -c1-200)"
+# #225: busctl says 0 but the cgroup did not change, or only nearly matches → not joined (the re-read decides)
+JN() { ( export "$@"; source <(sed -n '/^join_night_scope() {/,/^}/p' "$G"); DREAMTEAM_CGROUP_FILE="$TMP/cg" PATH="$BIN:$PATH" join_night_scope "$(dirname "$AV")" ); }
+RIDB=$(jq -r .run_id "$(dirname "$AV")/plan.json")
+echo "0::/user.slice/app.slice/tmux-spawn-0000.scope" > "$TMP/cg"; JN FAKE_BUSCTL_NOMOVE=1; r1=$?
+echo "0::/user.slice/app.slice/dreamteam-$RIDB.scope/sub" > "$TMP/cg"; JN FAKE_BUSCTL_NOMOVE=1; r2=$?
+echo "0::/user.slice/app.slice/dreamteam-${RIDB}Xscope" > "$TMP/cg"; JN FAKE_BUSCTL_NOMOVE=1; r3=$?
+[ "$r1$r2$r3" = 111 ] && pass "#225: an attach that 'succeeds' without moving, or a near-miss path, is not joined" || fail "#225 nomove: r=$r1$r2$r3"
 # #225: already in the night's scope → no attach call at all
 : > "$TMP/busctl.log"; RIDB=$(jq -r .run_id "$(dirname "$AV")/plan.json"); echo "0::/user.slice/app.slice/dreamteam-$RIDB.scope" > "$TMP/cg"
 ( source <(sed -n '/^join_night_scope() {/,/^}/p' "$G"); DREAMTEAM_CGROUP_FILE="$TMP/cg" BUSCTL_LOG="$TMP/busctl.log" PATH="$BIN:$PATH" join_night_scope "$(dirname "$AV")" ) \
