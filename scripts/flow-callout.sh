@@ -85,7 +85,8 @@ if [ -z "$KEY" ]; then
 fi
 
 URL="${ASK_URL:-http://127.0.0.1:7810}"; URL="${URL%/}"
-get() { curl -fsS -m "$2" -H "X-Ask-Key: $KEY" -H "X-Ask-Who: $WHO" -H "Accept: application/json" "$1"; }
+# the key reaches curl on stdin (-H @-), never in argv: /proc/<pid>/cmdline is readable by every process of this uid
+get() { printf 'X-Ask-Key: %s\n' "$KEY" | curl -fsS -m "$2" -H @- -H "X-Ask-Who: $WHO" -H "Accept: application/json" "$1"; }
 
 # ── (f) my open rows. Any failure here is an outage: one line, exit 0.
 MINE="$(IFS=,; echo "${names[*]}")"

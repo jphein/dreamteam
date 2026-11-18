@@ -39,9 +39,10 @@ printf '%s\n' '{"flow":{"enforce":false}}' > "$TMP/off.json"
 cat > "$TMP/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 url=""; hdrs=""
+printf '%s\n' "$*" >> "$FIX/argv.log"     # what any process on the host can read from /proc/<pid>/cmdline
 while [ $# -gt 0 ]; do
   case "$1" in
-    -H) hdrs="$hdrs|$2"; shift ;;
+    -H) if [ "$2" = "@-" ]; then hdrs="$hdrs|$(tr '\n' '|' < /dev/stdin)"; else hdrs="$hdrs|$2"; fi; shift ;;
     http://*|https://*) url="$1" ;;
   esac
   shift
@@ -104,6 +105,7 @@ blocked && grep -q 'aaaa0001' "$TMP/err" && grep -q 'flow checkpoint aaaa0001' "
   && pass "ordered row, no word → blocked, names the id and the checkpoint verb" || fail "ordered row: rc=$RC $(cat "$TMP/err")"
 grep -q 'mine=' "$FIX/curl.log" && grep -q 'open=1' "$FIX/curl.log" && pass "asks the ledger for MY open rows (mine=, open=1)" || fail "list query: $(cat "$FIX/curl.log")"
 grep -q 'X-Ask-Key: k0000000000000000000000000000000000000000' "$FIX/curl.log" && pass "sends the ask key" || fail "no X-Ask-Key: $(cat "$FIX/curl.log")"
+! grep -q 'k0000000000000000000000000000000000000000' "$FIX/argv.log" && pass "the key never rides in curl's argv (readable from /proc by any process of this uid)" || fail "key in argv: $(cat "$FIX/argv.log")"
 grep -q 'X-Ask-Who: example-lane' "$FIX/curl.log" && pass "sends who it is" || fail "no X-Ask-Who: $(cat "$FIX/curl.log")"
 [ "$(loglines)" -eq 0 ] && pass "a block writes no outage line" || fail "block logged: $(cat "$TMP/callout.log")"
 
