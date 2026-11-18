@@ -137,6 +137,15 @@ done
 # Per-host overlay (Sen 2026-11-17): all three readers deep-merge config.<host>.json over config.json the SAME way.
 # Behavioural: one fixture overlay; each reader must report its values (perAgent 750, hostReserve 2048) while the base's
 # balloonReserve 4000 survives the merge; and a host with no overlay keeps the base values in all three.
+# a per-host overlay is HOST DATA: this repo is public, and host names stay out of it (CLAUDE.md "Stack choices"; the
+# fleet rule). Overlays live untracked in the synced tree; the repo carries only config.json (2026-11-17: #230 had
+# committed config.familiar.json)
+if git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  tracked=$(git -C "$ROOT" ls-files -- 'config.*.json')
+  ignored=$(git -C "$ROOT" check-ignore -q --no-index config.somehost.json && echo yes || echo no)
+  [ -z "$tracked" ] && [ "$ignored" = yes ] && pass "no per-host overlay is tracked, and config.<host>.json is ignored" \
+    || fail "host overlays in the public repo: tracked='$tracked' ignored=$ignored"
+fi
 OVR="$TMP/ovr"; mkdir -p "$OVR" "$TMP/ovbin"; cp "$ROOT/config.json" "$OVR/config.json"
 # free (100 MiB available, so the gate blocks and prints its parameters) and systemctl (no live scopes: the real host's
 # dreamteam scopes would multiply the balloon, 2026-09-18) stubbed for these three calls only
