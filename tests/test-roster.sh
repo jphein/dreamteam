@@ -169,6 +169,21 @@ for n in dangling; do
   printf '%s' '{"tool_name":"Agent"}' | DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=inv$n CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$GATE" >/dev/null 2>&1; grc=$?
   [ $brc = 2 ] && [ -n "$d" ] && [ $grc = 2 ] && pass "a dangling overlay link: gate blocks, mem-budget CONFIG INVALID, dashboard configError" || fail "dangling: budget=$brc dashboard='$d' gate=$grc"
 done
+# integral floats are valid in every reader (jq reads 750.0 and 7.5e2 as 750): mem-budget ok, dashboard no configError,
+# and the gate's verdict is about memory, never "not an integer"
+for c in 'f1|{"memory":{"perAgentMB":750.0}}' 'f2|{"memory":{"perAgentMB":7.5e2}}'; do
+  n=${c%%|*}; printf '%s\n' "${c#*|}" > "$OVR/config.ok$n.json"
+  b=$(DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=ok$n CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$BUD" 2>&1); brc=$?
+  d=$(DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=ok$n CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$DASH" --json 2>/dev/null | jq -r '[.configError, .memory.perAgentMb] | @tsv')
+  ge=$(printf '%s' '{"tool_name":"Agent"}' | DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=ok$n CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$GATE" 2>&1)
+  [ $brc = 0 ] && [[ "$b" == *"per-agent plan: 750 MiB"* ]] && [ "$d" = $'\t750' ] && [[ "$ge" == *"per_agent=750"* ]] && [[ "$ge" != *"not an integer"* ]] \
+    && pass "an integral float ($n) is 750 in all three readers" || fail "float agreement ($n): budget=$brc dashboard='$d' gate='$(head -c 100 <<<"$ge")'"
+done
+# the scope exemption never hides an invalid config: scopeToDreamteam true, no active team, an invalid .local → exit 2
+printf '%s\n' '{"memory":{"scopeToDreamteam":true},"local":[]}' > "$OVR/config.scopebad.json"
+printf '%s' '{"tool_name":"Agent"}' | DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=scopebad DREAMTEAM_STATE="$TMP/no-active" CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$GATE" >/dev/null 2>&1; grc=$?
+b=$(DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=scopebad CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$BUD" 2>&1); brc=$?
+[ $grc = 2 ] && [ $brc = 2 ] && pass "scope exemption + invalid .local: the gate blocks (exit 2) as mem-budget reports" || fail "scope+badlocal: gate=$grc budget=$brc"
 for c in 'null|null' 'localfalse|{"local":false}' 'localarr|{"local":[]}' 'memlist|{"memory":[]}' 'peragent0|{"memory":{"perAgentMB":0}}' 'peragent|{"memory":{"perAgentMB":"x"}}' 'memory|{"memory":{"minSwapFreeMB":false}}' 'local|{"local":{"enabled":true,"reserveMB":"1e4"}}' 'enabled|{"local":{"enabled":"yes"}}' 'trunc|{"memory":'; do
   n=${c%%|*}; printf '%s
 ' "${c#*|}" > "$OVR/config.inv$n.json"

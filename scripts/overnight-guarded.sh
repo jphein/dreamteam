@@ -713,10 +713,8 @@ skip() { # reason
 # One validated integer throughout (xreview #230 r1): an invalid floor or an unreadable measurement is a HOLD, and so
 # is an overlay that exists but cannot be read (its floors may be the only ones: xreview #230 r3).
 [ "$CFG_RC" -eq 0 ] || skip "memory: this host's config overlay is unreadable"
-MEM_MIN=$(dreamteam_cfg_raw "$CFGJSON" overnight min_available_mb); [ "$MEM_MIN" = ABSENT ] && MEM_MIN=0
-SWAP_MIN=$(dreamteam_cfg_raw "$CFGJSON" overnight min_swap_free_mb); [ "$SWAP_MIN" = ABSENT ] && SWAP_MIN=0
-dreamteam_uint "$MEM_MIN" 10000000 || skip "memory: overnight.min_available_mb is '$MEM_MIN', not an integer"
-dreamteam_uint "$SWAP_MIN" 10000000 || skip "memory: overnight.min_swap_free_mb is '$SWAP_MIN', not an integer"
+MEM_MIN=$(dreamteam_int "$CFGJSON" overnight min_available_mb 0 2>&1) || skip "memory: $MEM_MIN"
+SWAP_MIN=$(dreamteam_int "$CFGJSON" overnight min_swap_free_mb 0 2>&1) || skip "memory: $SWAP_MIN"
 if [ "$MEM_MIN" -gt 0 ] || [ "$SWAP_MIN" -gt 0 ]; then
   MEM_AV=$(free -m | awk '/^Mem:/{print $7}'); SWAP_FR=$(free -m | awk '/^Swap:/{print $4}')
   dreamteam_uint "${MEM_AV:-x}" 10000000 && dreamteam_uint "${SWAP_FR:-x}" 10000000 || skip "memory: free -m unreadable"

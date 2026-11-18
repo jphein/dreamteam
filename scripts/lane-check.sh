@@ -11,8 +11,7 @@ held() { echo "lane-check held: $1 ($(dreamteam_host))"; exit 1; }
 CFGJSON="$(dreamteam_config "$CFG")" || held "this host's overlay exists but is not one readable JSON object"
 # an unreadable or invalid number is HELD (exit 1), never read as "no floor" (xreview #230 r1)
 num() { # key → NUM (no subshell, so a held line reaches stdout)
-  local v; v=$(dreamteam_cfg_raw "$CFGJSON" lane "$1"); [ "$v" = ABSENT ] && v=0
-  dreamteam_uint "$v" 10000000 || held "lane.$1 is '$v', not an integer"; NUM=$((10#$v)); }
+  local v e; v=$(dreamteam_int "$CFGJSON" lane "$1" 0 2>&1) || held "$v"; NUM=$v; }
 num minAvailableMB; MA=$NUM; num minSwapFreeMB; MS=$NUM
 AV=$(free -m | awk '/^Mem:/{print $7}'); SF=$(free -m | awk '/^Swap:/{print $4}')
 dreamteam_uint "${AV:-x}" 10000000 || held "free -m gave no readable available memory"

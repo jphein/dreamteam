@@ -45,7 +45,6 @@ MIN_SWAP_FREE=$(getcfg minSwapFreeMB 0) || exit 2
 MAX_AGENTS=$(getcfg maxAgents 30) || exit 2
 [ "$PER_AGENT" -ge 1 ] || invalid "memory.perAgentMB is 0"
 SCOPE_ONLY=$(getbool memory scopeToDreamteam false) || exit 2
-if [ "$SCOPE_ONLY" = "true" ] && [ ! -f "$STATE/active" ]; then exit 0; fi
 
 # Local-model lane reserve (#37): when the ollama lane is ARMED (.local.enabled ==
 # true), hold back reserveMB for the resident model. Its RSS/VRAM is invisible to
@@ -57,6 +56,9 @@ getlocal() { local v e; v=$(dreamteam_int "$CFGJSON" local "$1" "$2" 2>"$STATE_E
 LA=$(getbool local enabled false) || exit 2; [ "$LA" = true ] && LOCAL_ARMED=1 || LOCAL_ARMED=0
 LOCAL_RESERVE=$(getlocal reserveMB 9000) || exit 2
 if [ "$LOCAL_ARMED" = 1 ]; then LOCAL_EFF=$LOCAL_RESERVE; LOCAL_NOTE="  local_reserve=${LOCAL_RESERVE} (ollama lane armed)"; else LOCAL_EFF=0; LOCAL_NOTE=""; fi
+# the scope exemption only AFTER every admission key validated (xreview #230 r5): an invalid config blocks whether or not
+# the gate would otherwise stand aside, so the gate, mem-budget and the dashboard agree on "invalid"
+if [ "$SCOPE_ONLY" = "true" ] && [ ! -f "$STATE/active" ]; then exit 0; fi
 
 # Balloon reserve is sized for ONE team's build spikes; scale by scopes actually
 # carrying weight (>=2GiB) — 2026-08-15 OOM: two teams' rustc storms ballooned

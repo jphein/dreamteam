@@ -113,14 +113,15 @@ cfg       = _full_cfg.get("memory", {})
 if "memory" in _full_cfg and not isinstance(_full_cfg["memory"], dict):
     CONFIG_ERROR = CONFIG_ERROR or "memory is not an object"; cfg = {}
 scope_cfg = _full_cfg.get("scope", {}) if isinstance(_full_cfg.get("scope"), dict) else {}
-def _valid_int(v):  # the gate's rule (scripts/lib/config.sh dreamteam_uint): a JSON integer 0..10^7, never a bool
-    return type(v) is int and 0 <= v <= 10000000
+def _valid_int(v):  # the gate's rule: an INTEGRAL JSON number 0..10^7 (jq reads 750.0 and 7.5e2 as 750, so they are
+    # valid in every reader); never a bool, a string or a fraction (xreview #230 r5)
+    return (type(v) is int or (type(v) is float and v.is_integer())) and 0 <= v <= 10000000
 def m(k, d):
     global CONFIG_ERROR
     if not isinstance(cfg, dict): CONFIG_ERROR = CONFIG_ERROR or "memory is not an object"; return d
     if k not in cfg: return d
     if not _valid_int(cfg[k]): CONFIG_ERROR = CONFIG_ERROR or f"memory.{k} is {json.dumps(cfg[k])}, not an integer 0..10000000"; return d
-    return cfg[k]
+    return int(cfg[k])
 PER_AGENT = m("perAgentMB", 400);  HOST_RES = m("hostReserveMB", 6000)
 BALLOON   = m("balloonReserveMB", 8000); MIN_AVAIL = m("minAvailableMB", 8000)
 MAX_AGENTS= m("maxAgents", 30)
@@ -139,7 +140,7 @@ def ml(k, d):
     global CONFIG_ERROR
     if k not in local_cfg: return d
     if not _valid_int(local_cfg[k]): CONFIG_ERROR = CONFIG_ERROR or f"local.{k} is {json.dumps(local_cfg[k])}, not an integer 0..10000000"; return d
-    return local_cfg[k]
+    return int(local_cfg[k])
 LOCAL_RESERVE = ml("reserveMB", 9000)
 LOCAL_ARMED   = local_cfg.get("enabled") is True          # ==false-safe: only literal true arms it
 if "enabled" in local_cfg and not isinstance(local_cfg["enabled"], bool):

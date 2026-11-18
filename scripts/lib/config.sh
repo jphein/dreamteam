@@ -9,7 +9,8 @@
 #                                  config.<host>.json beside it. Each file must hold exactly one JSON object. An overlay that
 #                                  is not that is ignored (the base, the stricter shared floors, applies); a base that is
 #                                  not that gives "{}" (every reader then uses its baked defaults, as before).
-#   dreamteam_uint <value> <max>   rc 0 when <value> is a decimal integer 0..max (no sign, no exponent, no fraction)
+#   dreamteam_uint <value> <max>   rc 0 when <value> is a decimal integer 0..max (no sign, no exponent, no fraction): used
+#                                  for MEASURED numbers (free -m). Config numbers go through dreamteam_int (policy below).
 dreamteam_host() {
   local h="${DREAMTEAM_HOST:-}"
   if [ -z "$h" ]; then h=$(hostname -s 2>/dev/null) || h=""; [ -n "$h" ] || { h=$(hostname 2>/dev/null); h=${h%%.*}; }; fi
@@ -37,11 +38,14 @@ dreamteam_config() { # rc 0 ok (with or without an overlay); rc 3 = this host's 
 dreamteam_uint() { [[ "$1" =~ ^[0-9]{1,9}$ ]] && [ "$((10#$1))" -le "$2" ]; }
 # dreamteam_int <json> <section> <key> <default>: the integer (absent → default); rc 2 with the reason on stderr when it
 # is present but not an integer 0..10^7, or the section is not an object
-dreamteam_int() {
-  local v; v=$(dreamteam_cfg_raw "$1" "$2" "$3")
-  case "$v" in ABSENT) v="$4";; BADSECTION) echo "$2 is not an object" >&2; return 2;; esac
-  dreamteam_uint "$v" 10000000 || { echo "$2.$3 is '$v', not an integer 0..10000000" >&2; return 2; }
-  printf '%s' "$((10#$v))"
+dreamteam_int() { # the VALUE is judged, numerically, so every jq version agrees with dashboard-data.sh (jq 1.7 keeps the
+  # literal 750.0 / 7.5E+2, older jq normalises it; both are the integral number 750 and valid): a JSON number, integral,
+  # 0..10^7. Strings ("3000", "1e4"), booleans, null and fractions are invalid (xreview #230 r5).
+  local v n; v=$(dreamteam_cfg_raw "$1" "$2" "$3")
+  case "$v" in ABSENT) printf '%s' "$((10#$4))"; return 0;; BADSECTION) echo "$2 is not an object" >&2; return 2;; esac
+  n=$(jq -nr --argjson v "$v" '$v | if type == "number" and . == floor and . >= 0 and . <= 10000000 then floor else error("x") end' 2>/dev/null) \
+    && dreamteam_uint "$n" 10000000 || { echo "$2.$3 is '$v', not an integer 0..10000000" >&2; return 2; }
+  printf '%s' "$((10#$n))"
 }
 # dreamteam_bool <json> <section> <key> <default>: true|false (absent → default); rc 2 when present but not a boolean
 dreamteam_bool() {
