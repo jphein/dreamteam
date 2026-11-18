@@ -1,0 +1,11 @@
+[Unit]
+Description=dreamteam: CHECK sync-conflicts (count Syncthing conflict copies in ~/Projects and ~/.claude)
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Projects/dreamteam
+ExecStart=/usr/bin/bash %h/Projects/dreamteam/scripts/sync-conflicts-check.sh
+# a tree walk: idle I/O and low CPU priority (familiar's copy is on an HDD); the script adds ionice/nice itself too
+IOSchedulingClass=idle
+Nice=15
+# a stuck walk must not hold every later activation
+TimeoutStartSec=45min
