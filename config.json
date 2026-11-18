@@ -37,6 +37,14 @@
     "enforce": true,
     "_notes": "no-poll-guard.sh (PreToolUse Bash|Monitor in TEAMMATE sessions) blocks a LOOPING GraphQL-heavy GitHub CI read (`gh pr checks`, `gh pr view --json statusCheckRollup`). Measured 2026-09-11: three lanes' 30s pollers exhausted the per-ACCOUNT quota and every gh call in the fleet failed, including the lead's merge cascade — and `gh api rate_limit` read 5000 remaining throughout, because it cannot see GraphQL SECONDARY limits. One-shot reads and the REST route (gh api .../check-runs, what pr-gate.sh uses) stay allowed; the orchestrator is never blocked. Escape: enforce=false, or push and let the lead run scripts/pr-gate.sh once."
   },
+  "flow": {
+    "enforce": true,
+    "leads": [
+      "sen",
+      "jp-2f"
+    ],
+    "_notes": "flow-callout.sh (Stop hook, every session that can be named as a lane): a lane cannot end a turn holding an open Flow row (plan.realm.watch ledger, FOR-AGENTS rule 27) it has not spoken on since that row's last order — docs/MANAGEMENT.md practice 3, §5 item 1, Flow row 76b3ff47. It reads GET $ASK_URL/api/flow?open=1&mine=<names> (ASK_WHO, the tmux session, a teammate's --agent-id) with the ask key ($ASK_KEY, else ~/Projects/plan.realm.watch/data/ask.key, else DREAMTEAM_ASK_KEY_FILE) and exits 2 naming each silent row and the verbs that end the silence (checkpoint · block · done --evidence). FAIL OPEN with one line in ~/.claude/state/dreamteam/flow-callout.log when the plan is unreachable, refuses, answers nonsense, or there is no key; silent exit 0 for stop_hook_active, no identity, or a lead name. leads: names never blocked (rows for lanes off familiar carry the lead's name today). Escape: enforce=false."
+  },
   "worktree": {
     "enforce": true,
     "_notes": "worktree-guard.sh (PreToolUse Edit|Write in TEAMMATE sessions) blocks writes outside an agent's assigned worktree (its team-config cwd) when that cwd is under .claude/worktrees/. Shared-checkout spawns (cwd not a worktree) are unaffected. Escape: orchestrator sets enforce=false, or the agent escalates via SendMessage. Added 2026-07-01 — converts the skill's #1 failure mode (2 collision incidents) from prompt discipline to harness law."
