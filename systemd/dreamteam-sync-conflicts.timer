@@ -1,0 +1,7 @@
+[Unit]
+Description=dreamteam: CHECK sync-conflicts daily at 05:20
+[Timer]
+OnCalendar=*-*-* 05:20:00
+Persistent=true
+[Install]
+WantedBy=timers.target
