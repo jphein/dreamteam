@@ -234,6 +234,13 @@ reset; mkfifo "$TMP/key.fifo"; list "$(row 5555000e example-lane ordered $T0 nul
 ASK_KEY="" KEYFILE="$TMP/key.fifo" BUDGET=2 run
 allowed && [ "$ELAPSED" -le 4 ] && [ "$(calls)" -eq 0 ] && pass "a FIFO at the key path: no hang (${ELAPSED}s), no key, allowed" || fail "key fifo: rc=$RC elapsed=${ELAPSED}s calls=$(calls)"
 rm -f "$TMP/key.fifo"
+# a SYMLINK at the key path pointing at a real key file: the regular-file-and-not-a-link rule refuses it (no key, the
+# hook steps aside) even though the read itself would succeed. This pins the type check on its own now that the 1 s
+# timeout also cuts a FIFO read short (r5: key-path-type-unchecked had gone green).
+printf '%s' "$FAKEKEY" > "$TMP/key.real"; ln -sf "$TMP/key.real" "$TMP/key.link"
+reset; list "$(row 55550013 example-lane ordered $T0 null)"
+ASK_KEY="" KEYFILE="$TMP/key.link" run
+allowed && [ "$(calls)" -eq 0 ] && [ "$(loglines)" -eq 1 ] && pass "a symlink at the key path is never read: no key, allowed, said" || fail "key symlink: rc=$RC calls=$(calls) log=[$(cat "$TMP/callout.log")]"
 
 # 6l) xreview #237 r5: the reads are TIME-bounded too, not only byte-bounded: a stalled mount at the key path or at the
 #     config (the head stub on EXTRA_PATH sleeps 30 s when its arguments name SLOW_PATH, else runs the real head), and
