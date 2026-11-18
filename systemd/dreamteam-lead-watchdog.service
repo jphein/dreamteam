@@ -1,0 +1,7 @@
+[Unit]
+Description=CHECK lead-liveness: relaunch the fleet lead's Claude Code in spire:0.0 when it has exited (docs/CHECKS.md)
+
+[Service]
+Type=oneshot
+ExecStart=%h/Projects/dreamteam/scripts/lead-watchdog.sh
+Nice=10
