@@ -43,7 +43,7 @@ dreamteam_int() { # the VALUE is judged, numerically, so every jq version agrees
   # 0..10^7. Strings ("3000", "1e4"), booleans, null and fractions are invalid (xreview #230 r5).
   local v n; v=$(dreamteam_cfg_raw "$1" "$2" "$3")
   case "$v" in ABSENT) printf '%s' "$((10#$4))"; return 0;; BADSECTION) echo "$2 is not an object" >&2; return 2;; esac
-  n=$(jq -nr --argjson v "$v" '$v | if type == "number" and . == floor and . >= 0 and . <= 10000000 then floor else error("x") end' 2>/dev/null) \
+  n=$(jq -nr --argjson v "$v" '$v | if type == "number" and . == floor and . >= 0 and . <= 10000000 then (floor | if . == 0 then 0 else . end) else error("x") end' 2>/dev/null) \
     && dreamteam_uint "$n" 10000000 || { echo "$2.$3 is '$v', not an integer 0..10000000" >&2; return 2; }
   printf '%s' "$((10#$n))"
 }

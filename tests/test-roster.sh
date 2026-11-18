@@ -179,6 +179,14 @@ for c in 'f1|{"memory":{"perAgentMB":750.0}}' 'f2|{"memory":{"perAgentMB":7.5e2}
   [ $brc = 0 ] && [[ "$b" == *"per-agent plan: 750 MiB"* ]] && [ "$d" = $'\t750' ] && [[ "$ge" == *"per_agent=750"* ]] && [[ "$ge" != *"not an integer"* ]] \
     && pass "an integral float ($n) is 750 in all three readers" || fail "float agreement ($n): budget=$brc dashboard='$d' gate='$(head -c 100 <<<"$ge")'"
 done
+# negative zero is integral and 0 (jq can print -0): valid in all three readers (xreview #230 r6)
+for v in -0 -0.0 -0e2; do
+  printf '{"memory":{"minSwapFreeMB":%s}}\n' "$v" > "$OVR/config.negzero.json"
+  b=$(DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=negzero CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$BUD" 2>&1); brc=$?
+  d=$(DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=negzero CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$DASH" --json 2>/dev/null | jq -r '[.configError, .memory.minSwapFreeMb] | @tsv')
+  ge=$(printf '%s' '{"tool_name":"Agent"}' | DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=negzero CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$GATE" 2>&1)
+  [ $brc = 0 ] && [ "$d" = $'\t0' ] && [[ "$ge" != *"not an integer"* ]] && pass "negative zero ($v) is 0 in all three readers" || fail "negzero $v: budget=$brc dashboard='$d' gate='$(head -c 90 <<<"$ge")'"
+done
 # the scope exemption never hides an invalid config: scopeToDreamteam true, no active team, an invalid .local → exit 2
 printf '%s\n' '{"memory":{"scopeToDreamteam":true},"local":[]}' > "$OVR/config.scopebad.json"
 printf '%s' '{"tool_name":"Agent"}' | DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=scopebad DREAMTEAM_STATE="$TMP/no-active" CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$GATE" >/dev/null 2>&1; grc=$?
