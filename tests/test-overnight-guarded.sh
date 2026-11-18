@@ -29,6 +29,17 @@ fail(){ echo "FAIL: $1"; FAIL=$((FAIL+1)); }
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 export DREAMTEAM_CHECKS_DIR="$TMP/checks" DREAMTEAM_CHECK_HOST=familiar   # never a real check line
 BIN="$TMP/bin"; mkdir -p "$BIN"
+# busctl (#225): the runner attaches itself to the night's scope. The stub logs the call and "moves" the caller by
+# writing the unit into DREAMTEAM_CGROUP_FILE; FAKE_BUSCTL_FAIL=1 refuses. It never reaches the real systemd.
+cat > "$BIN/busctl" <<'S'
+#!/bin/bash
+echo "$*" >> "${BUSCTL_LOG:-/dev/null}"
+[ "${FAKE_BUSCTL_FAIL:-0}" = 1 ] && { echo "Failed to attach" >&2; exit 1; }
+[ "${FAKE_BUSCTL_NOMOVE:-0}" = 1 ] && exit 0   # "success" without the move (Oracle 11-17: the re-read must decide)
+[ -n "${DREAMTEAM_CGROUP_FILE:-}" ] && echo "0::/user.slice/app.slice/$8" > "$DREAMTEAM_CGROUP_FILE"
+exit 0
+S
+chmod +x "$BIN/busctl"
 
 cat > "$BIN/curl" <<'S'
 #!/bin/bash
@@ -369,10 +380,39 @@ echo "$out" | grep -q 'Delegate=yes' && pass "the scope is launched with Delegat
 AV=$(echo "$out" | sed -n 's/^DRY_RUN runner argv: //p'); RA=(); [ -f "$AV" ] && mapfile -d '' -t RA < "$AV"
 echo "$out" | grep -q 'tmux -L dreamteam-nightly new-session -d -s [^ ]* -c [^ ]* env CLAUDE_PLUGIN_ROOT=' \
   && pass "tmux gets the runner as separate argv words (exec'd directly, no shell)" || fail "launch argv: $(echo "$out" | grep systemd-run)"
+echo "0::/user.slice/app.slice/tmux-spawn-0000.scope" > "$TMP/cg"
 FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_TEST=1 DREAMTEAM_QUOTA_SEQ="0.92" GH_LOG="$TMP/gh.log" GIT_LOG="$TMP/git.log" CLAUDE_LOG="$TMP/claude.log" PATH="$BIN:$PATH" \
-  "${RA[@]}" >/dev/null 2>&1
+  DREAMTEAM_CGROUP_FILE="$TMP/cg" BUSCTL_LOG="$TMP/busctl.log" "${RA[@]}" >/dev/null 2>&1
 { [ "${#RA[@]}" -ge 6 ] && [ ! -e "$TMP/PWNED" ] && grep -q '^ARG=-p' "$TMP/claude.log" 2>/dev/null; } \
   && pass "the exact runner argv runs from a state path with a quote and \$( ) — no injection" || fail "argv run: n=${#RA[@]} pwned=$([ -e "$TMP/PWNED" ] && echo yes || echo no)"
+# #225: that runner started in a tmux-spawn scope and attached ITSELF to the night's scope before any coordinator
+RID225=$(jq -r .run_id "$(dirname "$AV")/plan.json" 2>/dev/null)
+grep -qE "AttachProcessesToUnit ssau dreamteam-$RID225\.scope / 1 [0-9]+\$" "$TMP/busctl.log" 2>/dev/null && grep -q "/dreamteam-$RID225.scope\$" "$TMP/cg" \
+  && pass "#225: the runner attaches itself to dreamteam-<rid>.scope (tmux 3.6 had put it in tmux-spawn), then runs" || fail "#225 attach: rid=$RID225 log=$(cat "$TMP/busctl.log" 2>/dev/null)"
+# #225: the attach refused → the night stops: no coordinator, every repo skipped with the reason, FINISHED says why
+reset; mkqueue jphein/realmwatch:2; cp "$TMP/state/issues-queue.json" "$Q/"; rm -f "$Q/overnight-night" "$Q/overnight-pending.md"
+out=$(FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DRY_RUN=1 DREAMTEAM_TEST=1 DREAMTEAM_STATE="$Q" DREAMTEAM_CONFIG="$Q/c.json" CLAUDE_PLUGIN_ROOT="$ROOT" \
+  DREAMTEAM_WT_BASE="$TMP/wt" DREAMTEAM_CLAUDE_BIN="$BIN/claude-rec" DREAMTEAM_PLAN_DATA="$TMP/plan-data" DREAMTEAM_DEADLINE_EPOCH=$(( $(date +%s) + 6*3600 )) \
+  GH_LOG="$TMP/gh.log" GIT_LOG="$TMP/git.log" CLAUDE_LOG="$TMP/claude.log" PATH="$BIN:$PATH" bash "$G" 2>&1)
+AV=$(echo "$out" | sed -n 's/^DRY_RUN runner argv: //p'); RA=(); [ -f "$AV" ] && mapfile -d '' -t RA < "$AV"
+echo "0::/user.slice/app.slice/tmux-spawn-0000.scope" > "$TMP/cg"; : > "$TMP/claude.log"
+FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_TEST=1 DREAMTEAM_QUOTA_SEQ="0.92" GH_LOG="$TMP/gh.log" GIT_LOG="$TMP/git.log" CLAUDE_LOG="$TMP/claude.log" PATH="$BIN:$PATH" \
+  DREAMTEAM_CGROUP_FILE="$TMP/cg" FAKE_BUSCTL_FAIL=1 "${RA[@]}" >/dev/null 2>&1
+{ [ "${#RA[@]}" -ge 6 ] && [ ! -s "$TMP/claude.log" ] && grep -q "Stopped: the runner could not join the night's scope (#225)" "$Q/overnight-pending.md" \
+  && jq -e '[.runs[]? | select(.repo=="jphein/realmwatch")] | last | .status=="skipped" and (.reason|test("#225"))' "$Q/overnight-guard.json" >/dev/null; } \
+  && pass "#225: a refused attach stops the night: no coordinator, the repo skipped with the reason, FINISHED says why" \
+  || fail "#225 refused: claude=$(wc -l < "$TMP/claude.log") pending=$(tail -1 "$Q/overnight-pending.md" 2>/dev/null) runs=$(jq -c .runs "$Q/overnight-guard.json" 2>/dev/null | cut -c1-200)"
+# #225: busctl says 0 but the cgroup did not change, or only nearly matches → not joined (the re-read decides)
+JN() { ( export "$@"; source <(sed -n '/^join_night_scope() {/,/^}/p' "$G"); DREAMTEAM_CGROUP_FILE="$TMP/cg" PATH="$BIN:$PATH" join_night_scope "$(dirname "$AV")" ); }
+RIDB=$(jq -r .run_id "$(dirname "$AV")/plan.json")
+echo "0::/user.slice/app.slice/tmux-spawn-0000.scope" > "$TMP/cg"; JN FAKE_BUSCTL_NOMOVE=1; r1=$?
+echo "0::/user.slice/app.slice/dreamteam-$RIDB.scope/sub" > "$TMP/cg"; JN FAKE_BUSCTL_NOMOVE=1; r2=$?
+echo "0::/user.slice/app.slice/dreamteam-${RIDB}Xscope" > "$TMP/cg"; JN FAKE_BUSCTL_NOMOVE=1; r3=$?
+[ "$r1$r2$r3" = 111 ] && pass "#225: an attach that 'succeeds' without moving, or a near-miss path, is not joined" || fail "#225 nomove: r=$r1$r2$r3"
+# #225: already in the night's scope → no attach call at all
+: > "$TMP/busctl.log"; RIDB=$(jq -r .run_id "$(dirname "$AV")/plan.json"); echo "0::/user.slice/app.slice/dreamteam-$RIDB.scope" > "$TMP/cg"
+( source <(sed -n '/^join_night_scope() {/,/^}/p' "$G"); DREAMTEAM_CGROUP_FILE="$TMP/cg" BUSCTL_LOG="$TMP/busctl.log" PATH="$BIN:$PATH" join_night_scope "$(dirname "$AV")" ) \
+  && [ ! -s "$TMP/busctl.log" ] && pass "#225: a runner already in the night's scope makes no attach call" || fail "#225 already-in: $(cat "$TMP/busctl.log")"
 
 # r2: the quota is probed AFTER the clone, right before the coordinator spends
 reset; mkqueue jphein/realmwatch:2
