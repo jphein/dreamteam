@@ -48,6 +48,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 printf '%s\t%s\n' "$url" "$hdrs" >> "$FIX/curl.log"
+[ -f "$FIX/delay" ] && sleep "$(cat "$FIX/delay")"     # a slow server, for the budget cases
 [ -f "$FIX/rc" ] && exit "$(cat "$FIX/rc")"
 case "$url" in
   */api/flow\?*) cat "$FIX/list.json" ;;
@@ -69,20 +70,26 @@ show() { # show <id> <row-json> <log-json-array>
 }
 reset() { rm -f "$FIX"/*; printf '{"count":0,"rows":[]}\n' > "$FIX/list.json"; : > "$TMP/callout.log"; }
 
-RC=0
-# run [stdin-json] — the hook with the test seams; env overrides come before the call
+RC=0; ELAPSED=0
+# run [stdin-json] — the hook with the test seams; env overrides come before the call.
+# KEY ISOLATION (xreview #237 r1): the key is always the fake one or empty, and the key FILE seam points at a path
+# that does not exist, so no case can fall through to the real ~/Projects/plan.realm.watch/data/ask.key.
+FAKEKEY="k0000000000000000000000000000000000000000"
 run() {
-  RC=0
+  RC=0; local t0; t0=$(date +%s)
   printf '%s' "${1:-{\"hook_event_name\":\"Stop\",\"stop_hook_active\":false\}}" \
-    | PATH="$TMP/bin:$PATH" FIX="$FIX" ASK_URL="http://plan.test" ASK_KEY="${ASK_KEY-k0000000000000000000000000000000000000000}" \
+    | PATH="$TMP/bin:$PATH" FIX="$FIX" ASK_URL="http://plan.test" ASK_KEY="${ASK_KEY-$FAKEKEY}" DREAMTEAM_ASK_KEY_FILE="${KEYFILE-$TMP/no-such-key}" \
       ASK_WHO="${ASK_WHO-example-lane}" DREAMTEAM_AGENT_ID="${DREAMTEAM_AGENT_ID-}" DREAMTEAM_CONFIG="${CFG:-$TMP/on.json}" \
-      TMUX="${TMUXV-/stub/tmux-socket,1,0}" \
+      TMUX="${TMUXV-/stub/tmux-socket,1,0}" DREAMTEAM_FLOW_BUDGET="${BUDGET-9}" DREAMTEAM_FLOW_MAX_LOGS="${MAXLOGS-8}" \
       DREAMTEAM_FLOW_LOG="$TMP/callout.log" bash "$HOOK" >"$TMP/out" 2>"$TMP/err" || RC=$?
+  ELAPSED=$(( $(date +%s) - t0 ))
 }
 blocked() { [ "$RC" -eq 2 ] && grep -q 'FLOW CALLOUT' "$TMP/err"; }
 allowed() { [ "$RC" -eq 0 ]; }
 loglines() { wc -l < "$TMP/callout.log" | tr -d ' '; }
 calls() { if [ -f "$FIX/curl.log" ]; then wc -l < "$FIX/curl.log" | tr -d ' '; else echo 0; fi; }
+# what a failure may print: URLs only, never a header line (a key must never reach the transcript, even a fake one)
+urls() { if [ -f "$FIX/curl.log" ]; then cut -f1 "$FIX/curl.log" | tr '\n' ' '; fi; }
 
 T0=1763430000   # an epoch in 2026-11
 
@@ -103,10 +110,10 @@ reset; A=$(row aaaa0001 example-lane ordered $T0 null); list "$A"
 run
 blocked && grep -q 'aaaa0001' "$TMP/err" && grep -q 'flow checkpoint aaaa0001' "$TMP/err" \
   && pass "ordered row, no word → blocked, names the id and the checkpoint verb" || fail "ordered row: rc=$RC $(cat "$TMP/err")"
-grep -q 'mine=' "$FIX/curl.log" && grep -q 'open=1' "$FIX/curl.log" && pass "asks the ledger for MY open rows (mine=, open=1)" || fail "list query: $(cat "$FIX/curl.log")"
-grep -q 'X-Ask-Key: k0000000000000000000000000000000000000000' "$FIX/curl.log" && pass "sends the ask key" || fail "no X-Ask-Key: $(cat "$FIX/curl.log")"
-! grep -q 'k0000000000000000000000000000000000000000' "$FIX/argv.log" && pass "the key never rides in curl's argv (readable from /proc by any process of this uid)" || fail "key in argv: $(cat "$FIX/argv.log")"
-grep -q 'X-Ask-Who: example-lane' "$FIX/curl.log" && pass "sends who it is" || fail "no X-Ask-Who: $(cat "$FIX/curl.log")"
+grep -q 'mine=' "$FIX/curl.log" && grep -q 'open=1' "$FIX/curl.log" && pass "asks the ledger for MY open rows (mine=, open=1)" || fail "list query: $(urls)"
+grep -q "X-Ask-Key: $FAKEKEY" "$FIX/curl.log" && pass "sends the ask key" || fail "no X-Ask-Key header reached curl (headers redacted)"
+! grep -q "$FAKEKEY" "$FIX/argv.log" && pass "the key never rides in curl's argv (readable from /proc by any process of this uid)" || fail "the key appeared in curl's argv (redacted)"
+grep -q 'X-Ask-Who: example-lane' "$FIX/curl.log" && pass "sends who it is" || fail "no X-Ask-Who (headers redacted)"
 [ "$(loglines)" -eq 0 ] && pass "a block writes no outage line" || fail "block logged: $(cat "$TMP/callout.log")"
 
 # 2) in-progress with my own checkpoint after the order → allowed
@@ -156,8 +163,43 @@ allowed && [ "$(loglines)" -eq 1 ] && pass "an unreadable row log → that row u
 reset; list "$E1" "$(row eeee0008 example-lane ordered $T0 null)"; run
 blocked && grep -q eeee0008 "$TMP/err" && pass "…while a plainly silent row still blocks" || fail "mixed: rc=$RC"
 
+# 6e) xreview #237 r1: a MALFORMED row detail is not proof of silence: HTML, invalid JSON, {} (no log), a log that
+#     is not an array, or another row's detail → that row unchecked (allowed), one logged line
+G=$(row 99990001 example-lane in-progress $T0 $((T0+5)))
+for shape in '<html>sorry</html>' '{' '{}' '{"id":"99990001","log":"nope"}' '{"id":"other000","log":[]}' '[]'; do
+  reset; list "$G"; printf '%s\n' "$shape" > "$FIX/show-99990001.json"; run
+  allowed && [ "$(loglines)" -eq 1 ] && pass "malformed row detail ${shape:0:12} → unchecked, allowed, one logged line" \
+    || fail "malformed detail ${shape:0:12}: rc=$RC log=[$(cat "$TMP/callout.log")]"
+done
+
+# 6f) xreview #237 r1: the whole stop fits one budget. A slow server (1 s per call) with a 2 s budget: the list and
+#     at most one row log are read, the rest are reported as unchecked, and the hook returns within the budget.
+reset; H1=$(row 88880001 example-lane in-progress $((T0+3)) $((T0+9))); H2=$(row 88880002 example-lane in-progress $((T0+2)) $((T0+9))); H3=$(row 88880003 example-lane in-progress $((T0+1)) $((T0+9)))
+SPOKE="[{\"ts\":$T0,\"who\":\"sen\",\"event\":\"ordered\",\"note\":\"x\"},{\"ts\":$((T0+9)),\"who\":\"example-lane\",\"event\":\"checkpoint\",\"note\":\"ok\"}]"
+list "$H1" "$H2" "$H3"; show 88880001 "$H1" "$SPOKE"; show 88880002 "$H2" "$SPOKE"; show 88880003 "$H3" "$SPOKE"; echo 1 > "$FIX/delay"
+BUDGET=2 run
+allowed && [ "$ELAPSED" -le 4 ] && [ "$(calls)" -le 2 ] && [ "$(loglines)" -eq 1 ] && grep -q 'budget' "$TMP/callout.log" \
+  && pass "a slow ledger: stops at the budget (${ELAPSED}s, $(calls) calls), the unchecked rows logged once" \
+  || fail "budget: rc=$RC elapsed=${ELAPSED}s calls=$(calls) log=[$(cat "$TMP/callout.log")]"
+rm -f "$FIX/delay"
+
+# 6g) xreview #237 r1: the row-log cap is visible, newest rows first. Nine in-progress rows, the OLDEST silent: with
+#     the cap at 8 the oldest is not read and the log says so; with the cap at 9 it is read and blocks.
+reset; rows9=(); for i in 1 2 3 4 5 6 7 8 9; do r=$(row 7777000$i example-lane in-progress $((T0+100-i)) $((T0+200))); rows9+=("$r"); show 7777000$i "$r" "$SPOKE"; done
+show 77770009 "${rows9[8]}" "[{\"ts\":$((T0+91)),\"who\":\"sen\",\"event\":\"ordered\",\"note\":\"x\"}]"   # the oldest: silent
+list "${rows9[@]}"; run
+allowed && [ "$(loglines)" -eq 1 ] && grep -q 'cap' "$TMP/callout.log" && grep -q '77770001' "$FIX/curl.log" && ! grep -q '77770009' "$FIX/curl.log" \
+  && pass "9 rows, cap 8: the newest 8 are read, the oldest is reported unchecked" || fail "cap: rc=$RC log=[$(cat "$TMP/callout.log")] $(urls)"
+rm -f "$FIX/curl.log" "$FIX/argv.log"; : > "$TMP/callout.log"; MAXLOGS=9 run     # same fixtures, a wider cap
+blocked && grep -q 77770009 "$TMP/err" && [ "$(loglines)" -eq 0 ] && pass "cap 9: the oldest row is read and blocks, nothing unchecked" || fail "cap 9: rc=$RC log=[$(cat "$TMP/callout.log")]"
+
 # 7) no key → allowed, one logged line, no request
 reset; ASK_KEY="" run; allowed && [ "$(loglines)" -eq 1 ] && [ "$(calls)" -eq 0 ] && pass "no ask key → allowed, logged, nothing asked" || fail "no key: rc=$RC calls=$(calls) log=[$(cat "$TMP/callout.log")]"
+# 7b) the key FILE seam is honoured (a file the test owns, never the real one), and its content never reaches argv
+reset; printf '%s\n' "$FAKEKEY" > "$TMP/own.key"; list "$(row ffff0020 example-lane ordered $T0 null)"
+ASK_KEY="" KEYFILE="$TMP/own.key" run
+blocked && grep -q "X-Ask-Key: $FAKEKEY" "$FIX/curl.log" && ! grep -q "$FAKEKEY" "$FIX/argv.log" \
+  && pass "the key file seam is read, sent as a header, never in argv" || fail "key file seam: rc=$RC calls=$(calls)"
 
 # 8) stop_hook_active → allowed without a request (the harness already continued once; never loop)
 reset; list "$(row ffff0009 example-lane ordered $T0 null)"
@@ -177,9 +219,24 @@ allowed && [ "$(calls)" -eq 0 ] && pass "the lead (sen) → allowed, nothing ask
 
 # 11) identity: no ASK_WHO → the tmux session names the lane; a teammate id adds its name; none at all → allowed
 reset; list "$(row ffff0013 example-lane ordered $T0 null)"; ASK_WHO="" run
-blocked && grep -q 'mine=example-lane' "$FIX/curl.log" && pass "no ASK_WHO → the tmux session is the lane" || fail "tmux name: rc=$RC $(cat "$FIX/curl.log")"
-reset; list "$(row ffff0014 example-lane ordered $T0 null)"; ASK_WHO="" DREAMTEAM_AGENT_ID="morpheus-x@team" run
-grep -q 'mine=.*morpheus-x' "$FIX/curl.log" && pass "a teammate id adds its name to mine=" || fail "agent id: $(cat "$FIX/curl.log")"
+blocked && grep -q 'mine=example-lane' "$FIX/curl.log" && pass "no ASK_WHO, no teammate id → the tmux session is the lane (the fallback)" || fail "tmux name: rc=$RC $(urls)"
+# 11a) xreview #237 r1: a teammate IS its --agent-id, never the tmux session that hosts it. The session name is only
+#      the fallback when there is no ASK_WHO and no teammate id.
+reset; list "$(row ffff0014 morpheus-x ordered $T0 null)"; ASK_WHO="" DREAMTEAM_AGENT_ID="morpheus-x@team" run
+blocked && urls | grep -q 'mine=morpheus-x ' && ! grep -q 'example-lane' "$FIX/curl.log" \
+  && pass "a teammate id is the identity; the hosting tmux session is not added" || fail "agent id: rc=$RC $(urls)"
+reset; list "$(row ffff0018 example-lane ordered $T0 null)"; DREAMTEAM_AGENT_ID="morpheus-x@team" run
+grep -q 'mine=example-lane,morpheus-x\|mine=morpheus-x,example-lane' "$FIX/curl.log" && ! grep -q 'X-Ask-Who: morpheus' "$FIX/curl.log" \
+  && pass "ASK_WHO and a teammate id are both the lane's names; tmux is not consulted" || fail "who+id: $(urls)"
+# 11c) a teammate hosted in the LEAD's tmux session is still checked: the session name never makes it the lead
+reset; printf '#!/usr/bin/env bash\necho sen\n' > "$TMP/bin/tmux"; list "$(row ffff0019 morpheus-x ordered $T0 null)"
+ASK_WHO="" DREAMTEAM_AGENT_ID="morpheus-x@team" run
+blocked && ! grep -q 'sen' "$FIX/curl.log" && pass "a teammate inside the lead's tmux session is not the lead → still checked" || fail "teammate in lead tmux: rc=$RC $(urls)"
+# 11d) …and a session with NO identity of its own, hosted in a tmux session named like the lead, is not the lead either
+#      and not a lane: no identity → allowed, nothing asked (the fallback name never matches the lead)
+reset; list "$(row ffff0021 sen ordered $T0 null)"; ASK_WHO="" run
+allowed && [ "$(calls)" -eq 0 ] && pass "a tmux fallback name equal to the lead's is no identity → allowed, nothing asked" || fail "lead-named tmux fallback: rc=$RC calls=$(calls)"
+printf '#!/usr/bin/env bash\necho "%s"\n' "example-lane" > "$TMP/bin/tmux"
 # (the tmux stub answers nothing here, as tmux does outside any server; a real tmux on PATH must not leak the
 #  runner's own session name into this case, so the stub stays first on PATH and fails)
 reset; printf '#!/usr/bin/env bash\nexit 1\n' > "$TMP/bin/tmux"; list "$(row ffff0015 example-lane ordered $T0 null)"; ASK_WHO="" run

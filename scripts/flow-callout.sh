@@ -29,11 +29,13 @@
 # $DREAMTEAM_FLOW_LOG (default ~/.claude/state/dreamteam/flow-callout.log) saying what was not checked. A plan
 # outage must never wedge a lane; the lead's sweep reads `flow stuck` anyway.
 #
-# BUDGET. curl -m 4 for the list and -m 3 per row log, at most 8 row logs (a lane holds a handful of rows; more is
-# a ledger to tidy, not a stop to block). hooks.json gives it 12 s. TIMEOUTS ARE IN SECONDS.
+# BUDGET. One budget for the whole stop, DREAMTEAM_FLOW_BUDGET (default 9 s, inside hooks.json's 12 s): each request's
+# timeout is cut to what is left (the list at most 4 s, a row log at most 3 s), and rows left when it is spent are
+# reported as unchecked in the log line, never silently skipped. At most DREAMTEAM_FLOW_MAX_LOGS row logs (default 8,
+# newest rows first; a lane holding more is a ledger to tidy), reported the same way. TIMEOUTS ARE IN SECONDS.
 #
 # Seams (tests/test-flow-callout.sh): ASK_URL · ASK_KEY or DREAMTEAM_ASK_KEY_FILE · ASK_WHO · DREAMTEAM_AGENT_ID ·
-# DREAMTEAM_CONFIG · DREAMTEAM_FLOW_LOG · curl and tmux from PATH.
+# DREAMTEAM_CONFIG · DREAMTEAM_FLOW_LOG · DREAMTEAM_FLOW_BUDGET · DREAMTEAM_FLOW_MAX_LOGS · curl and tmux from PATH.
 set -uo pipefail
 ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 CFG="${DREAMTEAM_CONFIG:-$ROOT/config.json}"
@@ -56,21 +58,27 @@ ACTIVE="$(printf '%s' "$INPUT" | jq -r 'if type == "object" then (.stop_hook_act
 ENFORCE=$(jq -r 'if .flow.enforce == false then "false" else "true" end' "$CFG" 2>/dev/null || echo true)
 [ "$ENFORCE" = "false" ] && exit 0
 
-# ── (c) who am I: every name this lane goes by, lowercase, deduped, the ledger's name alphabet only.
+# ── (c) who am I: the names this lane goes by, lowercase, deduped, the ledger's name alphabet only. The identity is
+#        $ASK_WHO and a teammate's --agent-id (the dt_agent_id walk); the tmux session is ONLY the fallback when there
+#        is neither (xreview #237 r1: a teammate is never its hosting session), and only inside tmux (outside it,
+#        display-message names the host's most recent session: familiar 2026-11-17 20:09, "spire").
 names=()
 add() { local n; n="$(printf '%s' "$1" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9_.-')"; [ -n "$n" ] || return 0
         local x; for x in "${names[@]-}"; do [ "$x" = "$n" ] && return 0; done; names+=("$n"); }
-add "${ASK_WHO:-}"
-if [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then   # only inside tmux: outside it, display-message names
-  add "$(timeout 3 tmux display-message -p '#S' 2>/dev/null || true)"  # the host's most recent session (familiar: "spire")
-fi
-AID="$(dt_agent_id)"; add "${AID%%@*}"
-[ "${#names[@]}" -gt 0 ] || exit 0
-
-# ── (d) the lead is never blocked.
 mapfile -t leads < <(jq -r '(.flow.leads // ["sen","jp-2f"])[]' "$CFG" 2>/dev/null || printf 'sen\njp-2f\n')
 [ "${#leads[@]}" -gt 0 ] || leads=(sen jp-2f)
-for n in "${names[@]}"; do for l in "${leads[@]}"; do [ "$n" = "$l" ] && exit 0; done; done
+is_lead() { local l; for l in "${leads[@]}"; do [ "$1" = "$l" ] && return 0; done; return 1; }
+add "${ASK_WHO:-}"
+AID="$(dt_agent_id)"; add "${AID%%@*}"
+if [ "${#names[@]}" -eq 0 ] && [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
+  S="$(timeout 3 tmux display-message -p '#S' 2>/dev/null || true)"
+  # a fallback name equal to the lead's is no identity: it neither exempts nor names a lane
+  if [ -n "$S" ] && ! is_lead "$(printf '%s' "$S" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9_.-')"; then add "$S"; fi
+fi
+[ "${#names[@]}" -gt 0 ] || exit 0
+
+# ── (d) the lead is never blocked: only an identity of its own ($ASK_WHO or --agent-id) can say so.
+for n in "${names[@]}"; do is_lead "$n" && exit 0; done
 WHO="${names[0]}"
 
 # ── (e) the key: $ASK_KEY, else the plan's key file. Without one nothing can be read: say so once, let the stop go.
@@ -85,48 +93,74 @@ if [ -z "$KEY" ]; then
 fi
 
 URL="${ASK_URL:-http://127.0.0.1:7810}"; URL="${URL%/}"
-# the key reaches curl on stdin (-H @-), never in argv: /proc/<pid>/cmdline is readable by every process of this uid
-get() { printf 'X-Ask-Key: %s\n' "$KEY" | curl -fsS -m "$2" -H @- -H "X-Ask-Who: $WHO" -H "Accept: application/json" "$1"; }
 
-# ── (f) my open rows. Any failure here is an outage: one line, exit 0.
+# ── (f) ONE budget for the whole stop (xreview #237 r1): every request's timeout is cut to what is left of it, and
+#        when it is spent the remaining rows are reported as unchecked, never silently skipped. Default 9 s inside the
+#        hook's 12 s; seconds. MAX_LOGS bounds the row logs read, newest rows first, and is reported the same way.
+BUDGET="${DREAMTEAM_FLOW_BUDGET:-9}"; case "$BUDGET" in ''|*[!0-9]*) BUDGET=9 ;; esac
+MAX_LOGS="${DREAMTEAM_FLOW_MAX_LOGS:-8}"; case "$MAX_LOGS" in ''|*[!0-9]*) MAX_LOGS=8 ;; esac
+T0=$(date +%s)
+left() { echo $(( BUDGET - ($(date +%s) - T0) )); }
+# the key reaches curl on stdin (-H @-), never in argv: /proc/<pid>/cmdline is readable by every process of this uid
+get() { # get <url> <max-seconds>
+  local m="$2" l; l=$(left); [ "$l" -ge 1 ] || return 28; [ "$m" -le "$l" ] || m="$l"
+  printf 'X-Ask-Key: %s\n' "$KEY" | curl -fsS -m "$m" -H @- -H "X-Ask-Who: $WHO" -H "Accept: application/json" "$1"
+}
+
+# ── (g) my open rows. Any failure here is an outage: one line, exit 0.
 MINE="$(IFS=,; echo "${names[*]}")"
 LIST="$(get "$URL/api/flow?open=1&mine=$MINE" 4 2>/dev/null)"; rc=$?
 if [ "$rc" -ne 0 ]; then
   note "plan unreachable or refused at $URL (curl rc $rc): open rows of $MINE not checked"
   exit 0
 fi
-ROWS="$(printf '%s' "$LIST" | jq -c '.rows[] | select(.state as $s | ["ordered","in-progress","blocked","needs-jp"] | index($s)) | {id, state, what}' 2>/dev/null)" || ROWS=""
+# newest first (the ledger lists that way; sorted here so a cap always drops the oldest), the four open states only
+ROWS="$(printf '%s' "$LIST" | jq -c '.rows | sort_by(-(.ordered_at // 0)) | .[] | select(.state as $s | ["ordered","in-progress","blocked","needs-jp"] | index($s)) | {id, state, what}' 2>/dev/null)" || ROWS=""
 if [ -z "$ROWS" ] && ! printf '%s' "$LIST" | jq -e 'type == "object" and (.rows | type == "array")' >/dev/null 2>&1; then
   note "the ledger at $URL answered something that is not its row list: open rows of $MINE not checked"
   exit 0
 fi
 [ -n "$ROWS" ] || exit 0
 
-# ── (g) which of them are silent. `ordered` = silent by construction. Otherwise the log decides: an event by one of my
-#        names (or my lane family), or a note prefixed "<name>:", after the last `ordered` event.
+# ── (h) which of them are silent. `ordered` = silent by construction. Otherwise the row's log decides: an event by
+#        one of my names (or my lane family), or a note prefixed "<name>:", after the last `ordered` event. A detail
+#        that is not this row's log (HTML, broken JSON, {}, a log that is not an array, another row) proves nothing:
+#        that row is UNCHECKED, never silent (xreview #237 r1).
 NAMES_JSON="$(printf '%s\n' "${names[@]}" | jq -R . | jq -sc .)"
-spoken() { # spoken <show-json> → 0 when this lane has spoken since the last order
-  printf '%s' "$1" | jq -e --argjson names "$NAMES_JSON" '
+verdict() { # verdict <id> <show-json> → prints spoken | silent | unreadable
+  printf '%s' "$2" | jq -r --arg id "$1" --argjson names "$NAMES_JSON" '
     def fam: sub("-[0-9a-f]{2,3}$"; "");
-    (.log // []) as $log
-    | ([$log[] | select(.event == "ordered") | .ts] | max // 0) as $since
-    | [$log[] | select(.event != "ordered" and .ts >= $since)
-             | select((.who | fam) as $w | ($names | map(fam) | index($w)) != null
-                      or (.note as $n | $names | any(. as $x | $n | startswith($x + ":"))))]
-    | length > 0' >/dev/null 2>&1
+    if type != "object" or .id != $id or (.log | type) != "array" then "unreadable"
+    else .log as $log
+      | ([$log[] | select(type == "object" and .event == "ordered") | .ts] | max // 0) as $since
+      | ([$log[] | select(type == "object" and .event != "ordered" and ((.ts // 0) >= $since))
+                 | select((((.who // "") | tostring | fam) as $w | ($names | map(fam) | index($w)) != null)
+                          or (((.note // "") | tostring) as $n | $names | any(. as $x | $n | startswith($x + ":"))))]
+         | length) as $n
+      | if $n > 0 then "spoken" else "silent" end
+    end' 2>/dev/null || echo unreadable
 }
-silent=(); checked=0; unread=0
+silent=(); checked=0; unread=0; capped=0; budgeted=0
 while IFS= read -r r; do
   [ -n "$r" ] || continue
   id="$(printf '%s' "$r" | jq -r .id)"; state="$(printf '%s' "$r" | jq -r .state)"; what="$(printf '%s' "$r" | jq -r '.what // ""' | cut -c1-70)"
   case "$id" in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) continue ;; esac
   if [ "$state" = "ordered" ]; then silent+=("$id	$what"); continue; fi
-  [ "$checked" -lt 8 ] || continue
+  if [ "$checked" -ge "$MAX_LOGS" ]; then capped=$((capped + 1)); continue; fi
+  if [ "$(left)" -lt 1 ]; then budgeted=$((budgeted + 1)); continue; fi
   checked=$((checked + 1))
   SHOW="$(get "$URL/api/flow/$id" 3 2>/dev/null)" || { unread=$((unread + 1)); continue; }
-  spoken "$SHOW" || silent+=("$id	$what")
+  case "$(verdict "$id" "$SHOW")" in
+    spoken) ;;
+    silent) silent+=("$id	$what") ;;
+    *) unread=$((unread + 1)) ;;
+  esac
 done <<< "$ROWS"
-[ "$unread" -gt 0 ] && note "$unread row log(s) of $MINE could not be read at $URL: those rows not checked"
+why=""
+[ "$unread" -gt 0 ] && why="$why; $unread with an unreadable row log"
+[ "$capped" -gt 0 ] && why="$why; $capped past the cap of $MAX_LOGS newest"
+[ "$budgeted" -gt 0 ] && why="$why; $budgeted past the ${BUDGET}s budget"
+[ -n "$why" ] && note "rows of $MINE not checked at $URL${why}"
 
 [ "${#silent[@]}" -gt 0 ] || exit 0
 {
