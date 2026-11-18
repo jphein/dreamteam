@@ -21,6 +21,10 @@ MUTATIONS=(
   'tmux-no-kill-escalation|s/timeout -k 1 "/timeout "/'
   'row-cap-removed|s/(\$all\[:\$max\]\[\]/($all[:999999][]/'
   'row-cap-unlogged|s/rowcapped=\$(( TOTAL - MAX_ROWS ))/rowcapped=0/'
+  'owner-filter-dropped|s/| map(select((\.lane | type) == "string" and/| map(select(true or (.lane | type) == "string" and/'
+  'log-shape-unchecked|s/(\.ts | type) == "number" and (\.who | type) == "string"/true and (.who | type) != "never"/'
+  'key-path-type-unchecked|s/if \[ -f "\$KF" \] \&\& \[ ! -L "\$KF" \]; then/if true; then/'
+  'log-append-unguarded|s/if \[ ! -e "\$LOG" \] || { \[ -f "\$LOG" \]/if true || { [ -f "$LOG" ]/'
   'outage-unlogged|s/note "plan unreachable or refused/true "plan unreachable or refused/'
   'budget-never-stops|s/\[ "\$(left)" -lt 200 \]/[ "$(left)" -lt -999999 ]/'
   'clock-starts-after-tmux|s/^left() {/T0=$(( $(date +%s%N) \/ 1000000 )); left() {/'
@@ -33,20 +37,39 @@ MUTATIONS=(
   'lane-prefix-rule-dropped|s/startswith(\$x + ":")/startswith($x + "X:")/'
 )
 
-bad=0; n=0
-for m in "${MUTATIONS[@]}"; do
-  name="${m%%|*}"; expr="${m#*|}"; n=$((n + 1))
-  cp "$HOOK" "$TMP/hook.sh"
-  if ! sed -i -e "$expr" "$TMP/hook.sh" || cmp -s "$HOOK" "$TMP/hook.sh"; then
-    echo "NOT APPLIED $name: the sed expression changed nothing (the hook moved under it)"; bad=$((bad + 1)); continue
+# one mutation per job, JOBS at a time (the suite carries deliberate sleeps: serial runs took over 40 minutes for 22
+# mutations on 2026-11-17); each job has its own copy of the hook and its own result file, printed in order at the end
+JOBS="${PERTURB_JOBS:-4}"
+one() { # one <index> <name|expr>
+  local i="$1" name="${2%%|*}" expr="${2#*|}" d="$TMP/m$1" out reds
+  mkdir -p "$d"; cp "$HOOK" "$d/hook.sh"
+  if ! sed -i -e "$expr" "$d/hook.sh" || cmp -s "$HOOK" "$d/hook.sh"; then
+    echo "NOT APPLIED $name: the sed expression changed nothing (the hook moved under it)" > "$d/result"; return
   fi
-  out="$(CLAUDE_PLUGIN_ROOT="$ROOT" FLOW_CALLOUT_HOOK="$TMP/hook.sh" bash "$ROOT/tests/test-flow-callout.sh" 2>&1)"
+  # a mutation that drops a hang guard makes the SUITE hang (a FIFO case waits forever): that is the mutation caught,
+  # so a run past 10 minutes is red as "hung" (2026-11-18: the first unbounded run sat 10 hours with nothing written)
+  out="$(CLAUDE_PLUGIN_ROOT="$ROOT" FLOW_CALLOUT_HOOK="$d/hook.sh" timeout -k 5 600 bash "$ROOT/tests/test-flow-callout.sh" 2>&1)"; rc=$?
   reds="$(printf '%s\n' "$out" | grep -c '^FAIL:')"
-  if [ "$reds" -gt 0 ]; then
-    printf 'RED  %-28s %s red: %s\n' "$name" "$reds" "$(printf '%s\n' "$out" | grep -m1 '^FAIL:' | cut -c1-110)"
-  else
-    printf 'GREEN %-28s stayed green: the suite does not pin this rule\n' "$name"; bad=$((bad + 1))
+  if [ "$rc" = 124 ]; then
+    printf 'RED  %-28s hung: the suite did not finish in 10 min (a dropped hang guard)\n' "$name" > "$d/result"; return
   fi
+  if [ "$reds" -gt 0 ]; then
+    printf 'RED  %-28s %s red: %s\n' "$name" "$reds" "$(printf '%s\n' "$out" | grep -m1 '^FAIL:' | cut -c1-110)" > "$d/result"
+  else
+    printf 'GREEN %-28s stayed green: the suite does not pin this rule\n' "$name" > "$d/result"
+  fi
+}
+n=0; running=0
+for m in "${MUTATIONS[@]}"; do
+  n=$((n + 1)); one "$n" "$m" &
+  running=$((running + 1))
+  if [ "$running" -ge "$JOBS" ]; then wait -n; running=$((running - 1)); fi
+done
+wait
+bad=0
+for i in $(seq 1 "$n"); do
+  r="$(cat "$TMP/m$i/result" 2>/dev/null || echo "NO RESULT for mutation $i")"
+  echo "$r"; case "$r" in RED*) ;; *) bad=$((bad + 1)) ;; esac
 done
 echo "perturb-flow-callout: $n mutations, $bad not red"
 [ "$bad" -eq 0 ]

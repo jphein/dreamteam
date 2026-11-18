@@ -81,7 +81,7 @@ run() {
     | PATH="$TMP/bin:$PATH" FIX="$FIX" ASK_URL="http://plan.test" ASK_KEY="${ASK_KEY-$FAKEKEY}" DREAMTEAM_ASK_KEY_FILE="${KEYFILE-$TMP/no-such-key}" \
       ASK_WHO="${ASK_WHO-example-lane}" DREAMTEAM_AGENT_ID="${DREAMTEAM_AGENT_ID-}" DREAMTEAM_CONFIG="${CFG:-$TMP/on.json}" \
       TMUX="${TMUXV-/stub/tmux-socket,1,0}" DREAMTEAM_FLOW_BUDGET="${BUDGET-9}" DREAMTEAM_FLOW_MAX_LOGS="${MAXLOGS-8}" DREAMTEAM_FLOW_MAX_ROWS="${MAXROWS-200}" \
-      DREAMTEAM_FLOW_LOG="$TMP/callout.log" bash "$HOOK" >"$TMP/out" 2>"$TMP/err" || RC=$?
+      DREAMTEAM_FLOW_LOG="${LOGV-$TMP/callout.log}" bash "$HOOK" >"$TMP/out" 2>"$TMP/err" || RC=$?
   ELAPSED=$(( $(date +%s) - t0 ))
 }
 blocked() { [ "$RC" -eq 2 ] && grep -q 'FLOW CALLOUT' "$TMP/err"; }
@@ -168,7 +168,10 @@ blocked && grep -q eeee0008 "$TMP/err" && pass "…while a plainly silent row st
 G=$(row 99990001 example-lane in-progress $T0 $((T0+5)))
 TWO_DETAILS='{"id":"99990001","log":[{"ts":1,"who":"example-lane","event":"checkpoint","note":"ok"}]}
 {"id":"99990001","log":[]}'
-for shape in '<html>sorry</html>' '{' '{}' '{"id":"99990001","log":"nope"}' '{"id":"other000","log":[]}' '[]' '' "$TWO_DETAILS"; do
+BAD_TS='{"id":"99990001","log":[{"ts":"1","who":"sen","event":"ordered","note":"x"},{"ts":"2","who":"other","event":"checkpoint","note":"y"}]}'
+BAD_WHO='{"id":"99990001","log":[{"ts":1,"who":"sen","event":"ordered","note":"x"},{"ts":2,"who":42,"event":"checkpoint","note":"y"}]}'
+BAD_ENTRY='{"id":"99990001","log":[{"ts":1,"who":"sen","event":"ordered","note":"x"},"not an entry"]}'
+for shape in '<html>sorry</html>' '{' '{}' '{"id":"99990001","log":"nope"}' '{"id":"other000","log":[]}' '[]' '' "$TWO_DETAILS" "$BAD_TS" "$BAD_WHO" "$BAD_ENTRY"; do
   reset; list "$G"; printf '%s\n' "$shape" > "$FIX/show-99990001.json"; run
   allowed && [ "$(loglines)" -eq 1 ] && pass "malformed row detail ${shape:0:12} → unchecked, allowed, one logged line" \
     || fail "malformed detail ${shape:0:12}: rc=$RC log=[$(cat "$TMP/callout.log")]"
@@ -209,6 +212,27 @@ for shape in '<html>sorry</html>' '{' '{}' '[]' '{"rows":"nope"}' '{"count":1}' 
   allowed && [ "$(loglines)" -eq 1 ] && [ "$(calls)" -eq 1 ] && pass "malformed list ${shape:0:12} → allowed, one logged line" \
     || fail "malformed list ${shape:0:12}: rc=$RC calls=$(calls) log=[$(cat "$TMP/callout.log")]"
 done
+
+# 6j) xreview #237 r4: a row the ledger returns under another lane's name is not this lane's to answer for: it is
+#     filtered out before counting (the ledger's own family rule: the name itself, or the same lane under another
+#     session suffix); a row of this lane's family still counts
+reset; list "$(row 5555000a other-lane ordered $T0 null)"; run
+allowed && [ "$(loglines)" -eq 0 ] && pass "a row owned by another lane is ignored" || fail "other lane's row: rc=$RC $(cat "$TMP/err" | head -2)"
+reset; list "$(row 5555000b example-lane-8f ordered $T0 null)"; run
+blocked && grep -q 5555000b "$TMP/err" && pass "a row of this lane under another session suffix still counts" || fail "lane family row: rc=$RC"
+reset; list "$(row 5555000c example-lane ordered $T0 null)" "$(row 5555000d other-lane ordered $T0 null)"; run
+blocked && grep -q 5555000c "$TMP/err" && ! grep -q 5555000d "$TMP/err" && pass "mixed owners: only this lane's row is named" || fail "mixed owners: rc=$RC $(grep -c '^  5555' "$TMP/err")"
+
+# 6k) xreview #237 r4: nothing the hook touches may hang it: a FIFO where the key file should be, or where the log
+#     should be (no reader), and the hook is back within the budget
+reset; mkfifo "$TMP/key.fifo"; list "$(row 5555000e example-lane ordered $T0 null)"
+ASK_KEY="" KEYFILE="$TMP/key.fifo" BUDGET=2 run
+allowed && [ "$ELAPSED" -le 4 ] && [ "$(calls)" -eq 0 ] && pass "a FIFO at the key path: no hang (${ELAPSED}s), no key, allowed" || fail "key fifo: rc=$RC elapsed=${ELAPSED}s calls=$(calls)"
+rm -f "$TMP/key.fifo"
+reset; mkfifo "$TMP/log.fifo"; echo 7 > "$FIX/rc"
+: > "$TMP/callout.log"; LOGV="$TMP/log.fifo" BUDGET=2 run; rm -f "$FIX/rc"
+allowed && [ "$ELAPSED" -le 4 ] && pass "a FIFO at the log path: the outage note does not hang (${ELAPSED}s), allowed" || fail "log fifo: rc=$RC elapsed=${ELAPSED}s"
+rm -f "$TMP/log.fifo"
 
 # 6i) xreview #237 r3: ordered rows cost no request, but a flood of them must not run past the deadline either: at
 #     most MAX_ROWS rows (newest first) are judged at all, the rest reported, and the whole thing stays quick

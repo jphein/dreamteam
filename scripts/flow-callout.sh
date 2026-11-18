@@ -46,7 +46,10 @@ LOG="${DREAMTEAM_FLOW_LOG:-$HOME/.claude/state/dreamteam/flow-callout.log}"
 # note — the one logged line of a fail-open path; never fails the hook
 note() {
   mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
-  printf '%s flow-callout: %s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" "$*" >> "$LOG" 2>/dev/null || true
+  # only a regular file (or none yet) takes the line: a FIFO or a device there would hang the hook (xreview #237 r4)
+  if [ ! -e "$LOG" ] || { [ -f "$LOG" ] && [ ! -L "$LOG" ]; }; then
+    printf '%s flow-callout: %s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" "$*" >> "$LOG" 2>/dev/null || true
+  fi
 }
 
 # ── (a) stdin: a Stop payload. stop_hook_active = the harness already continued once for a stop hook → never loop.
@@ -90,7 +93,12 @@ WHO="${names[0]}"
 KEY="${ASK_KEY:-}"
 if [ -z "$KEY" ]; then
   KF="${DREAMTEAM_ASK_KEY_FILE:-$HOME/Projects/plan.realm.watch/data/ask.key}"
-  KEY="$(head -c 200 -- "$KF" 2>/dev/null | tr -d '[:space:]')" || KEY=""
+  # a regular file only (a FIFO or a device at the key path never reaches the read: that is the one hang guard, r4;
+  # a mutation showed a timeout around the read was never exercised, so there is none), at most 200 bytes of it
+  KEY=""
+  if [ -f "$KF" ] && [ ! -L "$KF" ]; then
+    KEY="$(head -c 200 -- "$KF" 2>/dev/null | tr -d '[:space:]')" || KEY=""
+  fi
 fi
 if [ -z "$KEY" ]; then
   note "no ask key (ASK_KEY or ${DREAMTEAM_ASK_KEY_FILE:-~/Projects/plan.realm.watch/data/ask.key}): open rows of ${names[*]} not checked"
@@ -127,8 +135,13 @@ fi
 # ONE pass over the rows (r3: no per-row commands before the bounds): newest first, the four open states, at most
 # MAX_ROWS of them; one TSV line each (id, state, what without tabs or newlines, cut to 70). The total says how many
 # the cap left out.
-ROWS="$(printf '%s' "$LIST" | jq -rs --argjson max "$MAX_ROWS" '
+# only rows this lane owns (r4: the ledger's answer is not trusted for ownership): the row's lane is one of my names,
+# or the same lane under another session suffix, the ledger's own family rule
+NAMES_JSON="$(printf '%s\n' "${names[@]}" | jq -R . | jq -sc .)"
+ROWS="$(printf '%s' "$LIST" | jq -rs --argjson max "$MAX_ROWS" --argjson names "$NAMES_JSON" '
+  def fam: sub("-[0-9a-f]{2,3}$"; "");
   .[0].rows | map(select(.state as $s | ["ordered","in-progress","blocked","needs-jp"] | index($s)))
+  | map(select((.lane | type) == "string" and ((.lane | fam) as $l | $names | map(fam) | index($l)) != null))
   | sort_by(-(.ordered_at // 0)) as $all
   | ($all | length | tostring), ($all[:$max][] | [.id, .state, ((.what // "") | tostring | gsub("[\t\r\n]"; " ") | .[0:70])] | @tsv)' 2>/dev/null)" || ROWS=""
 TOTAL="${ROWS%%$'\n'*}"; case "$TOTAL" in ''|*[!0-9]*) TOTAL=0 ;; esac
@@ -140,11 +153,13 @@ rowcapped=0; [ "$TOTAL" -gt "$MAX_ROWS" ] && rowcapped=$(( TOTAL - MAX_ROWS ))
 #        one of my names (or my lane family), or a note prefixed "<name>:", after the last `ordered` event. A detail
 #        that is not this row's log (HTML, broken JSON, {}, a log that is not an array, another row) proves nothing:
 #        that row is UNCHECKED, never silent (xreview #237 r1).
-NAMES_JSON="$(printf '%s\n' "${names[@]}" | jq -R . | jq -sc .)"
-verdict() { # verdict <id> <show-json> → prints spoken | silent | unreadable; the reply must be EXACTLY ONE object
+verdict() { # verdict <id> <show-json> → prints spoken | silent | unreadable; the reply must be EXACTLY ONE object whose
+            # log is an array of entries shaped {ts: number, who: string, event: string} (r4), else unreadable
   printf '%s' "$2" | jq -rs --arg id "$1" --argjson names "$NAMES_JSON" '
     def fam: sub("-[0-9a-f]{2,3}$"; "");
-    if length != 1 or (.[0] | type) != "object" or .[0].id != $id or (.[0].log | type) != "array" then "unreadable"
+    if length != 1 or (.[0] | type) != "object" or .[0].id != $id or (.[0].log | type) != "array"
+       or ((.[0].log | all(type == "object" and (.ts | type) == "number" and (.who | type) == "string" and (.event | type) == "string")) | not)
+    then "unreadable"
     else .[0].log as $log
       | ([$log[] | select(type == "object" and .event == "ordered") | .ts] | max // 0) as $since
       | ([$log[] | select(type == "object" and .event != "ordered" and ((.ts // 0) >= $since))
