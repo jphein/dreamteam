@@ -28,21 +28,15 @@ case "$TOOL" in Agent|Task) ;; *) exit 0 ;; esac
 invalid() { echo "🚫 DREAMTEAM MEMORY GATE — spawn blocked: $1 (config $CFG + config.<host>.json; fix it, or remove the overlay)" >&2; exit 2; }
 # the config with this host's overlay (config.<host>.json) deep-merged over it: scripts/lib/config.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib/config.sh" 2>/dev/null || invalid "scripts/lib/config.sh did not load"
-CFGJSON="$(dreamteam_config "$CFG")"
+CFGJSON="$(dreamteam_config "$CFG")" || invalid "this host's overlay $(basename "${CFG%.json}").$(dreamteam_host).json exists but is not one readable JSON object"
 jq -e 'type == "object"' <<<"$CFGJSON" >/dev/null 2>&1 || invalid "the merged config is not one JSON object"
 MAXMB=10000000
-getcfg() { # key default → the value; absent → default; present but not an integer 0..MAXMB (false, null, "", "3000"
-  # included: xreview #230 r2) → exit 2
-  local v; v=$(dreamteam_cfg_raw "$CFGJSON" memory "$1")
-  case "$v" in ABSENT) v="$2";; BADSECTION) invalid "memory is not an object";; esac
-  dreamteam_uint "$v" "$MAXMB" || invalid "memory.$1 is '$v', not an integer 0..$MAXMB"
-  printf '%s' "$((10#$v))"
-}
-getbool() { # section key default → true|false; present but not a JSON boolean → exit 2
-  local v; v=$(dreamteam_cfg_raw "$CFGJSON" "$1" "$2")
-  case "$v" in ABSENT) printf '%s' "$3";; true|false) printf '%s' "$v";; BADSECTION) invalid "$1 is not an object";;
-    *) invalid "$1.$2 is '$v', not true/false";; esac
-}
+STATE_ERR=$(mktemp -p "${XDG_RUNTIME_DIR:-${TMPDIR:-$HOME/.cache}}" .memgate.XXXXXX 2>/dev/null || mktemp) || invalid "no temp file"
+trap 'rm -f "$STATE_ERR"' EXIT
+# the shared validated readers (scripts/lib/config.sh): absent → default; present but invalid (false, null, "", "3000",
+# negative, fractional, oversized: xreview #230 r2) → exit 2
+getcfg() { local v e; v=$(dreamteam_int "$CFGJSON" memory "$1" "$2" 2>"$STATE_ERR") || { e=$(cat "$STATE_ERR"); invalid "$e"; }; printf '%s' "$v"; }
+getbool() { local v e; v=$(dreamteam_bool "$CFGJSON" "$1" "$2" "$3" 2>"$STATE_ERR") || { e=$(cat "$STATE_ERR"); invalid "$e"; }; printf '%s' "$v"; }
 PER_AGENT=$(getcfg perAgentMB 400) || exit 2
 HOST_RESERVE=$(getcfg hostReserveMB 6000) || exit 2
 BALLOON=$(getcfg balloonReserveMB 8000) || exit 2
@@ -59,11 +53,9 @@ if [ "$SCOPE_ONLY" = "true" ] && [ ! -f "$STATE/active" ]; then exit 0; fi
 # reserve whether or not the model is currently loaded — exactly as BALLOON reserves
 # for post-admission growth. ==false-safe (only a literal true arms it); zero effect
 # when the lane is off (the default).
-getlocal() { jq -r --arg k "$1" --arg d "$2" ".local[\$k] // \$d" <<<"$CFGJSON" 2>/dev/null || printf '%s' "$2"; }
+getlocal() { local v e; v=$(dreamteam_int "$CFGJSON" local "$1" "$2" 2>"$STATE_ERR") || { e=$(cat "$STATE_ERR"); invalid "$e"; }; printf '%s' "$v"; }
 LA=$(getbool local enabled false) || exit 2; [ "$LA" = true ] && LOCAL_ARMED=1 || LOCAL_ARMED=0
-LOCAL_RESERVE=$(dreamteam_cfg_raw "$CFGJSON" local reserveMB); [ "$LOCAL_RESERVE" = ABSENT ] && LOCAL_RESERVE=$(getlocal reserveMB 9000)
-dreamteam_uint "$LOCAL_RESERVE" "$MAXMB" || invalid "local.reserveMB is '$LOCAL_RESERVE', not an integer 0..$MAXMB"
-LOCAL_RESERVE=$((10#$LOCAL_RESERVE))
+LOCAL_RESERVE=$(getlocal reserveMB 9000) || exit 2
 if [ "$LOCAL_ARMED" = 1 ]; then LOCAL_EFF=$LOCAL_RESERVE; LOCAL_NOTE="  local_reserve=${LOCAL_RESERVE} (ollama lane armed)"; else LOCAL_EFF=0; LOCAL_NOTE=""; fi
 
 # Balloon reserve is sized for ONE team's build spikes; scale by scopes actually

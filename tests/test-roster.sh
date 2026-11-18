@@ -160,6 +160,18 @@ for h in familiar katana fami_liar; do
     && pass "overlay agreement ($h): mem-budget, dashboard-data and mem-gate all read the same merged config (an invalid host name takes no overlay)" \
     || fail "overlay drift ($h): mem-budget='$bud' dashboard=$dsh gate='$gate'"
 done
+# invalid values: the gate blocks, mem-budget says CONFIG INVALID (exit 2), the dashboard carries configError: never a
+# budget the gate will not honour (xreview #230 r3)
+for c in 'peragent|{"memory":{"perAgentMB":"x"}}' 'memory|{"memory":{"minSwapFreeMB":false}}' 'local|{"local":{"enabled":true,"reserveMB":"1e4"}}' 'enabled|{"local":{"enabled":"yes"}}' 'trunc|{"memory":'; do
+  n=${c%%|*}; printf '%s
+' "${c#*|}" > "$OVR/config.inv$n.json"
+  b=$(DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=inv$n CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$BUD" 2>&1); brc=$?
+  d=$(DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=inv$n CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$DASH" --json 2>/dev/null | jq -r '.configError // ""')
+  printf '%s' '{"tool_name":"Agent"}' | DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=inv$n CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$GATE" >/dev/null 2>&1; grc=$?
+  [ $brc = 2 ] && [[ "$b" == *"CONFIG INVALID"* ]] && [ -n "$d" ] && [ $grc = 2 ] \
+    && pass "invalid overlay ($n): gate blocks, mem-budget reports CONFIG INVALID, dashboard carries configError" \
+    || fail "invalid agreement ($n): budget rc=$brc '$(head -c 120 <<<"$b")' dashboard='$d' gate=$grc"
+done
 
 # Local-lane reserve (#37): .local.reserveMB is read in THREE places — dashboard-data
 # (ml("reserveMB", N)), mem-budget + mem-gate (getlocal reserveMB N). All must agree,

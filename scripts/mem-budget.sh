@@ -10,20 +10,25 @@ CFG="${DREAMTEAM_CONFIG:-$ROOT/config.json}"
 [ -f "$ROOT/scripts/lib.sh" ] && . "$ROOT/scripts/lib.sh"
 # the config with this host's overlay (config.<host>.json) deep-merged over it: scripts/lib/config.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib/config.sh"
-CFGJSON="$(dreamteam_config "$CFG")"
-getcfg() { jq -r --arg k "$1" --arg d "$2" ".memory[\$k] // \$d" <<<"$CFGJSON" 2>/dev/null || printf '%s' "$2"; }
+budget_invalid() { echo "dreamteam memory budget: CONFIG INVALID: $1 (the gate blocks every spawn until it is fixed)" >&2; exit 2; }
+CFGJSON="$(dreamteam_config "$CFG")" || budget_invalid "this host's overlay exists but is not one readable JSON object"
+BERR=$(mktemp -p "${XDG_RUNTIME_DIR:-${TMPDIR:-$HOME/.cache}}" .membudget.XXXXXX 2>/dev/null || mktemp); trap 'rm -f "$BERR"' EXIT
+getcfg() { local v; v=$(dreamteam_int "$CFGJSON" memory "$1" "$2" 2>"$BERR") || budget_invalid "$(cat "$BERR")"; printf '%s' "$v"; }
 getscope() { jq -r --arg k "$1" --arg d "$2" ".scope[\$k] // \$d" <<<"$CFGJSON" 2>/dev/null || printf '%s' "$2"; }
-PER_AGENT=$(getcfg perAgentMB 400); HOST_RESERVE=$(getcfg hostReserveMB 6000)
-BALLOON=$(getcfg balloonReserveMB 8000); MIN_AVAIL=$(getcfg minAvailableMB 8000)
-MAX_AGENTS=$(getcfg maxAgents 30)
+# every key the gate reads, validated the same way (an exit inside $( ) is the subshell's: || exit 2 carries it out)
+PER_AGENT=$(getcfg perAgentMB 400) || exit 2; HOST_RESERVE=$(getcfg hostReserveMB 6000) || exit 2
+BALLOON=$(getcfg balloonReserveMB 8000) || exit 2; MIN_AVAIL=$(getcfg minAvailableMB 8000) || exit 2
+MAX_AGENTS=$(getcfg maxAgents 30) || exit 2; MIN_SWAP_FREE=$(getcfg minSwapFreeMB 0) || exit 2
+SO=$(dreamteam_bool "$CFGJSON" memory scopeToDreamteam false 2>"$BERR") || budget_invalid "$(cat "$BERR")"
+[ "$PER_AGENT" -ge 1 ] || budget_invalid "memory.perAgentMB is 0"
 
 # Local-model lane reserve (#37) — held back only when the ollama lane is armed
 # (.local.enabled == true); its resident model is invisible to the claude-proc
 # accounting. ==false-safe. Default 9000 MUST match mem-gate.sh + dashboard-data.sh
 # (test-roster.sh defaults-agreement guard enforces this).
-getlocal() { jq -r --arg k "$1" --arg d "$2" ".local[\$k] // \$d" <<<"$CFGJSON" 2>/dev/null || printf '%s' "$2"; }
-LOCAL_ARMED=$(jq -r 'if .local.enabled == true then 1 else 0 end' <<<"$CFGJSON" 2>/dev/null || echo 0)
-LOCAL_RESERVE=$(getlocal reserveMB 9000); LOCAL_RESERVE=${LOCAL_RESERVE//[!0-9]/}; [ -n "$LOCAL_RESERVE" ] || LOCAL_RESERVE=9000
+getlocal() { local v; v=$(dreamteam_int "$CFGJSON" local "$1" "$2" 2>"$BERR") || budget_invalid "$(cat "$BERR")"; printf '%s' "$v"; }
+LA=$(dreamteam_bool "$CFGJSON" local enabled false 2>"$BERR") || budget_invalid "$(cat "$BERR")"; [ "$LA" = true ] && LOCAL_ARMED=1 || LOCAL_ARMED=0
+LOCAL_RESERVE=$(getlocal reserveMB 9000) || exit 2
 [ "$LOCAL_ARMED" = 1 ] && LOCAL_EFF=$LOCAL_RESERVE || LOCAL_EFF=0
 
 # Balloon reserve is sized for ONE team's build spikes. N teams can balloon

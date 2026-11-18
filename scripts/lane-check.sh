@@ -7,9 +7,9 @@ set -uo pipefail
 ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 CFG="${DREAMTEAM_CONFIG:-$ROOT/config.json}"
 . "$(dirname "${BASH_SOURCE[0]}")/lib/config.sh"
-CFGJSON="$(dreamteam_config "$CFG")"
-# an unreadable or invalid number is HELD (exit 1), never read as "no floor" (xreview #230 r1)
 held() { echo "lane-check held: $1 ($(dreamteam_host))"; exit 1; }
+CFGJSON="$(dreamteam_config "$CFG")" || held "this host's overlay exists but is not one readable JSON object"
+# an unreadable or invalid number is HELD (exit 1), never read as "no floor" (xreview #230 r1)
 num() { # key → NUM (no subshell, so a held line reaches stdout)
   local v; v=$(dreamteam_cfg_raw "$CFGJSON" lane "$1"); [ "$v" = ABSENT ] && v=0
   dreamteam_uint "$v" 10000000 || held "lane.$1 is '$v', not an integer"; NUM=$((10#$v)); }

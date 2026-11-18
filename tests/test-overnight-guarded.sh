@@ -749,6 +749,10 @@ reset; mkqueue jphein/realmwatch:2
 FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 DREAMTEAM_HOST=familiar FAKE_AVAIL=30000 run_g >/dev/null
 [ "$(gj .decision)" = no-start ] && [[ "$(gj .reason)" == *"min_available_mb is '\"5500MiB\"', not an integer"* ]] && [ ! -s "$TMP/claude.log" ] \
   && pass "memory: an invalid floor ('5500MiB') is a hold, never 'no floor'" || fail "bad floor: $(gj .decision) '$(gj .reason)'"
+printf '{"overnight":' > "$TMP/config.familiar.json"
+reset; mkqueue jphein/realmwatch:2
+FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 DREAMTEAM_HOST=familiar FAKE_AVAIL=1000 run_g >/dev/null
+[ "$(gj .decision)" = no-start ] && [[ "$(gj .reason)" == "memory: this host's config overlay is unreadable" ]] && pass "memory: a truncated overlay holds the night (never the base's 'no floor')" || fail "trunc overlay: $(gj .decision) '$(gj .reason)'"
 printf '%s\n' '{"overnight":{"min_swap_free_mb":null}}' > "$TMP/config.familiar.json"
 reset; mkqueue jphein/realmwatch:2
 FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 DREAMTEAM_HOST=familiar FAKE_AVAIL=30000 run_g >/dev/null

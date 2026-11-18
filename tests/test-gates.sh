@@ -239,7 +239,7 @@ DREAMTEAM_CONFIG="$OV/config.json" DREAMTEAM_HOST=familiar FAKE_AVAIL=4000 FAKE_
 printf '{"memory":' > "$OV/config.broken.json"
 DREAMTEAM_CONFIG="$OV/config.json" DREAMTEAM_HOST=broken FAKE_AVAIL=6700 FAKE_SWAP_FREE=8700 FAKE_PGREP_COUNT=1 \
   run_gate "$MEM_GATE" '{"tool_name":"Agent","tool_input":{"prompt":"x"}}'
-[ "$GRC" -eq 2 ] && grep -q '< 8000MiB floor' "$TMP/err" && pass "overlay: an unreadable overlay falls back to the base (stricter), never a half-read" || fail "broken overlay: exit $GRC"
+[ "$GRC" -eq 2 ] && grep -q "config.broken.json exists but is not one readable JSON object" "$TMP/err" && pass "overlay: an unreadable overlay BLOCKS (its floors may be the only ones), never a fall-back or a half-read" || fail "broken overlay: exit $GRC $(head -1 "$TMP/err")"
 
 # xreview #230 r1: what the gate must never admit on
 g(){ GRC=0; printf '%s' '{"tool_name":"Agent","tool_input":{"prompt":"x"}}' | env "$@" FAKE_PGREP_COUNT=1 bash "$MEM_GATE" 2>"$TMP/err" || GRC=$?; }
@@ -247,7 +247,7 @@ g DREAMTEAM_CONFIG="$OV/config.json" DREAMTEAM_HOST=fami_liar FAKE_AVAIL=7000 FA
 [ "$GRC" -eq 2 ] && grep -q '< 8000MiB floor' "$TMP/err" && pass "host: 'fami_liar' is invalid and never cleaned into 'familiar' (base floor applies)" || fail "host normalize: exit $GRC $(head -1 "$TMP/err")"
 printf '%s\n%s\n' '{"memory":{"minAvailableMB":100}}' '{"memory":{"minAvailableMB":100}}' > "$OV/config.twodoc.json"
 g DREAMTEAM_CONFIG="$OV/config.json" DREAMTEAM_HOST=twodoc FAKE_AVAIL=7000 FAKE_SWAP_FREE=8700
-[ "$GRC" -eq 2 ] && grep -q '< 8000MiB floor' "$TMP/err" && pass "overlay: a file with two JSON documents is not one object → ignored (base)" || fail "two docs: exit $GRC $(head -1 "$TMP/err")"
+[ "$GRC" -eq 2 ] && grep -q "config.twodoc.json exists but is not one readable JSON object" "$TMP/err" && pass "overlay: a file with two JSON documents is not one object → blocks" || fail "two docs: exit $GRC $(head -1 "$TMP/err")"
 for c in 'minAvailableMB|"bad"' 'minAvailableMB|-5' 'hostReserveMB|-9000' 'perAgentMB|0' 'minSwapFreeMB|"2e3"' 'minSwapFreeMB|2048.5' 'minAvailableMB|99999999999'; do
   k=${c%%|*}; v=${c#*|}; printf '{"memory":{"%s":%s}}\n' "$k" "$v" > "$OV/config.badnum.json"
   g DREAMTEAM_CONFIG="$OV/config.json" DREAMTEAM_HOST=badnum FAKE_AVAIL=30000 FAKE_SWAP_FREE=8700
@@ -298,6 +298,11 @@ o=$(DREAMTEAM_CONFIG="$OV/config.json" DREAMTEAM_HOST=badlane FAKE_AVAIL=30000 F
 [ $rc = 1 ] && [[ "$o" == *"lane.minSwapFreeMB is 'false'"* ]] && pass "lane-check: a present false is held, not 'no floor'" || fail "lane-check false: $rc '$o'"
 o=$(DREAMTEAM_CONFIG="$OV/config.json" DREAMTEAM_HOST=katana FAKE_AVAIL=junk FAKE_SWAP_FREE=8700 bash "$ROOT/scripts/lane-check.sh"); rc=$?
 [ $rc = 1 ] && [[ "$o" == *"no readable available memory"* ]] && pass "lane-check: an unreadable MemAvailable is held" || fail "lane-check junk: $rc '$o'"
+printf '{"lane":' > "$OV/config.trunc.json"
+o=$(DREAMTEAM_CONFIG="$OV/config.json" DREAMTEAM_HOST=trunc FAKE_AVAIL=1000 FAKE_SWAP_FREE=0 bash "$ROOT/scripts/lane-check.sh"); rc=$?
+[ $rc = 1 ] && [[ "$o" == *"overlay exists but is not one readable"* ]] && pass "lane-check: a truncated overlay holds (never the base's 'no floor')" || fail "lane-check trunc: $rc '$o'"
+g DREAMTEAM_CONFIG="$OV/config.json" DREAMTEAM_HOST=trunc FAKE_AVAIL=30000 FAKE_SWAP_FREE=0
+[ "$GRC" -eq 2 ] && pass "gate: a truncated overlay with plenty of RAM and no swap still blocks (its swap floor is unknowable)" || fail "gate trunc: exit $GRC"
 # the repo's own config.familiar.json parses and carries the accepted numbers (balloon stays the base's)
 jq -e '.memory == {"minAvailableMB":3000,"minSwapFreeMB":2048,"perAgentMB":750,"hostReserveMB":2048} and .lane == {"minAvailableMB":6800,"minSwapFreeMB":4096}
        and .overnight == {"min_available_mb":5500,"min_swap_free_mb":4096} and (.memory | has("balloonReserveMB") | not)' "$ROOT/config.familiar.json" >/dev/null \

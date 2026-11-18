@@ -182,7 +182,7 @@ guard_line() {
 log() { echo "$(date +%FT%T) overnight-guarded: $*" >> "$LOG" 2>/dev/null || true; }
 # the config with this host's overlay (config.<host>.json) deep-merged over it: scripts/lib/config.sh
 . "$ROOT/scripts/lib/config.sh"
-CFGJSON="$(dreamteam_config "$CFG")"
+CFGJSON="$(dreamteam_config "$CFG")"; CFG_RC=$?   # 3 = this host's overlay exists but is unreadable: held below
 oc()  { jq -r --arg k "$1" --arg d "$2" '(.overnight[$k] // $d) | tostring' <<<"$CFGJSON" 2>/dev/null || printf '%s' "$2"; }
 sc()  { jq -r --arg k "$1" --arg d "$2" '.scope[$k] // $d' <<<"$CFGJSON" 2>/dev/null || printf '%s' "$2"; }
 olist() { jq -c --arg k "$1" '.overnight[$k] // []' <<<"$CFGJSON" 2>/dev/null || echo '[]'; }
@@ -710,7 +710,9 @@ skip() { # reason
 [ $QRC -eq 0 ] || skip "$QR"
 # (a2) memory (Sen 2026-11-17): MemAvailable and swap free, both from config (0 = no floor; familiar's overlay sets
 # 5500/4096). Judged after the work gate like the quota, so a quiet night stays silent.
-# One validated integer throughout (xreview #230 r1): an invalid floor or an unreadable measurement is a HOLD.
+# One validated integer throughout (xreview #230 r1): an invalid floor or an unreadable measurement is a HOLD, and so
+# is an overlay that exists but cannot be read (its floors may be the only ones: xreview #230 r3).
+[ "$CFG_RC" -eq 0 ] || skip "memory: this host's config overlay is unreadable"
 MEM_MIN=$(dreamteam_cfg_raw "$CFGJSON" overnight min_available_mb); [ "$MEM_MIN" = ABSENT ] && MEM_MIN=0
 SWAP_MIN=$(dreamteam_cfg_raw "$CFGJSON" overnight min_swap_free_mb); [ "$SWAP_MIN" = ABSENT ] && SWAP_MIN=0
 dreamteam_uint "$MEM_MIN" 10000000 || skip "memory: overnight.min_available_mb is '$MEM_MIN', not an integer"
