@@ -74,8 +74,10 @@ is_lead() { local l; for l in "${leads[@]}"; do [ "$1" = "$l" ] && return 0; don
 add "${ASK_WHO:-}"
 AID="$(dt_agent_id)"; add "${AID%%@*}"
 if [ "${#names[@]}" -eq 0 ] && [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
-  tl=$(( BUDGET * 1000 - ($(( $(date +%s%N) / 1000000 )) - T0) )); [ "$tl" -gt 3000 ] && tl=3000   # ms, the same clock as the requests
-  [ "$tl" -ge 200 ] && add "$(timeout "$(( tl / 1000 )).$(printf '%03d' $(( tl % 1000 )))" tmux display-message -p '#S' 2>/dev/null || true)"
+  # ms, the same clock as the requests; the TERM grace (-k 1) is paid from the budget, so a tmux that ignores TERM
+  # is still killed inside it (xreview #237 r3)
+  tl=$(( BUDGET * 1000 - ($(( $(date +%s%N) / 1000000 )) - T0) - 1000 )); [ "$tl" -gt 3000 ] && tl=3000
+  [ "$tl" -ge 200 ] && add "$(timeout -k 1 "$(( tl / 1000 )).$(printf '%03d' $(( tl % 1000 )))" tmux display-message -p '#S' 2>/dev/null || true)"
 fi
 [ "${#names[@]}" -gt 0 ] || exit 0
 
@@ -103,10 +105,11 @@ URL="${ASK_URL:-http://127.0.0.1:7810}"; URL="${URL%/}"
 left() { echo $(( BUDGET * 1000 - ($(( $(date +%s%N) / 1000000 )) - T0) )); }   # ms left of the budget
 secs() { printf '%d.%03d' $(( $1 / 1000 )) $(( $1 % 1000 )); }                     # ms → "s.mmm" for curl -m / timeout
 # the key reaches curl on stdin (-H @-), never in argv: /proc/<pid>/cmdline is readable by every process of this uid
-get() { # get <url> <max-ms>
+get() { # get <url> <max-ms>; a reply over 1 MiB is refused (the ledger's list is kilobytes)
   local m="$2" l; l=$(left); [ "$l" -ge 200 ] || return 28; [ "$m" -le "$l" ] || m="$l"
-  printf 'X-Ask-Key: %s\n' "$KEY" | curl -fsS -m "$(secs "$m")" -H @- -H "X-Ask-Who: $WHO" -H "Accept: application/json" "$1"
+  printf 'X-Ask-Key: %s\n' "$KEY" | curl -fsS -m "$(secs "$m")" --max-filesize 1048576 -H @- -H "X-Ask-Who: $WHO" -H "Accept: application/json" "$1"
 }
+MAX_ROWS="${DREAMTEAM_FLOW_MAX_ROWS:-200}"; case "$MAX_ROWS" in ''|*[!0-9]*) MAX_ROWS=200 ;; esac
 
 # ── (g) my open rows. Any failure here is an outage: one line, exit 0.
 MINE="$(IFS=,; echo "${names[*]}")"
@@ -115,26 +118,34 @@ if [ "$rc" -ne 0 ]; then
   note "plan unreachable or refused at $URL (curl rc $rc): open rows of $MINE not checked"
   exit 0
 fi
-# the ledger's row list, or nothing: an object whose rows are objects with a string id and state (xreview #237 r2:
-# a malformed list allows with the log line, like a malformed detail)
-if ! printf '%s' "$LIST" | jq -e 'type == "object" and (.rows | type == "array") and all(.rows[]; type == "object" and (.id | type) == "string" and (.state | type) == "string")' >/dev/null 2>&1; then
+# the ledger's row list, or nothing: EXACTLY ONE object (a stream of two is not a reply, xreview #237 r3) whose rows
+# are objects with a string id and state (r2: a malformed list allows with the log line, like a malformed detail)
+if ! printf '%s' "$LIST" | jq -se 'length == 1 and (.[0] | type == "object" and (.rows | type == "array") and all(.rows[]; type == "object" and (.id | type) == "string" and (.state | type) == "string"))' >/dev/null 2>&1; then
   note "the ledger at $URL answered something that is not its row list: open rows of $MINE not checked"
   exit 0
 fi
-# newest first (the ledger lists that way; sorted here so a cap always drops the oldest), the four open states only
-ROWS="$(printf '%s' "$LIST" | jq -c '.rows | sort_by(-(.ordered_at // 0)) | .[] | select(.state as $s | ["ordered","in-progress","blocked","needs-jp"] | index($s)) | {id, state, what}' 2>/dev/null)" || ROWS=""
-[ -n "$ROWS" ] || exit 0
+# ONE pass over the rows (r3: no per-row commands before the bounds): newest first, the four open states, at most
+# MAX_ROWS of them; one TSV line each (id, state, what without tabs or newlines, cut to 70). The total says how many
+# the cap left out.
+ROWS="$(printf '%s' "$LIST" | jq -rs --argjson max "$MAX_ROWS" '
+  .[0].rows | map(select(.state as $s | ["ordered","in-progress","blocked","needs-jp"] | index($s)))
+  | sort_by(-(.ordered_at // 0)) as $all
+  | ($all | length | tostring), ($all[:$max][] | [.id, .state, ((.what // "") | tostring | gsub("[\t\r\n]"; " ") | .[0:70])] | @tsv)' 2>/dev/null)" || ROWS=""
+TOTAL="${ROWS%%$'\n'*}"; case "$TOTAL" in ''|*[!0-9]*) TOTAL=0 ;; esac
+ROWS="${ROWS#*$'\n'}"; [ "$ROWS" = "$TOTAL" ] && ROWS=""
+[ "$TOTAL" -gt 0 ] || exit 0
+rowcapped=0; [ "$TOTAL" -gt "$MAX_ROWS" ] && rowcapped=$(( TOTAL - MAX_ROWS ))
 
 # ── (h) which of them are silent. `ordered` = silent by construction. Otherwise the row's log decides: an event by
 #        one of my names (or my lane family), or a note prefixed "<name>:", after the last `ordered` event. A detail
 #        that is not this row's log (HTML, broken JSON, {}, a log that is not an array, another row) proves nothing:
 #        that row is UNCHECKED, never silent (xreview #237 r1).
 NAMES_JSON="$(printf '%s\n' "${names[@]}" | jq -R . | jq -sc .)"
-verdict() { # verdict <id> <show-json> → prints spoken | silent | unreadable
-  printf '%s' "$2" | jq -r --arg id "$1" --argjson names "$NAMES_JSON" '
+verdict() { # verdict <id> <show-json> → prints spoken | silent | unreadable; the reply must be EXACTLY ONE object
+  printf '%s' "$2" | jq -rs --arg id "$1" --argjson names "$NAMES_JSON" '
     def fam: sub("-[0-9a-f]{2,3}$"; "");
-    if type != "object" or .id != $id or (.log | type) != "array" then "unreadable"
-    else .log as $log
+    if length != 1 or (.[0] | type) != "object" or .[0].id != $id or (.[0].log | type) != "array" then "unreadable"
+    else .[0].log as $log
       | ([$log[] | select(type == "object" and .event == "ordered") | .ts] | max // 0) as $since
       | ([$log[] | select(type == "object" and .event != "ordered" and ((.ts // 0) >= $since))
                  | select((((.who // "") | tostring | fam) as $w | ($names | map(fam) | index($w)) != null)
@@ -144,13 +155,13 @@ verdict() { # verdict <id> <show-json> → prints spoken | silent | unreadable
     end' 2>/dev/null || echo unreadable
 }
 silent=(); checked=0; unread=0; capped=0; budgeted=0
-while IFS= read -r r; do
-  [ -n "$r" ] || continue
-  id="$(printf '%s' "$r" | jq -r .id)"; state="$(printf '%s' "$r" | jq -r .state)"; what="$(printf '%s' "$r" | jq -r '.what // ""' | cut -c1-70)"
+while IFS=$'\t' read -r id state what; do
+  [ -n "$id" ] || continue
+  # the deadline first, before any row's work, ordered rows included (r3); a row past it is reported, not judged
+  if [ "$(left)" -lt 200 ]; then budgeted=$((budgeted + 1)); continue; fi
   case "$id" in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) continue ;; esac
   if [ "$state" = "ordered" ]; then silent+=("$id	$what"); continue; fi
   if [ "$checked" -ge "$MAX_LOGS" ]; then capped=$((capped + 1)); continue; fi
-  if [ "$(left)" -lt 200 ]; then budgeted=$((budgeted + 1)); continue; fi
   checked=$((checked + 1))
   SHOW="$(get "$URL/api/flow/$id" 3000 2>/dev/null)" || { unread=$((unread + 1)); continue; }
   case "$(verdict "$id" "$SHOW")" in
@@ -163,6 +174,7 @@ why=""
 [ "$unread" -gt 0 ] && why="$why; $unread with an unreadable row log"
 [ "$capped" -gt 0 ] && why="$why; $capped past the cap of $MAX_LOGS newest"
 [ "$budgeted" -gt 0 ] && why="$why; $budgeted past the ${BUDGET}s budget"
+[ "$rowcapped" -gt 0 ] && why="$why; $rowcapped past the row cap of $MAX_ROWS newest"
 [ -n "$why" ] && note "rows of $MINE not checked at $URL${why}"
 
 [ "${#silent[@]}" -gt 0 ] || exit 0

@@ -80,7 +80,7 @@ run() {
   printf '%s' "${1:-{\"hook_event_name\":\"Stop\",\"stop_hook_active\":false\}}" \
     | PATH="$TMP/bin:$PATH" FIX="$FIX" ASK_URL="http://plan.test" ASK_KEY="${ASK_KEY-$FAKEKEY}" DREAMTEAM_ASK_KEY_FILE="${KEYFILE-$TMP/no-such-key}" \
       ASK_WHO="${ASK_WHO-example-lane}" DREAMTEAM_AGENT_ID="${DREAMTEAM_AGENT_ID-}" DREAMTEAM_CONFIG="${CFG:-$TMP/on.json}" \
-      TMUX="${TMUXV-/stub/tmux-socket,1,0}" DREAMTEAM_FLOW_BUDGET="${BUDGET-9}" DREAMTEAM_FLOW_MAX_LOGS="${MAXLOGS-8}" \
+      TMUX="${TMUXV-/stub/tmux-socket,1,0}" DREAMTEAM_FLOW_BUDGET="${BUDGET-9}" DREAMTEAM_FLOW_MAX_LOGS="${MAXLOGS-8}" DREAMTEAM_FLOW_MAX_ROWS="${MAXROWS-200}" \
       DREAMTEAM_FLOW_LOG="$TMP/callout.log" bash "$HOOK" >"$TMP/out" 2>"$TMP/err" || RC=$?
   ELAPSED=$(( $(date +%s) - t0 ))
 }
@@ -166,7 +166,9 @@ blocked && grep -q eeee0008 "$TMP/err" && pass "…while a plainly silent row st
 # 6e) xreview #237 r1: a MALFORMED row detail is not proof of silence: HTML, invalid JSON, {} (no log), a log that
 #     is not an array, or another row's detail → that row unchecked (allowed), one logged line
 G=$(row 99990001 example-lane in-progress $T0 $((T0+5)))
-for shape in '<html>sorry</html>' '{' '{}' '{"id":"99990001","log":"nope"}' '{"id":"other000","log":[]}' '[]'; do
+TWO_DETAILS='{"id":"99990001","log":[{"ts":1,"who":"example-lane","event":"checkpoint","note":"ok"}]}
+{"id":"99990001","log":[]}'
+for shape in '<html>sorry</html>' '{' '{}' '{"id":"99990001","log":"nope"}' '{"id":"other000","log":[]}' '[]' '' "$TWO_DETAILS"; do
   reset; list "$G"; printf '%s\n' "$shape" > "$FIX/show-99990001.json"; run
   allowed && [ "$(loglines)" -eq 1 ] && pass "malformed row detail ${shape:0:12} → unchecked, allowed, one logged line" \
     || fail "malformed detail ${shape:0:12}: rc=$RC log=[$(cat "$TMP/callout.log")]"
@@ -183,21 +185,38 @@ allowed && [ "$ELAPSED" -le 4 ] && [ "$(calls)" -le 2 ] && [ "$(loglines)" -eq 1
   || fail "budget: rc=$RC elapsed=${ELAPSED}s calls=$(calls) log=[$(cat "$TMP/callout.log")]"
 rm -f "$FIX/delay"
 # 6f2) xreview #237 r2: the clock starts before ANY external command, the tmux fallback included. A tmux that takes
-#      1 s and a server that takes 1 s, under a 2 s budget: the list is read, the row log is not (budget), ≤ 3 s.
+#      1 s and a server that takes 2 s, under a 3 s budget (one second of it reserved for the tmux kill grace): the
+#      list is read, the row log is not (budget), ≤ 4 s. With the clock started after tmux the row log would be read.
 reset; printf '#!/usr/bin/env bash\nsleep 1; echo example-lane\n' > "$TMP/bin/tmux"
-list "$H1"; show 88880001 "$H1" "$SPOKE"; echo 1 > "$FIX/delay"
-ASK_WHO="" BUDGET=2 run
-allowed && [ "$ELAPSED" -le 3 ] && [ "$(calls)" -eq 1 ] && grep -q 'budget' "$TMP/callout.log" \
+list "$H1"; show 88880001 "$H1" "$SPOKE"; echo 2 > "$FIX/delay"
+ASK_WHO="" BUDGET=3 run
+allowed && [ "$ELAPSED" -le 4 ] && [ "$(calls)" -eq 1 ] && grep -q 'budget' "$TMP/callout.log" \
   && pass "a slow tmux fallback spends the same budget: list only (${ELAPSED}s, $(calls) call), the row logged as past the budget" \
   || fail "tmux on the clock: rc=$RC elapsed=${ELAPSED}s calls=$(calls) log=[$(cat "$TMP/callout.log")]"
 rm -f "$FIX/delay"; printf '#!/usr/bin/env bash\necho "%s"\n' "example-lane" > "$TMP/bin/tmux"
+# 6f3) xreview #237 r3: a tmux that ignores TERM is killed after the grace period; the hook returns within the budget
+#      plus that grace (BUDGET 2: the tmux call gets at most 2 s, then -k 1), with no identity → allowed
+reset; printf '#!/usr/bin/env bash\ntrap "" TERM\nsleep 20\n' > "$TMP/bin/tmux"; list "$(row ffff0022 example-lane ordered $T0 null)"
+ASK_WHO="" BUDGET=2 run
+allowed && [ "$ELAPSED" -le 5 ] && [ "$(calls)" -eq 0 ] && pass "a TERM-ignoring tmux is killed (-k): back in ${ELAPSED}s, nothing asked" || fail "TERM-ignoring tmux: rc=$RC elapsed=${ELAPSED}s calls=$(calls)"
+printf '#!/usr/bin/env bash\necho "%s"\n' "example-lane" > "$TMP/bin/tmux"
 
 # 6h) xreview #237 r2: a malformed LIST reply allows with the promised log line, shape by shape (like 6e)
-for shape in '<html>sorry</html>' '{' '{}' '[]' '{"rows":"nope"}' '{"count":1}' '{"rows":[1,2]}' 'null'; do
+TWO_DOCS='{"rows":[{"id":"aaaa0001","state":"ordered","what":"x"}]}
+{"rows":[]}'
+for shape in '<html>sorry</html>' '{' '{}' '[]' '{"rows":"nope"}' '{"count":1}' '{"rows":[1,2]}' 'null' '' "$TWO_DOCS"; do
   reset; printf '%s\n' "$shape" > "$FIX/list.json"; run
   allowed && [ "$(loglines)" -eq 1 ] && [ "$(calls)" -eq 1 ] && pass "malformed list ${shape:0:12} → allowed, one logged line" \
     || fail "malformed list ${shape:0:12}: rc=$RC calls=$(calls) log=[$(cat "$TMP/callout.log")]"
 done
+
+# 6i) xreview #237 r3: ordered rows cost no request, but a flood of them must not run past the deadline either: at
+#     most MAX_ROWS rows (newest first) are judged at all, the rest reported, and the whole thing stays quick
+reset; flood=(); for i in $(seq 1000 1299); do flood+=("$(row "6666$i" example-lane ordered $((T0+i)) null)"); done
+list "${flood[@]}"; MAXROWS=50 run
+blocked && [ "$ELAPSED" -le 4 ] && [ "$(loglines)" -eq 1 ] && grep -q 'row cap' "$TMP/callout.log" && grep -q '66661299' "$TMP/err" && ! grep -q '66661000' "$TMP/err" \
+  && pass "300 ordered rows, row cap 50: blocked on the newest 50 in ${ELAPSED}s, 250 reported past the row cap" \
+  || fail "ordered flood: rc=$RC elapsed=${ELAPSED}s log=[$(cat "$TMP/callout.log")] named=$(grep -c '^  6666' "$TMP/err")"
 
 # 6g) xreview #237 r1: the row-log cap is visible, newest rows first. Nine in-progress rows, the OLDEST silent: with
 #     the cap at 8 the oldest is not read and the log says so; with the cap at 9 it is read and blocks.
