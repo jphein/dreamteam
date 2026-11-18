@@ -185,6 +185,13 @@ out=$(bash "$S"); now=$(num <<< "$out")
 case "$out" in *", 3 kept dirs skipped · "*) ok "the line says how many kept dirs were skipped" ;; *) bad "skip not visible: '$out'" ;; esac
 [ "$(wc -l < "$XDG_STATE_HOME/dreamteam/sync-conflicts.skipped")" = 3 ] && ok "the skipped dirs are listed in a file" || bad "skipped list"
 [ "$(awk -F' · ' '{print NF}' <<< "$out")" = 3 ] && ok "the line is still three segments" || bad "segments with the skip note"
+mkdir -p "$B/scratch/align-backup-20261116-121840/skills" "$A/repo/scratch/followups/syncthing-backups/deep"
+touch "$B/scratch/align-backup-20261116-121840/skills/SKILL.sync-conflict-20261116-000005-ABCDEFG.md" \
+      "$A/repo/scratch/followups/syncthing-backups/deep/x.sync-conflict-20260920-000006-ABCDEFG.txt"
+out=$(bash "$S"); now=$(num <<< "$out")
+[ "$now" = "$base" ] && ok "copies under align-backup-*/ and syncthing-backups/ are not counted (Sen 2026-11-18)" || bad "align/syncthing backups counted: $base -> $now"
+case "$out" in *", 5 kept dirs skipped · "*) ok "and they show in the skipped count (5)" ;; *) bad "skip count with the two new names: '$out'" ;; esac
+rm -rf "$B/scratch/align-backup-20261116-121840" "$A/repo/scratch/followups"
 touch "$A/repo/scratch/hk/backups/real.sync-conflict-20261117-000004-ABCDEFG.md"                 # a generic backups dir
 g=$(bash "$S" | num)
 [ "$g" = $((base + 1)) ] && ok "a copy in a plain 'backups' dir is NOT hidden (no generic default name)" || bad "generic backups hidden: $base -> $g"
