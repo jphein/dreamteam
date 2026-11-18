@@ -99,15 +99,19 @@ CONFIG_ERROR = ""   # set when the config the gate reads is invalid: the gate th
 if _host():
     _ov_path = (CFG[:-5] if CFG.endswith(".json") else CFG) + "." + _host() + ".json"
     try:
-        _ov = json.load(open(_ov_path)) if os.path.exists(_ov_path) else None   # json.load: exactly one document
+        _exists = os.path.lexists(_ov_path)                    # lexists: a dangling link is an unreadable overlay
+        _ov = json.load(open(_ov_path)) if _exists else None   # json.load: exactly one document
     except Exception:
         _ov = None
         CONFIG_ERROR = "this host's overlay exists but is not one readable JSON object"
-    if _ov is not None and not isinstance(_ov, dict):
-        _ov = None
-        CONFIG_ERROR = "this host's overlay exists but is not one readable JSON object"
+    else:
+        if _exists and not isinstance(_ov, dict):              # null, a list, a number: not one object
+            _ov = None
+            CONFIG_ERROR = "this host's overlay exists but is not one readable JSON object"
 if isinstance(_ov, dict): _full_cfg = _deep(_full_cfg, _ov)
 cfg       = _full_cfg.get("memory", {})
+if "memory" in _full_cfg and not isinstance(_full_cfg["memory"], dict):
+    CONFIG_ERROR = CONFIG_ERROR or "memory is not an object"; cfg = {}
 scope_cfg = _full_cfg.get("scope", {}) if isinstance(_full_cfg.get("scope"), dict) else {}
 def _valid_int(v):  # the gate's rule (scripts/lib/config.sh dreamteam_uint): a JSON integer 0..10^7, never a bool
     return type(v) is int and 0 <= v <= 10000000
@@ -121,12 +125,16 @@ PER_AGENT = m("perAgentMB", 400);  HOST_RES = m("hostReserveMB", 6000)
 BALLOON   = m("balloonReserveMB", 8000); MIN_AVAIL = m("minAvailableMB", 8000)
 MAX_AGENTS= m("maxAgents", 30)
 MIN_SWAP_FREE = m("minSwapFreeMB", 0)   # the gate's swap floor (0 = none); read here too, so an invalid one is reported
+if PER_AGENT < 1:   # the gate blocks on 0; the dashboard says so, and divides by the default so it still renders
+    CONFIG_ERROR = CONFIG_ERROR or "memory.perAgentMB is 0"; PER_AGENT = 400
 if isinstance(cfg, dict) and "scopeToDreamteam" in cfg and not isinstance(cfg["scopeToDreamteam"], bool):
     CONFIG_ERROR = CONFIG_ERROR or f"memory.scopeToDreamteam is {json.dumps(cfg['scopeToDreamteam'])}, not true/false"
 
 # local-model lane reserve (#37) — held back only when the ollama lane is armed.
 # Default 9000 MUST match mem-gate.sh + mem-budget.sh (test-roster.sh guards it).
 local_cfg = _full_cfg.get("local", {}) if isinstance(_full_cfg.get("local"), dict) else {}
+if "local" in _full_cfg and not isinstance(_full_cfg["local"], dict):
+    CONFIG_ERROR = CONFIG_ERROR or "local is not an object"
 def ml(k, d):
     global CONFIG_ERROR
     if k not in local_cfg: return d

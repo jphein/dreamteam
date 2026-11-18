@@ -28,7 +28,7 @@ dreamteam_config() { # rc 0 ok (with or without an overlay); rc 3 = this host's 
   b=$(_dreamteam_one_object "$base") || b='{}'
   host=$(dreamteam_host)
   ov="${base%.json}.$host.json"
-  if [ -n "$host" ] && [ -e "$ov" ]; then
+  if [ -n "$host" ] && { [ -e "$ov" ] || [ -L "$ov" ]; }; then   # -L: a dangling link is an overlay that cannot be read
     if o=$(_dreamteam_one_object "$ov") && jq -cn --argjson b "$b" --argjson o "$o" '$b * $o' 2>/dev/null; then return 0; fi
     printf '%s\n' "$b"; return 3
   fi
