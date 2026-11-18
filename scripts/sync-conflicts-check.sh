@@ -48,7 +48,13 @@ mkdir -p "$STATE" 2>/dev/null && [ -d "$STATE" ] || { check_line "$NAME" fail "n
 
 # One run at a time per state dir: two overlapping runs could both mail, or an older walk could replace a newer
 # list. The timer never overlaps itself; a hand run beside it waits its turn out (exit 75, nothing published).
-exec 9> "$STATE/sync-conflicts.lock" || { check_line "$NAME" fail "cannot open the lock in $STATE" "$OWNER"; exit $?; }
+# The lock file is opened for APPEND (never truncated) and must be a plain file we own: `>` through a planted
+# symlink would empty its target before the lock was even tried.
+LOCK="$STATE/sync-conflicts.lock"
+if [ -L "$LOCK" ] || { [ -e "$LOCK" ] && { [ ! -f "$LOCK" ] || [ ! -O "$LOCK" ]; }; }; then
+  check_line "$NAME" fail "lock file is a symlink or not ours" "$OWNER"; exit $?
+fi
+exec 9>> "$LOCK" || { check_line "$NAME" fail "cannot open the lock in $STATE" "$OWNER"; exit $?; }
 if ! flock -n 9; then
   echo "sync-conflicts-check: another run holds the lock; nothing published" >&2; exit 75
 fi

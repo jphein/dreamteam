@@ -19,6 +19,7 @@ One TSV row per top-level directory (header first), then a `#` summary on stderr
                   and build dirs (node_modules, venvs, caches, build output) are left out: a clone rebuilds them.
     conflicts     `*.sync-conflict-*` files, outside .git / node_modules / .stversions
     note          no-remote · no-commits · detached · has-filters · has-submodules · hidden-index-flags ·
+                  partial-clone ·
                   walk-error · size-error · git-error:<what>
 
 A number is printed only when it was measured. A git command that could not answer leaves its columns BLANK and
@@ -31,7 +32,13 @@ a repo's own configured clean/process FILTER (git-lfs, git-crypt) to compare con
 NOT given to `git status`: its dirty/untracked/kept columns stay blank and the note says `has-filters`.
 Submodules are never entered (`--ignore-submodules=all`); a repo with `.gitmodules` says `has-submodules`. Files
 flagged assume-unchanged or skip-worktree are invisible to status: such a repo says `hidden-index-flags`. The
-repo's own `status.showUntrackedFiles` is overridden (`--untracked-files=normal`).
+repo's own `status.showUntrackedFiles` is overridden (`--untracked-files=normal`). A partial (promisor) clone is
+not inspected past HEAD (`partial-clone`): git could fetch a missing object there.
+
+Known limit (accepted, 2026-11-17): the filter and partial-clone checks read `.git/config` just before `git status`
+does. A config edit landing between the two could still let a filter run. The trees this is for are the owner's own
+repos and `.git` is never synced, so nothing but a local hand edit can change that file mid-run; a hostile repo
+needs a sandbox, which this tool is not.
 
 In a tree whose `.git` does not sync, `dirty` can be the refs lagging the files rather than real edits: align the
 refs (housekeep → "Synced trees") before committing anything this lists. Heavy on a big tree: run it on a lane host
@@ -109,6 +116,17 @@ def inspect_git(repo, want_size):
     else:
         note("git-error:" + {124: "timeout", 127: "no-git"}.get(rc, "rev-parse"))
         return row                              # nothing below can be trusted
+
+    # A partial (promisor) clone can FETCH a missing object on demand: that writes into .git and runs a transport.
+    # GIT_NO_LAZY_FETCH stops it only on a git new enough to know the variable, so such a repo is not inspected
+    # further on any version: its columns stay blank.
+    rc, out = git(repo, "config", "--get-regexp", r"^(remote\..*\.promisor|extensions\.partialclone)$")
+    if rc == 0 and out.strip():
+        note("partial-clone")
+        return row
+    if rc not in (0, 1):                        # 1 = no such key; anything else = config unreadable
+        note("git-error:config")
+        return row
 
     rc, br = git(repo, "symbolic-ref", "-q", "--short", "HEAD")
     if rc == 0:
@@ -239,7 +257,8 @@ def main(argv):
                        ("kept", "kept_ignored"), ("conflicts", "conflicts")):
             v = row.get(src)
             tot[k] += v if isinstance(v, int) else 0
-        unmeasured = any(x in ("walk-error", "size-error", "has-filters", "has-submodules", "hidden-index-flags")
+        unmeasured = any(x in ("walk-error", "size-error", "has-filters", "has-submodules", "hidden-index-flags",
+                               "partial-clone")
                          or x.startswith("git-error")
                          for x in row["note"])
         tot["unmeasured"] += 1 if unmeasured else 0

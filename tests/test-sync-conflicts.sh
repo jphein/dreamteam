@@ -124,5 +124,15 @@ mkdir -p "$TMP/wcstub"; printf '#!/bin/sh\nexit 1\n' > "$TMP/wcstub/wc"; chmod +
 out=$(PATH="$TMP/wcstub:$PATH" bash "$S")
 case "$out" in "CHECK sync-conflicts fail · cannot count the list · "*) ok "a failing count is a fail, not a zero" ;; *) bad "wc stub: '$out'" ;; esac
 
+# --- 10. xreview round 4: the lock file is never truncated and never followed through a symlink ---------------
+echo sentinel > "$TMP/sentinel"; rm -f "$XDG_STATE_HOME/dreamteam/sync-conflicts.lock"
+ln -s "$TMP/sentinel" "$XDG_STATE_HOME/dreamteam/sync-conflicts.lock"
+out=$(bash "$S")
+case "$out" in "CHECK sync-conflicts fail · lock file is a symlink or not ours · "*) ok "a symlinked lock is refused" ;; *) bad "symlink lock: '$out'" ;; esac
+[ "$(cat "$TMP/sentinel")" = sentinel ] && ok "the symlink's target is untouched" || bad "the lock symlink's target was changed"
+rm -f "$XDG_STATE_HOME/dreamteam/sync-conflicts.lock"; echo keep > "$XDG_STATE_HOME/dreamteam/sync-conflicts.lock"
+bash "$S" >/dev/null
+[ "$(cat "$XDG_STATE_HOME/dreamteam/sync-conflicts.lock")" = keep ] && ok "an existing lock file is not truncated" || bad "the lock file was truncated"
+
 echo "----"; echo "sync-conflicts: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

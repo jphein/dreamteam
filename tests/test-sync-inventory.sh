@@ -137,5 +137,16 @@ PATH="$TMP/gitstub:$PATH" python3 "$S" --root "$P" --no-size --only busy >/dev/n
 [ -s "$TMP/git-env.log" ] && [ "$(sort -u "$TMP/git-env.log")" = "1 0" ] \
   && ok "every git call: GIT_NO_LAZY_FETCH=1, GIT_OPTIONAL_LOCKS=0 ($(wc -l < "$TMP/git-env.log") calls)" || bad "git env: $(sort -u "$TMP/git-env.log" 2>/dev/null)"
 
+# --- xreview round 4: a partial clone is not inspected past HEAD (git could fetch there) -----------------------
+T="$TMP/Projects4"; mkdir -p "$T"
+g init "$T/partial"; echo a > "$T/partial/a"; g -C "$T/partial" add a; g -C "$T/partial" commit -m one
+git -C "$T/partial" config remote.origin.url "$TMP/nowhere.git"; git -C "$T/partial" config remote.origin.promisor true
+echo changed > "$T/partial/a"; : > "$TMP/git-env.log"
+out=$(PATH="$TMP/gitstub:$PATH" python3 "$S" --root "$T" --no-size 2>"$TMP/summary4")
+[ "$(col partial note)" = partial-clone ] && [ "$(col partial dirty)$(col partial unpushed)$(col partial branch)" = "" ] \
+  && ok "partial clone: noted, columns blank" || bad "partial: $(grep '^partial' <<< "$out")"
+[ "$(wc -l < "$TMP/git-env.log")" = 2 ] && ok "partial clone: only rev-parse and the config read ran (2 git calls)" || bad "partial clone git calls: $(wc -l < "$TMP/git-env.log")"
+grep -q "dirs not fully measured: 1 " "$TMP/summary4" && ok "partial clone counts as not fully measured" || bad "summary4: $(cat "$TMP/summary4")"
+
 echo "----"; echo "sync-inventory: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
