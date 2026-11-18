@@ -134,6 +134,101 @@ for k in perAgentMB hostReserveMB balloonReserveMB minAvailableMB maxAgents; do
   fi
 done
 
+# Per-host overlay (Sen 2026-11-17): all three readers deep-merge config.<host>.json over config.json the SAME way.
+# Behavioural: one fixture overlay; each reader must report its values (perAgent 750, hostReserve 2048) while the base's
+# balloonReserve 4000 survives the merge; and a host with no overlay keeps the base values in all three.
+OVR="$TMP/ovr"; mkdir -p "$OVR" "$TMP/ovbin"; cp "$ROOT/config.json" "$OVR/config.json"
+# free (100 MiB available, so the gate blocks and prints its parameters) and systemctl (no live scopes: the real host's
+# dreamteam scopes would multiply the balloon, 2026-09-18) stubbed for these three calls only
+printf '#!/bin/sh
+echo "              total        used        free      shared  buff/cache   available"
+echo "Mem:  64000 2000 1000 0 1000 100"
+echo "Swap: 8191 0 8191"
+' > "$TMP/ovbin/free"
+printf '#!/bin/sh
+case "$*" in *show*MemoryCurrent*) echo 0;; esac
+exit 0
+' > "$TMP/ovbin/systemctl"; chmod +x "$TMP/ovbin/free" "$TMP/ovbin/systemctl"
+printf '%s\n' '{"memory":{"perAgentMB":750,"hostReserveMB":2048}}' > "$OVR/config.familiar.json"
+for h in familiar katana fami_liar; do
+  bud=$(DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=$h CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$BUD" 2>/dev/null | grep 'per-agent plan')
+  dsh=$(DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=$h CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$DASH" --json 2>/dev/null | jq -c '[.memory.perAgentMb // .perAgentMb, .memory.hostReserveMb // .hostReserveMb, .memory.balloonReserveMb // .balloonReserveMb]' 2>/dev/null)
+  gate=$(printf '%s' '{"tool_name":"Agent"}' | DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=$h CLAUDE_PLUGIN_ROOT="$ROOT" FAKE_AVAIL=100 PATH="$TMP/ovbin:$PATH" bash "$GATE" 2>&1 | grep -o 'per_agent=[0-9]*  host_reserve=[0-9]*  balloon_reserve=[0-9]*')
+  if [ $h = familiar ]; then want_b="per-agent plan: 750 MiB    host reserve: 2048 MiB    balloon reserve: 4000 MiB"; want_d='[750,2048,4000]'; want_g='per_agent=750  host_reserve=2048  balloon_reserve=4000'
+  else want_b="per-agent plan: 300 MiB    host reserve: 6000 MiB    balloon reserve: 4000 MiB"; want_d='[300,6000,4000]'; want_g='per_agent=300  host_reserve=6000  balloon_reserve=4000'; fi
+  [[ "$bud" == *"$want_b"* ]] && [ "$dsh" = "$want_d" ] && [ "$gate" = "$want_g" ] \
+    && pass "overlay agreement ($h): mem-budget, dashboard-data and mem-gate all read the same merged config (an invalid host name takes no overlay)" \
+    || fail "overlay drift ($h): mem-budget='$bud' dashboard=$dsh gate='$gate'"
+done
+# invalid values: the gate blocks, mem-budget says CONFIG INVALID (exit 2), the dashboard carries configError: never a
+# budget the gate will not honour (xreview #230 r3)
+ln -sfn "$OVR/nowhere.json" "$OVR/config.invdangling.json"
+for n in dangling; do
+  b=$(DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=inv$n CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$BUD" 2>&1); brc=$?
+  d=$(DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=inv$n CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$DASH" --json 2>/dev/null | jq -r '.configError // ""')
+  printf '%s' '{"tool_name":"Agent"}' | DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=inv$n CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$GATE" >/dev/null 2>&1; grc=$?
+  [ $brc = 2 ] && [ -n "$d" ] && [ $grc = 2 ] && pass "a dangling overlay link: gate blocks, mem-budget CONFIG INVALID, dashboard configError" || fail "dangling: budget=$brc dashboard='$d' gate=$grc"
+done
+# integral floats are valid in every reader (jq reads 750.0 and 7.5e2 as 750): mem-budget ok, dashboard no configError,
+# and the gate's verdict is about memory, never "not an integer"
+for c in 'f1|{"memory":{"perAgentMB":750.0}}' 'f2|{"memory":{"perAgentMB":7.5e2}}'; do
+  n=${c%%|*}; printf '%s\n' "${c#*|}" > "$OVR/config.ok$n.json"
+  b=$(DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=ok$n CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$BUD" 2>&1); brc=$?
+  d=$(DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=ok$n CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$DASH" --json 2>/dev/null | jq -r '[.configError, .memory.perAgentMb] | @tsv')
+  ge=$(printf '%s' '{"tool_name":"Agent"}' | DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=ok$n CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$GATE" 2>&1)
+  [ $brc = 0 ] && [[ "$b" == *"per-agent plan: 750 MiB"* ]] && [ "$d" = $'\t750' ] && [[ "$ge" == *"per_agent=750"* ]] && [[ "$ge" != *"not an integer"* ]] \
+    && pass "an integral float ($n) is 750 in all three readers" || fail "float agreement ($n): budget=$brc dashboard='$d' gate='$(head -c 100 <<<"$ge")'"
+done
+# negative zero is integral and 0 (jq can print -0): valid in all three readers (xreview #230 r6)
+for v in -0 -0.0 -0e2; do
+  printf '{"memory":{"minSwapFreeMB":%s}}\n' "$v" > "$OVR/config.negzero.json"
+  b=$(DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=negzero CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$BUD" 2>&1); brc=$?
+  d=$(DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=negzero CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$DASH" --json 2>/dev/null | jq -r '[.configError, .memory.minSwapFreeMb] | @tsv')
+  ge=$(printf '%s' '{"tool_name":"Agent"}' | DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=negzero CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$GATE" 2>&1)
+  [ $brc = 0 ] && [ "$d" = $'\t0' ] && [[ "$ge" != *"not an integer"* ]] && pass "negative zero ($v) is 0 in all three readers" || fail "negzero $v: budget=$brc dashboard='$d' gate='$(head -c 90 <<<"$ge")'"
+done
+# a huge exponent, even in a key no reader uses: the file is invalid for every reader, and nothing ever carries Infinity
+# or builds a gigantic int (1e400000000 returns at once)
+printf '%s\n' '{"memory":{"someUnusedKey":1e400000000}}' > "$OVR/config.bigunused.json"
+out=$(DREAMTEAM_HOST=bigunused timeout 5 python3 -I "$ROOT/scripts/lib/config_merge.py" "$OVR/config.json"); rc=$?
+b=$(DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=bigunused CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$BUD" 2>&1); brc=$?
+[ $rc = 3 ] && [[ "$out" != *Infinity* ]] && jq -e . <<<"$out" >/dev/null && [ $brc = 2 ] && pass "1e400000000 in an unused key: invalid file (rc 3, at once), strict JSON out, mem-budget CONFIG INVALID" || fail "bigunused: rc=$rc brc=$brc out=$(head -c 80 <<<"$out")"
+# an integer literal is bounded like any other number (xreview #230 r9): 4000 nines in an unused key, and 10^19 as a
+# floor, make the file invalid at once; 10^19 - 1 is the largest accepted
+printf '{"memory":{"someUnusedKey":%s}}\n' "$(printf '9%.0s' $(seq 1 4000))" > "$OVR/config.bigint.json"
+printf '%s\n' '{"memory":{"minAvailableMB":10000000000000000000}}' > "$OVR/config.int19.json"
+printf '%s\n' '{"memory":{"someUnusedKey":9999999999999999999}}' > "$OVR/config.intmax.json"
+r1=$(DREAMTEAM_HOST=bigint timeout 5 python3 -I "$ROOT/scripts/lib/config_merge.py" "$OVR/config.json" >/dev/null 2>&1; echo $?)
+r2=$(DREAMTEAM_HOST=int19 timeout 5 python3 -I "$ROOT/scripts/lib/config_merge.py" "$OVR/config.json" >/dev/null 2>&1; echo $?)
+r3=$(DREAMTEAM_HOST=intmax timeout 5 python3 -I "$ROOT/scripts/lib/config_merge.py" "$OVR/config.json" >/dev/null 2>&1; echo $?)
+[ "$r1" = 3 ] && [ "$r2" = 3 ] && [ "$r3" = 0 ] && pass "integer literals are bounded: 4000 digits and 10^19 invalid (rc 3), 10^19-1 accepted" || fail "int bounds: bigint=$r1 int19=$r2 intmax=$r3"
+# an overlay that cannot be CHECKED is invalid, never absent (xreview #230 r9): a config directory without search
+# permission hides both files; the base reads as {} (documented) but the overlay's existence is unknown → rc 3
+if [ "$(id -u)" != 0 ]; then
+  NOX="$TMP/nox"; mkdir -p "$NOX"; printf '{}\n' > "$NOX/config.json"; printf '%s\n' '{"lane":{"minAvailableMB":6800}}' > "$NOX/config.nox.json"
+  chmod 600 "$NOX"
+  r=$(DREAMTEAM_HOST=nox timeout 5 python3 -I "$ROOT/scripts/lib/config_merge.py" "$NOX/config.json" >/dev/null 2>&1; echo $?)
+  rn=$(DREAMTEAM_HOST=noxabsent timeout 5 python3 -I "$ROOT/scripts/lib/config_merge.py" "$NOX/config.json" >/dev/null 2>&1; echo $?)
+  chmod 700 "$NOX"
+  ra=$(DREAMTEAM_HOST=noxabsent timeout 5 python3 -I "$ROOT/scripts/lib/config_merge.py" "$NOX/config.json" >/dev/null 2>&1; echo $?)
+  [ "$r" = 3 ] && [ "$rn" = 3 ] && [ "$ra" = 0 ] && pass "an unsearchable config dir: the overlay is invalid (rc 3), never treated as absent; a truly absent overlay is rc 0" || fail "unsearchable: present=$r unknown=$rn absent=$ra"
+fi
+# the scope exemption never hides an invalid config: scopeToDreamteam true, no active team, an invalid .local → exit 2
+printf '%s\n' '{"memory":{"scopeToDreamteam":true},"local":[]}' > "$OVR/config.scopebad.json"
+printf '%s' '{"tool_name":"Agent"}' | DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=scopebad DREAMTEAM_STATE="$TMP/no-active" CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$GATE" >/dev/null 2>&1; grc=$?
+b=$(DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=scopebad CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$BUD" 2>&1); brc=$?
+[ $grc = 2 ] && [ $brc = 2 ] && pass "scope exemption + invalid .local: the gate blocks (exit 2) as mem-budget reports" || fail "scope+badlocal: gate=$grc budget=$brc"
+for c in 'underflow|{"memory":{"minSwapFreeMB":-1e-400}}' 'nearint|{"memory":{"minAvailableMB":3000.0000000000000001}}' 'bigexp|{"memory":{"minAvailableMB":1e400}}' 'leadzero|{"memory":{"minAvailableMB":03000}}' 'nan|{"memory":{"minAvailableMB":NaN}}' 'null|null' 'localfalse|{"local":false}' 'localarr|{"local":[]}' 'memlist|{"memory":[]}' 'peragent0|{"memory":{"perAgentMB":0}}' 'peragent|{"memory":{"perAgentMB":"x"}}' 'memory|{"memory":{"minSwapFreeMB":false}}' 'local|{"local":{"enabled":true,"reserveMB":"1e4"}}' 'enabled|{"local":{"enabled":"yes"}}' 'trunc|{"memory":'; do
+  n=${c%%|*}; printf '%s
+' "${c#*|}" > "$OVR/config.inv$n.json"
+  b=$(DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=inv$n CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$BUD" 2>&1); brc=$?
+  d=$(DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=inv$n CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$DASH" --json 2>/dev/null | jq -r '.configError // ""')
+  printf '%s' '{"tool_name":"Agent"}' | DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=inv$n CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$GATE" >/dev/null 2>&1; grc=$?
+  [ $brc = 2 ] && [[ "$b" == *"CONFIG INVALID"* ]] && [ -n "$d" ] && [ $grc = 2 ] \
+    && pass "invalid overlay ($n): gate blocks, mem-budget reports CONFIG INVALID, dashboard carries configError" \
+    || fail "invalid agreement ($n): budget rc=$brc '$(head -c 120 <<<"$b")' dashboard='$d' gate=$grc"
+done
+
 # Local-lane reserve (#37): .local.reserveMB is read in THREE places — dashboard-data
 # (ml("reserveMB", N)), mem-budget + mem-gate (getlocal reserveMB N). All must agree,
 # or the dashboard shows a budget the gate won't enforce (same drift class, new knob).

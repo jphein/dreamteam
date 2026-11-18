@@ -78,27 +78,47 @@ def run(cmd, cwd=None, timeout=15):
         return ""
 
 # ── config (same keys/defaults as mem-budget.sh) ───────────────────────────
-_full_cfg = {}
-try: _full_cfg = json.load(open(CFG))
-except Exception: _full_cfg = {}
-if not isinstance(_full_cfg, dict): _full_cfg = {}
+# the config with this host's overlay: the ONE parser every reader uses (scripts/lib/config_merge.py; xreview #230 r7)
+import sys as _sys
+_sys.path.insert(0, os.path.join(os.environ["DT_ROOT"], "scripts", "lib"))
+import config_merge as _cm
+_full_cfg, CONFIG_ERROR = _cm.load(CFG)
 cfg       = _full_cfg.get("memory", {})
+if "memory" in _full_cfg and not isinstance(_full_cfg["memory"], dict):
+    CONFIG_ERROR = CONFIG_ERROR or "memory is not an object"; cfg = {}
 scope_cfg = _full_cfg.get("scope", {}) if isinstance(_full_cfg.get("scope"), dict) else {}
+def _valid_int(v):  # the gate's rule: an INTEGRAL JSON number 0..10^7 (jq reads 750.0 and 7.5e2 as 750, so they are
+    # valid in every reader); never a bool, a string or a fraction (xreview #230 r5)
+    return (type(v) is int or (type(v) is float and v.is_integer())) and 0 <= v <= 10000000
 def m(k, d):
-    try: return int(cfg.get(k, d))
-    except Exception: return d
+    global CONFIG_ERROR
+    if not isinstance(cfg, dict): CONFIG_ERROR = CONFIG_ERROR or "memory is not an object"; return d
+    if k not in cfg: return d
+    if not _valid_int(cfg[k]): CONFIG_ERROR = CONFIG_ERROR or f"memory.{k} is {json.dumps(cfg[k])}, not an integer 0..10000000"; return d
+    return int(cfg[k])
 PER_AGENT = m("perAgentMB", 400);  HOST_RES = m("hostReserveMB", 6000)
 BALLOON   = m("balloonReserveMB", 8000); MIN_AVAIL = m("minAvailableMB", 8000)
 MAX_AGENTS= m("maxAgents", 30)
+MIN_SWAP_FREE = m("minSwapFreeMB", 0)   # the gate's swap floor (0 = none); read here too, so an invalid one is reported
+if PER_AGENT < 1:   # the gate blocks on 0; the dashboard says so, and divides by the default so it still renders
+    CONFIG_ERROR = CONFIG_ERROR or "memory.perAgentMB is 0"; PER_AGENT = 400
+if isinstance(cfg, dict) and "scopeToDreamteam" in cfg and not isinstance(cfg["scopeToDreamteam"], bool):
+    CONFIG_ERROR = CONFIG_ERROR or f"memory.scopeToDreamteam is {json.dumps(cfg['scopeToDreamteam'])}, not true/false"
 
 # local-model lane reserve (#37) — held back only when the ollama lane is armed.
 # Default 9000 MUST match mem-gate.sh + mem-budget.sh (test-roster.sh guards it).
 local_cfg = _full_cfg.get("local", {}) if isinstance(_full_cfg.get("local"), dict) else {}
+if "local" in _full_cfg and not isinstance(_full_cfg["local"], dict):
+    CONFIG_ERROR = CONFIG_ERROR or "local is not an object"
 def ml(k, d):
-    try: return int(local_cfg.get(k, d))
-    except Exception: return d
+    global CONFIG_ERROR
+    if k not in local_cfg: return d
+    if not _valid_int(local_cfg[k]): CONFIG_ERROR = CONFIG_ERROR or f"local.{k} is {json.dumps(local_cfg[k])}, not an integer 0..10000000"; return d
+    return int(local_cfg[k])
 LOCAL_RESERVE = ml("reserveMB", 9000)
 LOCAL_ARMED   = local_cfg.get("enabled") is True          # ==false-safe: only literal true arms it
+if "enabled" in local_cfg and not isinstance(local_cfg["enabled"], bool):
+    CONFIG_ERROR = CONFIG_ERROR or f"local.enabled is {json.dumps(local_cfg['enabled'])}, not true/false"
 LOCAL_EFF     = LOCAL_RESERVE if LOCAL_ARMED else 0
 
 # ── team scope (auto-containment cgroup) — the TRUE footprint incl. child procs ──
@@ -274,13 +294,14 @@ waydroid = bool(re.search(r"Session.*RUNNING", run(["waydroid","status"])))
 out = {
     "generatedAt": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
     "host": socket.gethostname(),
+    "configError": CONFIG_ERROR,
     "team": team_name or "—",
     "waydroidRunning": waydroid,
     "memory": {
         "totalMb": total, "usedMb": used, "availableMb": avail,
         "swapTotalMb": swt, "swapUsedMb": swu, "agentTotalRssMb": rss_total,
         "perAgentMb": PER_AGENT, "hostReserveMb": HOST_RES, "balloonReserveMb": BALLOON,
-        "minAvailableMb": MIN_AVAIL, "maxAgents": MAX_AGENTS,
+        "minAvailableMb": MIN_AVAIL, "maxAgents": MAX_AGENTS, "minSwapFreeMb": MIN_SWAP_FREE,
         "localReserveMb": LOCAL_RESERVE, "localArmed": LOCAL_ARMED, "localEffectiveReserveMb": LOCAL_EFF,
         "budget": budget, "cap": cap, "liveAgents": live, "room": room,
         "thresholds": {"redBelowMb": red_below, "orangeBelowMb": orange_below, "yellowBelowMb": yellow_below},

@@ -23,14 +23,28 @@ TOOL="$(printf '%s' "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)"
 case "$TOOL" in Agent|Task) ;; *) exit 0 ;; esac
 
 # --- config (defaults baked in so it works before config.json exists) ---
-getcfg() { jq -r --arg k "$1" --arg d "$2" ".memory[\$k] // \$d" "$CFG" 2>/dev/null || printf '%s' "$2"; }
-PER_AGENT=$(getcfg perAgentMB 400)
-HOST_RESERVE=$(getcfg hostReserveMB 6000)
-BALLOON=$(getcfg balloonReserveMB 8000)
-MIN_AVAIL=$(getcfg minAvailableMB 8000)
-MAX_AGENTS=$(getcfg maxAgents 30)
-SCOPE_ONLY=$(getcfg scopeToDreamteam false)
-if [ "$SCOPE_ONLY" = "true" ] && [ ! -f "$STATE/active" ]; then exit 0; fi
+# A config the gate cannot trust is a BLOCK (exit 2), never an admit (xreview #230 r1): the helper must load, the merged
+# config must be one object, and every number must be a bounded non-negative integer before any arithmetic.
+invalid() { echo "🚫 DREAMTEAM MEMORY GATE — spawn blocked: $1 (config $CFG + config.<host>.json; fix it, or remove the overlay)" >&2; exit 2; }
+# the config with this host's overlay (config.<host>.json) deep-merged over it: scripts/lib/config.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/config.sh" 2>/dev/null || invalid "scripts/lib/config.sh did not load"
+CFGJSON="$(dreamteam_config "$CFG")" || invalid "this host's overlay $(basename "${CFG%.json}").$(dreamteam_host).json exists but is not one readable JSON object"
+jq -e 'type == "object"' <<<"$CFGJSON" >/dev/null 2>&1 || invalid "the merged config is not one JSON object"
+MAXMB=10000000
+STATE_ERR=$(mktemp -p "${XDG_RUNTIME_DIR:-${TMPDIR:-$HOME/.cache}}" .memgate.XXXXXX 2>/dev/null || mktemp) || invalid "no temp file"
+trap 'rm -f "$STATE_ERR"' EXIT
+# the shared validated readers (scripts/lib/config.sh): absent → default; present but invalid (false, null, "", "3000",
+# negative, fractional, oversized: xreview #230 r2) → exit 2
+getcfg() { local v e; v=$(dreamteam_int "$CFGJSON" memory "$1" "$2" 2>"$STATE_ERR") || { e=$(cat "$STATE_ERR"); invalid "$e"; }; printf '%s' "$v"; }
+getbool() { local v e; v=$(dreamteam_bool "$CFGJSON" "$1" "$2" "$3" 2>"$STATE_ERR") || { e=$(cat "$STATE_ERR"); invalid "$e"; }; printf '%s' "$v"; }
+PER_AGENT=$(getcfg perAgentMB 400) || exit 2
+HOST_RESERVE=$(getcfg hostReserveMB 6000) || exit 2
+BALLOON=$(getcfg balloonReserveMB 8000) || exit 2
+MIN_AVAIL=$(getcfg minAvailableMB 8000) || exit 2
+MIN_SWAP_FREE=$(getcfg minSwapFreeMB 0) || exit 2
+MAX_AGENTS=$(getcfg maxAgents 30) || exit 2
+[ "$PER_AGENT" -ge 1 ] || invalid "memory.perAgentMB is 0"
+SCOPE_ONLY=$(getbool memory scopeToDreamteam false) || exit 2
 
 # Local-model lane reserve (#37): when the ollama lane is ARMED (.local.enabled ==
 # true), hold back reserveMB for the resident model. Its RSS/VRAM is invisible to
@@ -38,10 +52,13 @@ if [ "$SCOPE_ONLY" = "true" ] && [ ! -f "$STATE/active" ]; then exit 0; fi
 # reserve whether or not the model is currently loaded — exactly as BALLOON reserves
 # for post-admission growth. ==false-safe (only a literal true arms it); zero effect
 # when the lane is off (the default).
-getlocal() { jq -r --arg k "$1" --arg d "$2" ".local[\$k] // \$d" "$CFG" 2>/dev/null || printf '%s' "$2"; }
-LOCAL_ARMED=$(jq -r 'if .local.enabled == true then 1 else 0 end' "$CFG" 2>/dev/null || echo 0)
-LOCAL_RESERVE=$(getlocal reserveMB 9000); LOCAL_RESERVE=${LOCAL_RESERVE//[!0-9]/}; [ -n "$LOCAL_RESERVE" ] || LOCAL_RESERVE=9000
+getlocal() { local v e; v=$(dreamteam_int "$CFGJSON" local "$1" "$2" 2>"$STATE_ERR") || { e=$(cat "$STATE_ERR"); invalid "$e"; }; printf '%s' "$v"; }
+LA=$(getbool local enabled false) || exit 2; [ "$LA" = true ] && LOCAL_ARMED=1 || LOCAL_ARMED=0
+LOCAL_RESERVE=$(getlocal reserveMB 9000) || exit 2
 if [ "$LOCAL_ARMED" = 1 ]; then LOCAL_EFF=$LOCAL_RESERVE; LOCAL_NOTE="  local_reserve=${LOCAL_RESERVE} (ollama lane armed)"; else LOCAL_EFF=0; LOCAL_NOTE=""; fi
+# the scope exemption only AFTER every admission key validated (xreview #230 r5): an invalid config blocks whether or not
+# the gate would otherwise stand aside, so the gate, mem-budget and the dashboard agree on "invalid"
+if [ "$SCOPE_ONLY" = "true" ] && [ ! -f "$STATE/active" ]; then exit 0; fi
 
 # Balloon reserve is sized for ONE team's build spikes; scale by scopes actually
 # carrying weight (>=2GiB) — 2026-08-15 OOM: two teams' rustc storms ballooned
@@ -56,6 +73,10 @@ done
 # --- measure RAM (instant — this is the real OOM guard, runs BEFORE the count) ---
 AVAIL=$(free -m | awk '/^Mem:/{print $7}')
 SWAP_USED=$(free -m | awk '/^Swap:/{print $3}')
+SWAP_FREE=$(free -m | awk '/^Swap:/{print $4}')
+# the measurements too: a reading that is not a number is a block, never a comparison error that falls through
+dreamteam_uint "${AVAIL:-x}" "$MAXMB" || invalid "free -m gave no readable available memory ('$AVAIL')"
+if [ "$MIN_SWAP_FREE" -gt 0 ]; then dreamteam_uint "${SWAP_FREE:-x}" "$MAXMB" || invalid "free -m gave no readable swap free ('$SWAP_FREE')"; fi
 HEADROOM=$(( AVAIL - HOST_RESERVE - BALLOON - LOCAL_EFF ))
 BUDGET=$(( HEADROOM / PER_AGENT )); [ "$BUDGET" -lt 0 ] && BUDGET=0
 
@@ -73,6 +94,8 @@ block() {
 
 # RAM-based blocks first (don't wait on the agent count for the real guard):
 [ "$AVAIL" -lt "$MIN_AVAIL" ] && block "only ${AVAIL}MiB RAM available (< ${MIN_AVAIL}MiB floor)."
+# swap free (a full zram looks like nothing to MemAvailable; the next balloon then meets the OOM killer). 0 = no floor.
+[ "$MIN_SWAP_FREE" -gt 0 ] && [ "$SWAP_FREE" -lt "$MIN_SWAP_FREE" ] && block "only ${SWAP_FREE}MiB swap free (< ${MIN_SWAP_FREE}MiB swap floor)."
 [ "$BUDGET" -le 0 ]          && block "no budget for another agent (need ${PER_AGENT}+${BALLOON}MiB headroom)."
 
 # Count cap last — uses `claude agents --json` (real status), pgrep fallback (see lib.sh).

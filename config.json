@@ -141,5 +141,6 @@
       "merge_repos": "A PR merges only after the dreamteam:oracle review says approve AND scripts/pr-gate.sh exits 0 (no CI = no merge), one at a time. A repo in NEITHER list is PR-only (fail safe): adding a repo here is the deliberate act that lets the sweep merge in it.",
       "never_sweep": "Never read, never swept. plan.realm.watch is local-only and holds JP's plan state."
     }
-  }
+  },
+  "_notes_per_host_overlay_2026_11_17": "Per-host overlays: config.<host>.json beside this file (host = hostname -s, lower-cased) is deep-merged over it by scripts/lib/config.sh (mem-gate, mem-budget, overnight-guarded, lane-check) and by dashboard-data.sh. Shared defaults stay here; a host's own floors go in its overlay (familiar: config.familiar.json). tests/run.sh pins DREAMTEAM_HOST=dreamteam-test. New keys: memory.minSwapFreeMB (mem-gate, default 0), lane.minAvailableMB/minSwapFreeMB (lane-check.sh, default 0), overnight.min_available_mb/min_swap_free_mb (the nightly guard, default 0)."
 }

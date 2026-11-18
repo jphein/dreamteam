@@ -1,0 +1,6 @@
+{
+  "_notes": "familiar's per-host overlay, deep-merged over config.json by scripts/lib/config.sh (and dashboard-data.sh). Floors from measured peaks (scratch/memory-floors-2026-11-17.md), accepted by Sen 2026-11-17 with balloonReserveMB kept at the base's 4000. With host 2048 + balloon 4000 + 750 per agent, one teammate needs 6798 MiB available; familiar idles at ~6.7 GB, so the budget, not the 3000 floor, is what binds.",
+  "memory": {"minAvailableMB": 3000, "minSwapFreeMB": 2048, "perAgentMB": 750, "hostReserveMB": 2048},
+  "lane": {"minAvailableMB": 6800, "minSwapFreeMB": 4096},
+  "overnight": {"min_available_mb": 5500, "min_swap_free_mb": 4096}
+}
