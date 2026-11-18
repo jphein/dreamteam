@@ -7,7 +7,8 @@ disagreed on leading-zero numbers like 03000, on NaN, and on what counts as one 
 
   python3 config_merge.py <config.json>   → the merged config, one JSON object, on stdout
       exit 0  ok (with or without this host's overlay)
-      exit 3  this host's overlay EXISTS (a dangling link counts) but is not one strict-JSON object: the base is printed,
+      exit 3  this host's overlay EXISTS (a dangling link counts), or its existence cannot be checked (EACCES), but
+              is not one readable strict-JSON object: the base is printed,
               and callers must treat the config as invalid (the overlay may hold floors the base does not have)
 
 Strict JSON: Python's json, plus NaN/Infinity rejected. A file must hold exactly one value, an object. The base, if
@@ -51,10 +52,21 @@ def _exact_number(lit):
     return f
 
 
+def _bounded_int(lit):
+    """A JSON integer literal, bounded like every other number (xreview #230 r9): 10^19 or more in magnitude makes the
+    file invalid before any int is built, so a 4000-digit literal costs nothing and never reaches a reader."""
+    if len(lit.lstrip("-")) > 19:
+        raise ValueError(f"integer {lit[:24]}… is out of range")
+    n = int(lit)
+    if abs(n) >= 10 ** 19:
+        raise ValueError(f"integer {lit} is out of range")
+    return n
+
+
 def load_object(path):
     """The file's single JSON object, or raise."""
     with open(path, encoding="utf-8") as f:
-        v = json.load(f, parse_constant=_reject_constant, parse_float=_exact_number)
+        v = json.load(f, parse_constant=_reject_constant, parse_float=_exact_number, parse_int=_bounded_int)
     if not isinstance(v, dict):
         raise ValueError("not an object")
     return v
@@ -79,8 +91,12 @@ def load(cfg_path):
     if not h:
         return base, ""
     ov_path = (cfg_path[:-5] if cfg_path.endswith(".json") else cfg_path) + "." + h + ".json"
-    if not os.path.lexists(ov_path):
+    try:
+        os.lstat(ov_path)   # only "no such file" means no overlay: EACCES, ELOOP and the rest mean unknown → invalid
+    except FileNotFoundError:
         return base, ""
+    except OSError:
+        return base, "this host's overlay could not be checked"
     try:
         return deep(base, load_object(ov_path)), ""
     except Exception:

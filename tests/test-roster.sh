@@ -193,6 +193,26 @@ printf '%s\n' '{"memory":{"someUnusedKey":1e400000000}}' > "$OVR/config.bigunuse
 out=$(DREAMTEAM_HOST=bigunused timeout 5 python3 -I "$ROOT/scripts/lib/config_merge.py" "$OVR/config.json"); rc=$?
 b=$(DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=bigunused CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$BUD" 2>&1); brc=$?
 [ $rc = 3 ] && [[ "$out" != *Infinity* ]] && jq -e . <<<"$out" >/dev/null && [ $brc = 2 ] && pass "1e400000000 in an unused key: invalid file (rc 3, at once), strict JSON out, mem-budget CONFIG INVALID" || fail "bigunused: rc=$rc brc=$brc out=$(head -c 80 <<<"$out")"
+# an integer literal is bounded like any other number (xreview #230 r9): 4000 nines in an unused key, and 10^19 as a
+# floor, make the file invalid at once; 10^19 - 1 is the largest accepted
+printf '{"memory":{"someUnusedKey":%s}}\n' "$(printf '9%.0s' $(seq 1 4000))" > "$OVR/config.bigint.json"
+printf '%s\n' '{"memory":{"minAvailableMB":10000000000000000000}}' > "$OVR/config.int19.json"
+printf '%s\n' '{"memory":{"someUnusedKey":9999999999999999999}}' > "$OVR/config.intmax.json"
+r1=$(DREAMTEAM_HOST=bigint timeout 5 python3 -I "$ROOT/scripts/lib/config_merge.py" "$OVR/config.json" >/dev/null 2>&1; echo $?)
+r2=$(DREAMTEAM_HOST=int19 timeout 5 python3 -I "$ROOT/scripts/lib/config_merge.py" "$OVR/config.json" >/dev/null 2>&1; echo $?)
+r3=$(DREAMTEAM_HOST=intmax timeout 5 python3 -I "$ROOT/scripts/lib/config_merge.py" "$OVR/config.json" >/dev/null 2>&1; echo $?)
+[ "$r1" = 3 ] && [ "$r2" = 3 ] && [ "$r3" = 0 ] && pass "integer literals are bounded: 4000 digits and 10^19 invalid (rc 3), 10^19-1 accepted" || fail "int bounds: bigint=$r1 int19=$r2 intmax=$r3"
+# an overlay that cannot be CHECKED is invalid, never absent (xreview #230 r9): a config directory without search
+# permission hides both files; the base reads as {} (documented) but the overlay's existence is unknown → rc 3
+if [ "$(id -u)" != 0 ]; then
+  NOX="$TMP/nox"; mkdir -p "$NOX"; printf '{}\n' > "$NOX/config.json"; printf '%s\n' '{"lane":{"minAvailableMB":6800}}' > "$NOX/config.nox.json"
+  chmod 600 "$NOX"
+  r=$(DREAMTEAM_HOST=nox timeout 5 python3 -I "$ROOT/scripts/lib/config_merge.py" "$NOX/config.json" >/dev/null 2>&1; echo $?)
+  rn=$(DREAMTEAM_HOST=noxabsent timeout 5 python3 -I "$ROOT/scripts/lib/config_merge.py" "$NOX/config.json" >/dev/null 2>&1; echo $?)
+  chmod 700 "$NOX"
+  ra=$(DREAMTEAM_HOST=noxabsent timeout 5 python3 -I "$ROOT/scripts/lib/config_merge.py" "$NOX/config.json" >/dev/null 2>&1; echo $?)
+  [ "$r" = 3 ] && [ "$rn" = 3 ] && [ "$ra" = 0 ] && pass "an unsearchable config dir: the overlay is invalid (rc 3), never treated as absent; a truly absent overlay is rc 0" || fail "unsearchable: present=$r unknown=$rn absent=$ra"
+fi
 # the scope exemption never hides an invalid config: scopeToDreamteam true, no active team, an invalid .local → exit 2
 printf '%s\n' '{"memory":{"scopeToDreamteam":true},"local":[]}' > "$OVR/config.scopebad.json"
 printf '%s' '{"tool_name":"Agent"}' | DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=scopebad DREAMTEAM_STATE="$TMP/no-active" CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$GATE" >/dev/null 2>&1; grc=$?
