@@ -762,6 +762,23 @@ for _ in $(seq 300); do kill -0 "$SUB" 2>/dev/null || break; sleep 0.1; done; T1
   || fail "late signal: took $(( T1 - T0 ))s stubborn=$(cat "$TMP/claude.stubborn" 2>/dev/null) alive=$(kill -0 "$(cat "$TMP/claude.stubborn" 2>/dev/null)" 2>/dev/null && echo yes) pending=$(grep FINISHED "$TMP/state/overnight-pending.md")"
 kill "$(cat "$TMP/claude.stubborn" 2>/dev/null)" 2>/dev/null
 
+# a coordinator that finishes normally but leaves a TERM-ignoring member in its group: swept after the leader exits
+reset; mkqueue jphein/realmwatch:2; rm -f "$TMP/claude.stubborn"
+FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 FAKE_STUBBORN=1 DREAMTEAM_STOP_GRACE=2 run_g >/dev/null
+[ -s "$TMP/claude.stubborn" ] && ! kill -0 "$(cat "$TMP/claude.stubborn")" 2>/dev/null && pass "normal finish: a leftover group member is swept (nothing of a finished coordinator keeps running)" \
+  || { fail "normal-finish sweep: stubborn $(cat "$TMP/claude.stubborn" 2>/dev/null) still alive"; kill -KILL "$(cat "$TMP/claude.stubborn" 2>/dev/null)" 2>/dev/null; }
+# HUP in the hand-off window (leader reaped, CPID cleared, sweep not yet run)
+reset; rm -rf "$TMP/checks"; mkqueue jphein/realmwatch:2; rm -f "$TMP/claude.stubborn" "$TMP/tailpause"
+( FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 FAKE_STUBBORN=1 DREAMTEAM_STOP_GRACE=2 DREAMTEAM_TEST_TAIL_PAUSE="$TMP/tailpause" run_g >/dev/null ) &
+SUB=$!
+for _ in $(seq 200); do [ -e "$TMP/tailpause" ] && break; sleep 0.05; done
+GPID=$(pgrep -f -n "bash $G" 2>/dev/null); [ -n "$GPID" ] && kill -HUP "$GPID"
+for _ in $(seq 200); do kill -0 "$SUB" 2>/dev/null || break; sleep 0.1; done; kill -0 "$SUB" 2>/dev/null && kill "$SUB"
+[ -e "$TMP/tailpause" ] && [ -s "$TMP/claude.stubborn" ] && ! kill -0 "$(cat "$TMP/claude.stubborn")" 2>/dev/null \
+  && [[ "$(cl)" == "CHECK nightly-guarded fail · "*"runner killed (SIGHUP)"* ]] \
+  && pass "HUP in the hand-off window: the stubborn member is swept, and the night is FAIL (run-level marker)" \
+  || { fail "handoff: pause=$([ -e "$TMP/tailpause" ] && echo y) stubborn-alive=$(kill -0 "$(cat "$TMP/claude.stubborn" 2>/dev/null)" 2>/dev/null && echo y) line='$(cl)'"; kill -KILL "$(cat "$TMP/claude.stubborn" 2>/dev/null)" 2>/dev/null; }
+
 # the watchdog: a started night whose runner session is gone before its cap is FAIL at once, not at 06:30
 OLD=$(date -Iseconds -d '-10 minutes'); FRESH=$(date -Iseconds -d '-30 seconds')
 FAKE_SESSION=gone rec started "$OLD" "guard passed" '[{"repo":"a/x","status":"started"}]' "$(( NOWE + 3*3600 ))"

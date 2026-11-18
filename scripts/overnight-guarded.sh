@@ -498,8 +498,12 @@ End your reply with ONE line: SWEEP-RESULT {\"opened\":[N, ...PRs this run opene
       wait "$cpid"; rc=$?
       kill -0 "$cpid" 2>/dev/null || break
     done
-    [ -n "$RUNNER_SIG" ] && stop_group "$cpid"
+    # hand-off closed (xreview r4): the handler stops acting on this group first, then the saved group is swept
+    # UNCONDITIONALLY (a normal finish too: nothing of a finished coordinator may keep running). A signal from here on
+    # finds the group already being swept, or empty.
     CPID=""
+    [ -n "${DREAMTEAM_TEST_TAIL_PAUSE:-}" ] && { : > "$DREAMTEAM_TEST_TAIL_PAUSE"; sleep 2; }   # tests only: the race window
+    stop_group "$cpid"
     log "runner $rid: $name finished rc=$rc"
     local repo_full; repo_full=$(jq -r .repo <<<"$r")
     local line; line=$(jq -r '.result // empty' "$dir/$name.json" 2>/dev/null | grep -o 'SWEEP-RESULT {.*}' | tail -n1 | sed 's/^SWEEP-RESULT //')
