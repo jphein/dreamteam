@@ -710,10 +710,16 @@ skip() { # reason
 [ $QRC -eq 0 ] || skip "$QR"
 # (a2) memory (Sen 2026-11-17): MemAvailable and swap free, both from config (0 = no floor; familiar's overlay sets
 # 5500/4096). Judged after the work gate like the quota, so a quiet night stays silent.
+# One validated integer throughout (xreview #230 r1): an invalid floor or an unreadable measurement is a HOLD.
 MEM_MIN=$(oc min_available_mb 0); SWAP_MIN=$(oc min_swap_free_mb 0)
-MEM_AV=$(free -m | awk '/^Mem:/{print $7}'); SWAP_FR=$(free -m | awk '/^Swap:/{print $4}')
-if [ "${MEM_MIN//[!0-9]/}" -gt 0 ] 2>/dev/null && [ "${MEM_AV:-0}" -lt "$MEM_MIN" ]; then skip "memory: ${MEM_AV} MiB available < ${MEM_MIN}"; fi
-if [ "${SWAP_MIN//[!0-9]/}" -gt 0 ] 2>/dev/null && [ "${SWAP_FR:-0}" -lt "$SWAP_MIN" ]; then skip "memory: ${SWAP_FR} MiB swap free < ${SWAP_MIN}"; fi
+dreamteam_uint "$MEM_MIN" 10000000 || skip "memory: overnight.min_available_mb is '$MEM_MIN', not an integer"
+dreamteam_uint "$SWAP_MIN" 10000000 || skip "memory: overnight.min_swap_free_mb is '$SWAP_MIN', not an integer"
+if [ "$MEM_MIN" -gt 0 ] || [ "$SWAP_MIN" -gt 0 ]; then
+  MEM_AV=$(free -m | awk '/^Mem:/{print $7}'); SWAP_FR=$(free -m | awk '/^Swap:/{print $4}')
+  dreamteam_uint "${MEM_AV:-x}" 10000000 && dreamteam_uint "${SWAP_FR:-x}" 10000000 || skip "memory: free -m unreadable"
+  [ "$MEM_AV" -lt "$MEM_MIN" ] && skip "memory: ${MEM_AV} MiB available < ${MEM_MIN}"
+  [ "$SWAP_FR" -lt "$SWAP_MIN" ] && skip "memory: ${SWAP_FR} MiB swap free < ${SWAP_MIN}"
+fi
 
 DEADLINE=$(deadline_epoch); LEFT=$(( DEADLINE - $(date +%s) ))
 # the night window: a start more than max_hours before stop_at is a daytime start, refused (not clamped:

@@ -150,14 +150,14 @@ case "$*" in *show*MemoryCurrent*) echo 0;; esac
 exit 0
 ' > "$TMP/ovbin/systemctl"; chmod +x "$TMP/ovbin/free" "$TMP/ovbin/systemctl"
 printf '%s\n' '{"memory":{"perAgentMB":750,"hostReserveMB":2048}}' > "$OVR/config.familiar.json"
-for h in familiar katana; do
+for h in familiar katana fami_liar; do
   bud=$(DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=$h CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$BUD" 2>/dev/null | grep 'per-agent plan')
   dsh=$(DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=$h CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$DASH" --json 2>/dev/null | jq -c '[.memory.perAgentMb // .perAgentMb, .memory.hostReserveMb // .hostReserveMb, .memory.balloonReserveMb // .balloonReserveMb]' 2>/dev/null)
   gate=$(printf '%s' '{"tool_name":"Agent"}' | DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=$h CLAUDE_PLUGIN_ROOT="$ROOT" FAKE_AVAIL=100 PATH="$TMP/ovbin:$PATH" bash "$GATE" 2>&1 | grep -o 'per_agent=[0-9]*  host_reserve=[0-9]*  balloon_reserve=[0-9]*')
   if [ $h = familiar ]; then want_b="per-agent plan: 750 MiB    host reserve: 2048 MiB    balloon reserve: 4000 MiB"; want_d='[750,2048,4000]'; want_g='per_agent=750  host_reserve=2048  balloon_reserve=4000'
   else want_b="per-agent plan: 300 MiB    host reserve: 6000 MiB    balloon reserve: 4000 MiB"; want_d='[300,6000,4000]'; want_g='per_agent=300  host_reserve=6000  balloon_reserve=4000'; fi
   [[ "$bud" == *"$want_b"* ]] && [ "$dsh" = "$want_d" ] && [ "$gate" = "$want_g" ] \
-    && pass "overlay agreement ($h): mem-budget, dashboard-data and mem-gate all read the same merged config" \
+    && pass "overlay agreement ($h): mem-budget, dashboard-data and mem-gate all read the same merged config (an invalid host name takes no overlay)" \
     || fail "overlay drift ($h): mem-budget='$bud' dashboard=$dsh gate='$gate'"
 done
 

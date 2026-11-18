@@ -23,16 +23,27 @@ TOOL="$(printf '%s' "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)"
 case "$TOOL" in Agent|Task) ;; *) exit 0 ;; esac
 
 # --- config (defaults baked in so it works before config.json exists) ---
+# A config the gate cannot trust is a BLOCK (exit 2), never an admit (xreview #230 r1): the helper must load, the merged
+# config must be one object, and every number must be a bounded non-negative integer before any arithmetic.
+invalid() { echo "🚫 DREAMTEAM MEMORY GATE — spawn blocked: $1 (config $CFG + config.<host>.json; fix it, or remove the overlay)" >&2; exit 2; }
 # the config with this host's overlay (config.<host>.json) deep-merged over it: scripts/lib/config.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib/config.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/lib/config.sh" 2>/dev/null || invalid "scripts/lib/config.sh did not load"
 CFGJSON="$(dreamteam_config "$CFG")"
-getcfg() { jq -r --arg k "$1" --arg d "$2" ".memory[\$k] // \$d" <<<"$CFGJSON" 2>/dev/null || printf '%s' "$2"; }
-PER_AGENT=$(getcfg perAgentMB 400)
-HOST_RESERVE=$(getcfg hostReserveMB 6000)
-BALLOON=$(getcfg balloonReserveMB 8000)
-MIN_AVAIL=$(getcfg minAvailableMB 8000)
-MIN_SWAP_FREE=$(getcfg minSwapFreeMB 0); MIN_SWAP_FREE=${MIN_SWAP_FREE//[!0-9]/}; MIN_SWAP_FREE=${MIN_SWAP_FREE:-0}
-MAX_AGENTS=$(getcfg maxAgents 30)
+jq -e 'type == "object"' <<<"$CFGJSON" >/dev/null 2>&1 || invalid "the merged config is not one JSON object"
+MAXMB=10000000
+getcfg() { # key default → the value, or exit 2 when it is set but is not an integer 0..MAXMB
+  local v; v=$(jq -r --arg k "$1" '.memory[$k] // empty | tostring' <<<"$CFGJSON" 2>/dev/null) || invalid "memory.$1 unreadable"
+  [ -n "$v" ] || v="$2"
+  dreamteam_uint "$v" "$MAXMB" || invalid "memory.$1 is '$v', not an integer 0..$MAXMB"
+  printf '%s' "$((10#$v))"
+}
+PER_AGENT=$(getcfg perAgentMB 400) || exit 2
+HOST_RESERVE=$(getcfg hostReserveMB 6000) || exit 2
+BALLOON=$(getcfg balloonReserveMB 8000) || exit 2
+MIN_AVAIL=$(getcfg minAvailableMB 8000) || exit 2
+MIN_SWAP_FREE=$(getcfg minSwapFreeMB 0) || exit 2
+MAX_AGENTS=$(getcfg maxAgents 30) || exit 2
+[ "$PER_AGENT" -ge 1 ] || invalid "memory.perAgentMB is 0"
 SCOPE_ONLY=$(getcfg scopeToDreamteam false)
 if [ "$SCOPE_ONLY" = "true" ] && [ ! -f "$STATE/active" ]; then exit 0; fi
 
@@ -61,6 +72,9 @@ done
 AVAIL=$(free -m | awk '/^Mem:/{print $7}')
 SWAP_USED=$(free -m | awk '/^Swap:/{print $3}')
 SWAP_FREE=$(free -m | awk '/^Swap:/{print $4}')
+# the measurements too: a reading that is not a number is a block, never a comparison error that falls through
+dreamteam_uint "${AVAIL:-x}" "$MAXMB" || invalid "free -m gave no readable available memory ('$AVAIL')"
+if [ "$MIN_SWAP_FREE" -gt 0 ]; then dreamteam_uint "${SWAP_FREE:-x}" "$MAXMB" || invalid "free -m gave no readable swap free ('$SWAP_FREE')"; fi
 HEADROOM=$(( AVAIL - HOST_RESERVE - BALLOON - LOCAL_EFF ))
 BUDGET=$(( HEADROOM / PER_AGENT )); [ "$BUDGET" -lt 0 ] && BUDGET=0
 
@@ -79,7 +93,7 @@ block() {
 # RAM-based blocks first (don't wait on the agent count for the real guard):
 [ "$AVAIL" -lt "$MIN_AVAIL" ] && block "only ${AVAIL}MiB RAM available (< ${MIN_AVAIL}MiB floor)."
 # swap free (a full zram looks like nothing to MemAvailable; the next balloon then meets the OOM killer). 0 = no floor.
-[ "$MIN_SWAP_FREE" -gt 0 ] && [ "${SWAP_FREE:-0}" -lt "$MIN_SWAP_FREE" ] && block "only ${SWAP_FREE}MiB swap free (< ${MIN_SWAP_FREE}MiB swap floor)."
+[ "$MIN_SWAP_FREE" -gt 0 ] && [ "$SWAP_FREE" -lt "$MIN_SWAP_FREE" ] && block "only ${SWAP_FREE}MiB swap free (< ${MIN_SWAP_FREE}MiB swap floor)."
 [ "$BUDGET" -le 0 ]          && block "no budget for another agent (need ${PER_AGENT}+${BALLOON}MiB headroom)."
 
 # Count cap last — uses `claude agents --json` (real status), pgrep fallback (see lib.sh).
