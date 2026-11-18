@@ -123,6 +123,23 @@ run install >/dev/null
 ( exec 8>> "$U/.fleet-mount.lock"; flock -n 8 || exit 9; : > "$TMP/sc.log"; PATH="$BASE_PATH" bash "$S" uninstall 8>&- >/dev/null 2>&1; echo $? > "$TMP/locked.rc" )
 [ "$(cat "$TMP/locked.rc")" = 3 ] && [ -f "$U/srv-fleet.mount" ] && [ ! -s "$TMP/sc.log" ] && ok "a second run while one holds the lock: exit 3, nothing changed" || bad "lock: rc=$(cat "$TMP/locked.rc")"
 
+# --- xreview r3: the ownership line is matched whole; the lock is never opened through a symlink -----------------
+run uninstall >/dev/null 2>&1; rm -f "$U/srv-fleet.mount" "$U/srv-fleet.automount"
+head -1 "$TMP/unit.sample" > /dev/null 2>&1 || true
+for victim in srv-fleet.mount srv-fleet.automount; do
+  printf '%s\n[Unit]\nDescription=other tool\n' '# written by dreamteam scripts/fleet-mount.sh (sync replacement, phase 1); remove with: fleet-mount.sh uninstall-other-tool' > "$U/$victim"
+  : > "$TMP/sc.log"; run install >/dev/null 2>&1; r1=$?; run uninstall >/dev/null 2>&1; r2=$?
+  [ "$r1" = 3 ] && [ "$r2" = 3 ] && grep -qx "Description=other tool" "$U/$victim" && [ ! -s "$TMP/sc.log" ] \
+    && ok "a first line that only STARTS like ours ($victim) is foreign: install and uninstall refuse" || bad "prefix collision $victim: $r1 $r2"
+  rm -f "$U/$victim"
+done
+rm -f "$U/.fleet-mount.lock"; ln -s "$TMP/lock-target" "$U/.fleet-mount.lock"
+: > "$TMP/sc.log"; run install >/dev/null 2>&1; r1=$?; run uninstall >/dev/null 2>&1; r2=$?
+[ "$r1" = 3 ] && [ "$r2" = 3 ] && [ ! -e "$TMP/lock-target" ] && [ ! -s "$TMP/sc.log" ] && [ ! -e "$U/srv-fleet.mount" ] \
+  && ok "a dangling symlink at the lock path: both modes refuse and its target is never created" || bad "lock symlink: $r1 $r2 target=$([ -e "$TMP/lock-target" ] && echo created)"
+rm -f "$U/.fleet-mount.lock"; run install >/dev/null
+[ "$(head -1 "$U/srv-fleet.mount")" = "$(head -1 "$U/srv-fleet.automount")" ] && run check >/dev/null && ok "both units carry the one ownership line and check is clean" || bad "ownership line"
+
 # --- a file that APPEARS at an absent unit path after the preflight is not replaced (xreview r2) -----------------
 run uninstall >/dev/null 2>&1; rm -f "$U/srv-fleet.mount" "$U/srv-fleet.automount"
 mkdir -p "$TMP/racebin"; REALCHMOD="$(command -v chmod)"

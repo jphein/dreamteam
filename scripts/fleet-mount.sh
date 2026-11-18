@@ -11,8 +11,10 @@
 #   10.0.6.11:/srv/fleet  on  /srv/fleet   (nfs4; override with FLEET_SHARE_SOURCE / FLEET_SHARE_MOUNTPOINT)
 # - AUTOMOUNT, not a boot-time mount: a host that boots while the server is away boots normally, and the share is
 #   mounted at first use and released after 10 idle minutes.
-# - `soft,timeo=50,retrans=3`: when the server is away a read or write gets an ERROR after about 15 s; with a hard
-#   mount every lane touching its scratch would hang until the server returned. The price: a write in flight during an
+# - `soft,timeo=50,retrans=3`: when the server is away the client gives up after a bounded number of RPC retries
+#   and the read or write gets an ERROR; with a hard mount every lane touching its scratch would hang until the
+#   server returned. How long "bounded" is in seconds has not been measured here (it depends on the kernel's
+#   backoff and on how many RPCs an operation needs); `TimeoutSec=30` bounds only the mount itself. The price: a write in flight during an
 #   outage can be lost and the writer is told so. That is the right trade for scratch and reports, and the reason
 #   nothing that must not lose a write (databases, git dirs) belongs on the share.
 # - `nosuid,nodev,noexec`: every client can write here, so nothing on the share may gain privilege or be executed
@@ -50,7 +52,7 @@ MOUNT_U="$UDIR/$unit.mount"; AUTO_U="$UDIR/$unit.automount"
 
 mount_text() {
   cat <<EOF
-# written by dreamteam scripts/fleet-mount.sh (sync replacement, phase 1); remove with: fleet-mount.sh uninstall
+$HEADER
 [Unit]
 Description=Fleet share (shared scratch and state for lane hosts) from $SRC
 After=network-online.target
@@ -66,7 +68,7 @@ EOF
 }
 auto_text() {
   cat <<EOF
-# written by dreamteam scripts/fleet-mount.sh (sync replacement, phase 1); remove with: fleet-mount.sh uninstall
+$HEADER
 [Unit]
 Description=Automount the fleet share at $MP on first use
 
@@ -79,8 +81,9 @@ WantedBy=multi-user.target
 EOF
 }
 same() { [ -f "$2" ] && [ ! -L "$2" ] && [ "$(printf '%s\n' "$1")" = "$(cat -- "$2")" ]; }   # same <text> <file>
-HEADER='# written by dreamteam scripts/fleet-mount.sh'
-ours() { [ -f "$1" ] && [ ! -L "$1" ] && [ "$(head -c "${#HEADER}" -- "$1" 2>/dev/null)" = "$HEADER" ]; }   # a regular file we wrote
+HEADER='# written by dreamteam scripts/fleet-mount.sh (sync replacement, phase 1); remove with: fleet-mount.sh uninstall'
+# a regular file whose WHOLE first line is the line this script writes (a longer or shorter first line is foreign)
+ours() { local first; [ -f "$1" ] && [ ! -L "$1" ] && IFS= read -r first < "$1" 2>/dev/null && [ "$first" = "$HEADER" ]; }
 foreign() {   # 0 when either unit path holds something this script did not write (a file, a symlink, a directory)
   local f bad=1
   for f in "$MOUNT_U" "$AUTO_U"; do
@@ -89,7 +92,10 @@ foreign() {   # 0 when either unit path holds something this script did not writ
   return "$bad"
 }
 lock() {   # one install/uninstall at a time on this host; the lock file lives in the root-owned unit dir
-  exec 8>> "$UDIR/.fleet-mount.lock" || { echo "fleet-mount: cannot open the lock in $UDIR" >&2; exit 3; }
+  local lf="$UDIR/.fleet-mount.lock"
+  # never open THROUGH something: a symlink here (even a dangling one) would make root create or append its target
+  if [ -L "$lf" ] || { [ -e "$lf" ] && [ ! -f "$lf" ]; }; then echo "fleet-mount: $lf is a symlink or not a regular file; nothing changed" >&2; exit 3; fi
+  exec 8>> "$lf" || { echo "fleet-mount: cannot open the lock in $UDIR" >&2; exit 3; }
   flock -n 8 || { echo "fleet-mount: another fleet-mount run holds the lock; nothing changed" >&2; exit 3; }
 }
 need_root() {
