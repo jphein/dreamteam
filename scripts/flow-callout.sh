@@ -59,9 +59,18 @@ INPUT="$(cat 2>/dev/null || true)"
 ACTIVE="$(printf '%s' "$INPUT" | jq -r 'if type == "object" then (.stop_hook_active // false | tostring) else error("x") end' 2>/dev/null)" || exit 0
 [ "$ACTIVE" = "true" ] && exit 0
 
-# ── (b) master switch. `== false`, not `// true` (jq's // treats false as empty: the reuse-gate bug). A missing
-#        config still enforces.
-ENFORCE=$(jq -r 'if .flow.enforce == false then "false" else "true" end' "$CFG" 2>/dev/null || echo true)
+# ── (b) the config: read ONCE, a regular file only, the read bounded to 1 s (xreview #237 r5: a FIFO or a stalled
+#        mount at DREAMTEAM_CONFIG hung the hook); both jq reads below run on the string, which cannot hang. Not a
+#        regular file, or a read that times out: said, and the hook steps aside (fail open). A MISSING config still
+#        enforces with the default leads. The master switch is `== false`, not `// true` (jq's // treats false as
+#        empty: the reuse-gate bug).
+CFGTXT=""
+if [ -e "$CFG" ]; then
+  if [ ! -f "$CFG" ] || [ -L "$CFG" ]; then note "config $CFG is not a regular file: open rows not checked"; exit 0; fi
+  CFGTXT=$(timeout -k 1 1 head -c 1048576 -- "$CFG" 2>/dev/null); cfgrc=$?
+  if [ "$cfgrc" -ne 0 ]; then note "config $CFG read timed out or failed (rc $cfgrc): open rows not checked"; exit 0; fi
+fi
+ENFORCE=$(jq -r 'if .flow.enforce == false then "false" else "true" end' <<<"$CFGTXT" 2>/dev/null || echo true)
 [ "$ENFORCE" = "false" ] && exit 0
 
 # ── (c) who am I: the names this lane goes by, lowercase, deduped, the ledger's name alphabet only. The identity is
@@ -71,7 +80,7 @@ ENFORCE=$(jq -r 'if .flow.enforce == false then "false" else "true" end' "$CFG" 
 names=()
 add() { local n; n="$(printf '%s' "$1" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9_.-')"; [ -n "$n" ] || return 0
         local x; for x in "${names[@]-}"; do [ "$x" = "$n" ] && return 0; done; names+=("$n"); }
-mapfile -t leads < <(jq -r '(.flow.leads // ["sen","jp-2f"])[]' "$CFG" 2>/dev/null || printf 'sen\njp-2f\n')
+mapfile -t leads < <(jq -r '(.flow.leads // ["sen","jp-2f"])[]' <<<"$CFGTXT" 2>/dev/null || printf 'sen\njp-2f\n')
 [ "${#leads[@]}" -gt 0 ] || leads=(sen jp-2f)
 is_lead() { local l; for l in "${leads[@]}"; do [ "$1" = "$l" ] && return 0; done; return 1; }
 add "${ASK_WHO:-}"
@@ -93,11 +102,11 @@ WHO="${names[0]}"
 KEY="${ASK_KEY:-}"
 if [ -z "$KEY" ]; then
   KF="${DREAMTEAM_ASK_KEY_FILE:-$HOME/Projects/plan.realm.watch/data/ask.key}"
-  # a regular file only (a FIFO or a device at the key path never reaches the read: that is the one hang guard, r4;
-  # a mutation showed a timeout around the read was never exercised, so there is none), at most 200 bytes of it
+  # a regular file only (a FIFO or a device at the key path never reaches the read, r4), the read bounded to 1 s (a
+  # stalled mount blocks head on a regular file too, r5), at most 200 bytes of it
   KEY=""
   if [ -f "$KF" ] && [ ! -L "$KF" ]; then
-    KEY="$(head -c 200 -- "$KF" 2>/dev/null | tr -d '[:space:]')" || KEY=""
+    KEY="$(timeout -k 1 1 head -c 200 -- "$KF" 2>/dev/null | tr -d '[:space:]')" || KEY=""
   fi
 fi
 if [ -z "$KEY" ]; then

@@ -68,6 +68,11 @@ list() { printf '{"count":%d,"rows":[%s]}\n' "$#" "$(IFS=,; echo "$*")" > "$FIX/
 show() { # show <id> <row-json> <log-json-array>
   printf '{%s,"log":%s}\n' "$(printf '%s' "$2" | sed 's/^{//; s/}$//')" "$3" > "$FIX/show-$1.json"
 }
+# head: on EXTRA_PATH for the 6l cases only; sleeps 30 s when its arguments name SLOW_PATH (a stalled mount), else the
+# real head (6l, xreview #237 r5)
+mkdir -p "$TMP/slow"
+printf '#!/usr/bin/env bash\ncase "$*" in *"${SLOW_PATH:-/none/}"*) sleep 30 ;; esac\nexec %s "$@"\n' "$(command -v head)" > "$TMP/slow/head"
+chmod +x "$TMP/slow/head"
 reset() { rm -f "$FIX"/*; printf '{"count":0,"rows":[]}\n' > "$FIX/list.json"; : > "$TMP/callout.log"; }
 
 RC=0; ELAPSED=0
@@ -78,7 +83,7 @@ FAKEKEY="k0000000000000000000000000000000000000000"
 run() {
   RC=0; local t0; t0=$(date +%s)
   printf '%s' "${1:-{\"hook_event_name\":\"Stop\",\"stop_hook_active\":false\}}" \
-    | PATH="$TMP/bin:$PATH" FIX="$FIX" ASK_URL="http://plan.test" ASK_KEY="${ASK_KEY-$FAKEKEY}" DREAMTEAM_ASK_KEY_FILE="${KEYFILE-$TMP/no-such-key}" \
+    | PATH="${EXTRA_PATH:+$EXTRA_PATH:}$TMP/bin:$PATH" FIX="$FIX" ASK_URL="http://plan.test" ASK_KEY="${ASK_KEY-$FAKEKEY}" DREAMTEAM_ASK_KEY_FILE="${KEYFILE-$TMP/no-such-key}" \
       ASK_WHO="${ASK_WHO-example-lane}" DREAMTEAM_AGENT_ID="${DREAMTEAM_AGENT_ID-}" DREAMTEAM_CONFIG="${CFG:-$TMP/on.json}" \
       TMUX="${TMUXV-/stub/tmux-socket,1,0}" DREAMTEAM_FLOW_BUDGET="${BUDGET-9}" DREAMTEAM_FLOW_MAX_LOGS="${MAXLOGS-8}" DREAMTEAM_FLOW_MAX_ROWS="${MAXROWS-200}" \
       DREAMTEAM_FLOW_LOG="${LOGV-$TMP/callout.log}" bash "$HOOK" >"$TMP/out" 2>"$TMP/err" || RC=$?
@@ -229,6 +234,24 @@ reset; mkfifo "$TMP/key.fifo"; list "$(row 5555000e example-lane ordered $T0 nul
 ASK_KEY="" KEYFILE="$TMP/key.fifo" BUDGET=2 run
 allowed && [ "$ELAPSED" -le 4 ] && [ "$(calls)" -eq 0 ] && pass "a FIFO at the key path: no hang (${ELAPSED}s), no key, allowed" || fail "key fifo: rc=$RC elapsed=${ELAPSED}s calls=$(calls)"
 rm -f "$TMP/key.fifo"
+
+# 6l) xreview #237 r5: the reads are TIME-bounded too, not only byte-bounded: a stalled mount at the key path or at the
+#     config (the head stub on EXTRA_PATH sleeps 30 s when its arguments name SLOW_PATH, else runs the real head), and
+#     a FIFO at the config. Each: back within the budget, said in the log, allowed (fail open).
+printf '%s' "$FAKEKEY" > "$TMP/key.ok"
+reset; list "$(row 5555000f example-lane ordered $T0 null)"
+EXTRA_PATH="$TMP/slow" SLOW_PATH="$TMP/key.ok" ASK_KEY="" KEYFILE="$TMP/key.ok" BUDGET=2 run
+allowed && [ "$ELAPSED" -le 4 ] && [ "$(calls)" -eq 0 ] && pass "a stalled key read is cut at 1 s (${ELAPSED}s): no key, allowed" || fail "stalled key: rc=$RC elapsed=${ELAPSED}s calls=$(calls)"
+reset; list "$(row 55550010 example-lane ordered $T0 null)"
+EXTRA_PATH="$TMP/slow" SLOW_PATH="$TMP/on.json" BUDGET=2 run
+allowed && [ "$ELAPSED" -le 4 ] && [ "$(calls)" -eq 0 ] && grep -q "timed out" "$TMP/callout.log" && pass "a stalled config read is cut at 1 s (${ELAPSED}s): said, allowed" || fail "stalled config: rc=$RC elapsed=${ELAPSED}s calls=$(calls) log=[$(cat "$TMP/callout.log")]"
+reset; mkfifo "$TMP/cfg.fifo"; list "$(row 55550011 example-lane ordered $T0 null)"
+CFG="$TMP/cfg.fifo" BUDGET=2 run
+allowed && [ "$ELAPSED" -le 4 ] && [ "$(calls)" -eq 0 ] && grep -q "not a regular file" "$TMP/callout.log" && pass "a FIFO at the config is never opened: said, allowed" || fail "config fifo: rc=$RC elapsed=${ELAPSED}s log=[$(cat "$TMP/callout.log")]"
+rm -f "$TMP/cfg.fifo"
+reset; list "$(row 55550012 example-lane ordered $T0 null)"
+EXTRA_PATH="$TMP/slow" SLOW_PATH="$TMP/unrelated" run
+blocked && grep -q 55550012 "$TMP/err" && pass "the slow head stub on an unrelated path changes nothing: the row still blocks (control)" || fail "slow stub control: rc=$RC"
 reset; mkfifo "$TMP/log.fifo"; echo 7 > "$FIX/rc"
 : > "$TMP/callout.log"; LOGV="$TMP/log.fifo" BUDGET=2 run; rm -f "$FIX/rc"
 allowed && [ "$ELAPSED" -le 4 ] && pass "a FIFO at the log path: the outage note does not hang (${ELAPSED}s), allowed" || fail "log fifo: rc=$RC elapsed=${ELAPSED}s"
