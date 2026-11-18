@@ -21,6 +21,7 @@ import json
 import math
 import os
 import re
+import select
 import shlex
 import socket
 import subprocess
@@ -253,16 +254,22 @@ def eff_vram(c: dict, fleet: dict) -> int:
 def lane_footprint(fleet: dict, host: str) -> tuple:
     """(MB, line): the live RSS of the claude sessions and their children on a host that also runs lanes (#241, Sen
     2026-11-17 option b). The lane floor keeps a lane from starting beside a pair; this keeps a pair from being admitted
-    beside a running lane, which the fixed pair limit never saw. Unreadable (asleep, an older probe without the LANE
-    line) is SAID and counts 0: the static pair rule still applies. Hosts without "lanes" in fleet.json: nothing."""
+    beside a running lane, which the fixed pair limit never saw. UNREADABLE REFUSES (xreview #256 r1 item 1): an
+    asleep host runs no job anyway (wake it, then claim); an older probe without the LANE line is an update to make;
+    a failed sampler (LANE,ERR) is not a measured zero (LANE,OK,0). Hosts without "lanes" in fleet.json: nothing."""
     h = fleet["hosts"][host]
     if not h.get("lanes"):
         return 0, ""
     p = probe(fleet, host)
     if not p.get("reachable"):
-        return 0, f"{host} lane footprint: unreadable (asleep); the static pair rule alone applies"
+        raise Refused(f"{host} lane footprint: unreadable (asleep?): an asleep host runs no job anyway; wake it "
+                      f"(realm wol wake {host}), then claim")
+    if p.get("lane_err"):
+        raise Refused(f"{host} lane footprint: ps failed on the host (LANE,ERR), and a failure is not a measured "
+                      f"zero; check the host, then claim")
     if "lane_mb" not in p:
-        return 0, f"{host} lane footprint: unreadable (the probe has no LANE line); the static pair rule alone applies"
+        raise Refused(f"{host} lane footprint: the probe has no LANE line (an older dreamteam on {host}?); update it, "
+                      f"then claim")
     return p["lane_mb"], (f"{host} lane footprint: {p['lane_mb']} MB live (claude sessions and their children), "
                           f"subtracted from the pair limit (#241)")
 
@@ -383,9 +390,10 @@ def cmd_claim(a, fleet, cfg) -> int:
            "until": parse_until(a.until, start), "peak_ram_mb": parse_mb(a.peak_ram), "peak_vram_mib": parse_mb(a.peak_vram),
            "grows": a.grows, "protected": a.protected, "estimate": a.estimate, "solo": a.solo, "exclusive": a.exclusive,
            "override": a.override or None, "by": lane_of(me) or "orchestrator", "jobs": []}
-    with Ledger(write=not a.dry_run) as L:
+    host = card_of(fleet, a.card)["host"]
+    with HostLock(fleet, host), Ledger(write=not a.dry_run) as L:   # the lock spans probe → record (#256 r1 item 3)
         lines = check_claim(fleet, L.data["claims"], new, L.data["windows"], vulkan=a.vulkan, override=a.override,
-                            lane=lane_footprint(fleet, card_of(fleet, a.card)["host"]))
+                            lane=lane_footprint(fleet, host))
         new["cap_mb"] = cap_mb(new["peak_ram_mb"], new["grows"], fleet)
         for ln in lines:
             print("  " + ln)
@@ -544,7 +552,7 @@ PROBE = r"""
 nvidia-smi --query-gpu=index,pci.bus_id,memory.used,memory.total,utilization.gpu --format=csv,noheader,nounits 2>/dev/null | sed 's/^/GPU,/'
 nvidia-smi --query-compute-apps=gpu_bus_id,pid,used_memory,process_name --format=csv,noheader,nounits 2>/dev/null | sed 's/^/APP,/'
 awk '/MemAvailable/{a=$2}/SwapTotal/{t=$2}/SwapFree/{f=$2}END{print "MEM,"a","t","f}' /proc/meminfo
-ps -eo pid=,ppid=,rss=,comm= 2>/dev/null | awk '{pp[$1]=$2; rss[$1]=$3; c[$1]=$4; n++; id[n]=$1} END{for(i=1;i<=n;i++){q=id[i]; while(q>1 && (q in pp)){if(c[q]=="claude"){s+=rss[id[i]]; break}; q=pp[q]}}; print "LANE," s+0}'
+if lane=$(ps -eo pid=,ppid=,rss=,comm= 2>/dev/null) && [ -n "$lane" ]; then printf '%s\n' "$lane" | awk '{pp[$1]=$2; rss[$1]=$3; c[$1]=$4; n++; id[n]=$1} END{for(i=1;i<=n;i++){q=id[i]; while(q>1 && (q in pp)){if(c[q]=="claude"){s+=rss[id[i]]; break}; q=pp[q]}}; print "LANE,OK," s+0}'; else echo LANE,ERR; fi
 for p in __PATHS__; do printf 'DISK,%s,%s\n' "$p" "$(df -BG --output=avail "$p" 2>/dev/null | tail -1 | tr -dc 0-9)"; done
 if [ -n "__PAUSE__" ] && [ -e "__PAUSE__" ]; then echo PAUSE,1; else echo PAUSE,0; fi
 """
@@ -562,11 +570,72 @@ def _ssh(host: str, script: str, timeout: float = 12):
                           capture_output=True, text=True, timeout=timeout)
 
 
-def probe(fleet: dict, host: str) -> dict:
+HOST_LOCK_SCRIPT = ('mkdir -p "$HOME/.local/state/dreamteam" && exec flock -w 5 "$HOME/.local/state/dreamteam/host.lock" '
+                    "-c 'echo LOCKED; cat >/dev/null'")
+
+
+class HostLock:
+    """The host-level lock a claim holds from its probe to its record, shared with the lane start on that host
+    (scripts/mem-gate.sh takes the same file around its measurement): xreview #256 r1 item 3. Over ssh: flock -w 5 on
+    ~/.local/state/dreamteam/host.lock, held by a cat on our pipe until we close it after the record is written. Not
+    taken within the wait (a lane is starting there, or the host is unreachable) → Refused: fail closed. Hosts without
+    lanes: no lock."""
+
+    def __init__(self, fleet: dict, host: str):
+        self.host, self.needed, self.proc, self.rc = host, bool(fleet["hosts"][host].get("lanes")), None, None
+
+    def __enter__(self):
+        if not self.needed:
+            return self
+        if self.host == local_host() and not os.environ.get("DREAMTEAM_GPU_SSH"):
+            argv = ["bash", "-c", HOST_LOCK_SCRIPT]
+        else:
+            argv = [os.environ.get("DREAMTEAM_GPU_SSH", "ssh"), "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
+                    self.host, HOST_LOCK_SCRIPT]
+        self.proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                     text=True)
+        ready, _, _ = select.select([self.proc.stdout], [], [], 12)
+        line = self.proc.stdout.readline().strip() if ready else ""
+        if line != "LOCKED":
+            self._release()
+            if self.rc == 255:          # ssh could not reach the host: asleep
+                raise Refused(f"{self.host} unreachable (asleep?): an asleep host runs no job anyway; wake it "
+                              f"(realm wol wake {self.host}), then claim")
+            raise Refused(f"{self.host} host lock not taken within 5 s (a lane is starting there): try again")
+        return self
+
+    def _release(self):
+        if self.proc is None:
+            return
+        with contextlib.suppress(OSError):
+            self.proc.stdin.close()
+        try:
+            self.rc = self.proc.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            self.rc = self.proc.wait()
+        self.proc = None
+
+    def __exit__(self, *_):
+        self._release()
+        return False
+
+
+def probe_script(fleet: dict, host: str) -> str:
     h = fleet["hosts"][host]
     paths = " ".join(shlex.quote(f["path"]) for f in h.get("disk_floors", [])) or "/"
     pause = (h.get("pause_file") or "").replace("~", "$HOME")
-    script = PROBE.replace("__PATHS__", paths).replace("__PAUSE__", pause)
+    return PROBE.replace("__PATHS__", paths).replace("__PAUSE__", pause)
+
+
+def cmd_probe_script(a, fleet, cfg) -> int:
+    """Print the probe script for a host: the tests run it against a stubbed ps (the sampler, #256 r1 item 5)."""
+    print(probe_script(fleet, a.host))
+    return 0
+
+
+def probe(fleet: dict, host: str) -> dict:
+    script = probe_script(fleet, host)
     try:
         r = _ssh(host, script)
     except subprocess.TimeoutExpired:
@@ -586,8 +655,10 @@ def probe(fleet: dict, host: str) -> dict:
             a, tot, free = (int(x or 0) for x in parts[1:4])
             out["avail_mb"] = a // 1024
             out["swap_pct"] = int(100 * (tot - free) / tot) if tot else 0
-        elif parts[0] == "LANE" and len(parts) >= 2 and parts[1].isdigit():   # kB: claude sessions + children (#241)
-            out["lane_mb"] = int(parts[1]) // 1024
+        elif parts[0] == "LANE" and len(parts) >= 3 and parts[1] == "OK" and parts[2].isdigit():   # kB (#241)
+            out["lane_mb"] = int(parts[2]) // 1024
+        elif parts[0] == "LANE":                                       # LANE,ERR: ps failed on the host (#256 r1 item 2)
+            out["lane_err"] = True
         elif parts[0] == "DISK" and len(parts) >= 3:
             out["disk"][parts[1]] = int(parts[2]) if parts[2].isdigit() else None
         elif parts[0] == "PAUSE":
@@ -1008,6 +1079,9 @@ def main(argv=None) -> int:
     p.add_argument("--json", action="store_true")
     p.add_argument("--guard", action="store_true", help="list every would-block since midnight, not the last 10")
     p.set_defaults(fn=cmd_board)
+    p = sub.add_parser("probe-script", help="print the probe script for HOST (the sampler; tests run it against a stubbed ps)")
+    p.add_argument("host")
+    p.set_defaults(fn=cmd_probe_script)
     p = sub.add_parser("inventory", help="the cards and their capabilities (--check HOST re-measures)")
     p.add_argument("--json", action="store_true")
     p.add_argument("--check", metavar="HOST")

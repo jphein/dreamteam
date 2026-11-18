@@ -100,6 +100,28 @@ else
   fail "mem-gate should block on low avail — got exit $GRC; stderr: $(head -1 "$TMP/err")"
 fi
 
+# 1b) the HOST LOCK (dreamteam #256 r1 item 3): the gate's measurement and a GPU claim's probe-to-record window share
+#     one lock on the host (~/.local/state/dreamteam/host.lock; seams DREAMTEAM_HOST_LOCK, DREAMTEAM_HOST_LOCK_WAIT).
+#     Held elsewhere → the gate BLOCKS after its wait (fail closed); free → taken, and the usual decision follows.
+HLOCK="$TMP/host.lock"
+flock "$HLOCK" sleep 30 & HOLDER=$!
+sleep 0.3
+FAKE_AVAIL=2000 FAKE_SWAP_USED=500 DREAMTEAM_HOST_LOCK="$HLOCK" DREAMTEAM_HOST_LOCK_WAIT=1 \
+  run_gate "$MEM_GATE" '{"tool_name":"Agent","tool_input":{"prompt":"x"}}'
+if [ "$GRC" -eq 2 ] && grep -qi 'host lock' "$TMP/err"; then
+  pass "mem-gate BLOCKS on a held host lock (a claim's probe-to-record window), fail closed after 1 s"
+else
+  fail "host lock held: exit $GRC; stderr: $(head -1 "$TMP/err")"
+fi
+pkill -P "$HOLDER" 2>/dev/null; kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null   # flock AND the sleep it forked hold the fd
+FAKE_AVAIL=2000 FAKE_SWAP_USED=500 DREAMTEAM_HOST_LOCK="$HLOCK" DREAMTEAM_HOST_LOCK_WAIT=1 \
+  run_gate "$MEM_GATE" '{"tool_name":"Agent","tool_input":{"prompt":"x"}}'
+if [ "$GRC" -eq 2 ] && grep -qi 'MEMORY GATE' "$TMP/err" && ! grep -qi 'host lock' "$TMP/err"; then
+  pass "mem-gate takes a free host lock and goes on to its own decision (control: the floor block, not the lock)"
+else
+  fail "host lock free: exit $GRC; stderr: $(head -1 "$TMP/err")"
+fi
+
 # 2) ALLOW when RAM is plentiful and agent count is under the cap.
 FAKE_AVAIL=60000 FAKE_SWAP_USED=0 FAKE_PGREP_COUNT=1 \
   run_gate "$MEM_GATE" '{"tool_name":"Agent","tool_input":{"prompt":"x"}}'

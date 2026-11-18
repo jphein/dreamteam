@@ -43,13 +43,20 @@ cat > "$TMP/sshstub/ssh" <<'STUB'
 #!/usr/bin/env bash
 host=""; while [ $# -gt 1 ]; do case "$1" in -o) shift 2 ;; -*) shift ;; *) host=$1; shift; break ;; esac; done
 case "${1:-}" in *"kill -0"*) [ -e "$PROBES/$host.alive" ] && exit 0 || exit 1 ;; esac
+case "${1:-}" in *"host.lock"*)   # the host lock (#256 r1 item 3): LOCKED, then hold until stdin closes; a .locked marker = held elsewhere
+  [ -f "$PROBES/$host.probe" ] || exit 255
+  [ -e "$PROBES/$host.locked" ] && exit 1
+  echo "LOCK" >> "$PROBES/$host.seq"; echo LOCKED; cat >/dev/null
+  echo "UNLOCK recorded=$(grep -c '"peak_ram_mb"' "$DREAMTEAM_GPU_STATE/claims.json" 2>/dev/null)" >> "$PROBES/$host.seq"; exit 0 ;;
+esac
 [ -f "$PROBES/$host.probe" ] || exit 255
+echo "PROBE" >> "$PROBES/$host.seq"
 cat "$PROBES/$host.probe"
 STUB
 chmod +x "$TMP/sshstub/ssh"; export PROBES DREAMTEAM_GPU_SSH="$TMP/sshstub/ssh"
 probe_fixture() {  # probe_fixture <host> <idx> <used_mib> <total_mib> [app-name app-mib]
   { echo "GPU,$2,00000000:0$2:00.0,$3,$4,10"; [ -n "${5:-}" ] && echo "APP,00000000:0$2:00.0,4242,$6,$5"
-    echo "MEM,9000000,0,0"; echo "DISK,/,50"; echo "PAUSE,0"; } > "$PROBES/$1.probe"
+    echo "MEM,9000000,0,0"; echo "LANE,OK,0"; echo "DISK,/,50"; echo "PAUSE,0"; } > "$PROBES/$1.probe"
 }
 probe_fixture katana 0 500 11264; probe_fixture familiar 0 3409 10240; probe_fixture gpu1 1 0 10240
 fresh() { rm -rf "$TMP/state"; export DREAMTEAM_GPU_STATE="$TMP/state"; }
@@ -81,29 +88,61 @@ case "$out" in *"rule 7"*) pass "the pair refusal cites FAMILIAR-RULES rule 7" ;
 #        (Sen 2026-11-17 20:56, option b): the lane floor keeps a lane from starting beside a pair, but nothing kept a
 #        pair from being admitted beside a running lane, because the pair rule budgets a fixed number. The probe's LANE
 #        line is the RSS of every claude process and its descendants on the host; the ssh stub serves it canned.
-fresh; probe_fixture gpu1 1 0 10240; echo "LANE,1024000" >> "$PROBES/gpu1.probe"     # a lane holding 1000 MB
+#        xreview #256 r1 (Sen): an UNREADABLE footprint (asleep, an older probe, ps failed) REFUSES, never admits on a
+#        zero; a measured zero is LANE,OK,0 and a sampler failure is LANE,ERR; the claim's probe-to-record window and
+#        the lane start (mem-gate) share one host lock, taken over ssh, fail closed. The stub logs LOCK/PROBE/UNLOCK.
+fresh; probe_fixture gpu1 1 0 10240; sed -i 's/^LANE,.*/LANE,OK,1024000/' "$PROBES/gpu1.probe"   # a lane holding 1000 MB
 check "$(claim gpu1:0 --lane drift-gems --until 2h --peak-ram 4322 --peak-vram 3000)" 0 "lane footprint: one 46-band run still fits beside a 1000 MB lane (4322 + 1536 <= 10444 - 1000)"
 check "$(claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 4322 --peak-vram 3000)" 75 "lane footprint (#241): a running lane of 1000 MB turns the fitting 46-band pair into a refusal (10180 > 9444)"
 out=$(G "$ORCH" claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 4322 --peak-vram 3000 2>&1)
 case "$out" in *"lane footprint"*"1000 MB"*) pass "the refusal names the live lane footprint" ;; *) fail "lane refusal text: $out" ;; esac
 check "$(claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 2878 --peak-vram 3000)" 0 "lane footprint: a 2.81 GiB second run fits beside the lane (4322 + 2878 + 1536 = 8736 <= 9444)"
-fresh; probe_fixture gpu1 1 0 10240; echo "LANE,0" >> "$PROBES/gpu1.probe"            # lanes idle: nothing subtracted
-check "$(claim gpu1:0 --lane drift-gems --until 2h --peak-ram 4322 --peak-vram 3000)" 0 "lane footprint 0: the first run"
-check "$(claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 4322 --peak-vram 3000)" 0 "lane footprint 0: the 46-band pair fits as before (no lane running)"
-fresh; rm -f "$PROBES/gpu1.probe"                                                     # the host asleep: unreadable, static rule
-check "$(claim gpu1:0 --lane drift-gems --until 2h --peak-ram 4322 --peak-vram 3000)" 0 "lane footprint unreadable (asleep): the first run"
-check "$(claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 4322 --peak-vram 3000)" 0 "lane footprint unreadable (asleep): the static pair rule alone admits the pair"
-out=$(G "$ORCH" claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 4322 --peak-vram 3000 --dry-run 2>&1)
-case "$out" in *"lane footprint"*"unreadable"*) pass "an unreadable footprint is SAID, not silently zero" ;; *) fail "asleep footprint text: $out" ;; esac
-fresh; probe_fixture gpu1 1 0 10240                                                  # an older probe with no LANE line: static rule, said
-check "$(claim gpu1:0 --lane drift-gems --until 2h --peak-ram 4322 --peak-vram 3000)" 0 "no LANE line: the first run"
-check "$(claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 4322 --peak-vram 3000)" 0 "no LANE line: the static pair rule admits the pair"
+fresh; probe_fixture gpu1 1 0 10240                                                  # LANE,OK,0: lanes idle, nothing subtracted
+check "$(claim gpu1:0 --lane drift-gems --until 2h --peak-ram 4322 --peak-vram 3000)" 0 "lane footprint 0 (measured): the first run"
+check "$(claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 4322 --peak-vram 3000)" 0 "lane footprint 0 (measured): the 46-band pair fits as before (no lane running)"
+fresh; rm -f "$PROBES/gpu1.probe"                                                     # the host asleep: REFUSED (r1 item 1)
+check "$(claim gpu1:0 --lane drift-gems --until 2h --peak-ram 4322 --peak-vram 3000)" 75 "lane footprint unreadable (asleep): REFUSED, never admitted on a zero (#256 r1)"
+out=$(G "$ORCH" claim gpu1:0 --lane drift-gems --until 2h --peak-ram 4322 --peak-vram 3000 --dry-run 2>&1)
+case "$out" in *"realm wol wake gpu1"*) pass "the asleep refusal says how to wake the host, then claim" ;; *) fail "asleep refusal text: $out" ;; esac
+fresh; probe_fixture gpu1 1 0 10240; sed -i '/^LANE,/d' "$PROBES/gpu1.probe"          # an older probe with no LANE line: REFUSED
+check "$(claim gpu1:0 --lane drift-gems --until 2h --peak-ram 4322 --peak-vram 3000)" 75 "no LANE line (an older probe): REFUSED, not a silent zero"
+fresh; probe_fixture gpu1 1 0 10240; sed -i 's/^LANE,.*/LANE,ERR/' "$PROBES/gpu1.probe"  # ps failed on the host: REFUSED (r1 item 2)
+check "$(claim gpu1:0 --lane drift-gems --until 2h --peak-ram 4322 --peak-vram 3000)" 75 "LANE,ERR (ps failed on the host): REFUSED; a failure is not a measured zero"
+out=$(G "$ORCH" claim gpu1:0 --lane drift-gems --until 2h --peak-ram 4322 --peak-vram 3000 --dry-run 2>&1)
+case "$out" in *"ps failed"*) pass "the LANE,ERR refusal says the sampler failed" ;; *) fail "LANE,ERR refusal text: $out" ;; esac
+# the host lock (r1 item 3): held by a lane start on the host → the claim is REFUSED (fail closed), and says so
+fresh; probe_fixture gpu1 1 0 10240; touch "$PROBES/gpu1.locked"
+check "$(claim gpu1:0 --lane drift-gems --until 2h --peak-ram 2878 --peak-vram 3000)" 75 "host lock held (a lane is starting on gpu1): the claim is REFUSED, fail closed"
+out=$(G "$ORCH" claim gpu1:0 --lane drift-gems --until 2h --peak-ram 2878 --peak-vram 3000 2>&1)
+case "$out" in *"host lock"*) pass "the refusal names the host lock" ;; *) fail "host lock refusal text: $out" ;; esac
+rm -f "$PROBES/gpu1.locked"
+# the race (r1 items 3 and 4): the lock is taken BEFORE the probe and released AFTER the record is written
+fresh; probe_fixture gpu1 1 0 10240; rm -f "$PROBES/gpu1.seq"
+check "$(claim gpu1:0 --lane drift-gems --until 2h --peak-ram 2878 --peak-vram 3000)" 0 "a claim under the host lock is admitted"
+seq=$(tr '\n' ' ' < "$PROBES/gpu1.seq" 2>/dev/null)
+case "$seq" in "LOCK PROBE UNLOCK recorded=1 ") pass "lock → probe → record → unlock: the probe-to-record window sits inside the lock" ;; *) fail "lock sequence: [$seq]" ;; esac
+rm -f "$PROBES/gpu1.seq"; G "$ORCH" claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 2878 --peak-vram 3000 --dry-run >/dev/null 2>&1
+seq=$(tr '\n' ' ' < "$PROBES/gpu1.seq" 2>/dev/null)
+case "$seq" in "LOCK PROBE UNLOCK recorded=1 ") pass "a dry run takes the lock and probes, records nothing new (still the one claim)" ;; *) fail "dry-run lock sequence: [$seq]" ;; esac
 # admit (the run's own recheck of a peak above its claim) applies the same subtraction
-fresh; probe_fixture gpu1 1 0 10240; echo "LANE,1024000" >> "$PROBES/gpu1.probe"
+fresh; probe_fixture gpu1 1 0 10240; sed -i 's/^LANE,.*/LANE,OK,1024000/' "$PROBES/gpu1.probe"
 claim gpu1:0 --lane drift-gems --until 2h --peak-ram 2878 --peak-vram 3000 >/dev/null
 claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 2878 --peak-vram 3000 >/dev/null
 check "$(rc G drift-gems@team admit --card gpu1:0 --peak-ram 5500)" 75 "admit (#241): a run peak above its claim is refused beside the lane (5500 + 2878 + 1536 = 9914 > 9444; it fit the static 10444)"
-probe_fixture gpu1 1 0 10240                                                          # restore the plain fixture for the sections below
+# the sampler (r1 item 5): the probe's LANE line itself, against a stubbed ps (two claude sessions, a child, a
+# grandchild, an unrelated python3), and against a ps that fails
+mkdir -p "$TMP/psstub"
+cat > "$TMP/psstub/ps" <<'EOF'
+#!/usr/bin/env bash
+[ -e "${PS_FAILS:-/none}" ] && exit 1
+printf '%s\n' "1 0 1000 systemd" "100 1 500000 claude" "101 100 200000 bash" "102 101 300000 go" "200 1 400000 python3" "300 1 100000 claude"
+EOF
+chmod +x "$TMP/psstub/ps"
+lane=$(python3 "$LIB" probe-script gpu1 | PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^LANE,')
+check "$lane" "LANE,OK,1100000" "sampler: two claude sessions + a child + a grandchild = 1100000 kB; the unrelated python3 is not counted"
+lane=$(python3 "$LIB" probe-script gpu1 | PS_FAILS="$TMP/psstub/ps" PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^LANE,')
+check "$lane" "LANE,ERR" "sampler: a failing ps is LANE,ERR, never LANE,OK,0"
+probe_fixture gpu1 1 0 10240; probe_fixture gpu0 0 0 4096                            # plain fixtures for the sections below (gpu0 runs lanes too: awake, idle)
 fresh
 check "$(claim gpu0:0 --lane nebula-gems --until 2h --peak-ram 3277 --peak-vram 1400)" 0 "gpu0: a DEM3 run (3.2 GB, 1.4 GiB VRAM)"
 check "$(claim gpu0:0 --lane drift-gems --until 2h --peak-ram 3277 --peak-vram 1400)" 0 "gpu0: a DEM3 pair SHARES its one card (RAM 8090 <= idle MemAvailable 9500; VRAM 2800 <= 3072)"

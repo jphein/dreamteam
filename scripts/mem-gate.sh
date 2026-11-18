@@ -70,6 +70,15 @@ for sc in $(systemctl --user list-units 'dreamteam-*.scope' --state=active --no-
 done
 [ "$NLANES" -gt 1 ] && BALLOON=$(( BALLOON * NLANES ))
 
+# --- the host lock (dreamteam #256 r1 item 3): one lock per host, shared with a GPU claim's probe-to-record window
+#     (scripts/lib/gpu_fleet.py HostLock takes the same file over ssh). Held elsewhere past the wait → BLOCK (fail
+#     closed): a measurement never races a claim. Seams: DREAMTEAM_HOST_LOCK (path), DREAMTEAM_HOST_LOCK_WAIT (s, 5).
+HLOCK="${DREAMTEAM_HOST_LOCK:-$HOME/.local/state/dreamteam/host.lock}"; HLOCK_WAIT="${DREAMTEAM_HOST_LOCK_WAIT:-5}"
+mkdir -p "$(dirname "$HLOCK")" 2>/dev/null
+( : >>"$HLOCK" ) 2>/dev/null || invalid "cannot open the host lock $HLOCK"
+exec 9>>"$HLOCK"
+flock -w "$HLOCK_WAIT" 9 || invalid "host lock $HLOCK not taken within ${HLOCK_WAIT}s (a GPU claim is probing this host, or another lane is starting): retry"
+
 # --- measure RAM (instant — this is the real OOM guard, runs BEFORE the count) ---
 AVAIL=$(free -m | awk '/^Mem:/{print $7}')
 SWAP_USED=$(free -m | awk '/^Swap:/{print $3}')
