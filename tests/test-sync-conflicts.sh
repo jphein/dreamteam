@@ -116,5 +116,13 @@ cmp -s "$LINE" "$TMP/line.before" && [ "$(mails)" = "$n" ] && ok "lock held else
 out=$(bash "$S")
 case "$out" in "CHECK sync-conflicts warn · 2 conflict copies"*) ok "lock free again: the run publishes" ;; *) bad "after the lock: '$out'" ;; esac
 
+# --- 9. xreview round 2: relative roots are refused; a count that cannot be read is a fail --------------------
+mkdir -p "$TMP/rel/!"; touch "$TMP/rel/!/h.sync-conflict-20261117-151515-ABCDEFG"
+out=$(cd "$TMP/rel" && DREAMTEAM_SYNC_ROOTS='!' bash "$S")
+case "$out" in "CHECK sync-conflicts fail · root '!' is not an absolute path · "*) ok "a relative root (a find operator's name) is refused" ;; *) bad "relative root: '$out'" ;; esac
+mkdir -p "$TMP/wcstub"; printf '#!/bin/sh\nexit 1\n' > "$TMP/wcstub/wc"; chmod +x "$TMP/wcstub/wc"
+out=$(PATH="$TMP/wcstub:$PATH" bash "$S")
+case "$out" in "CHECK sync-conflicts fail · cannot count the list · "*) ok "a failing count is a fail, not a zero" ;; *) bad "wc stub: '$out'" ;; esac
+
 echo "----"; echo "sync-conflicts: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

@@ -106,5 +106,28 @@ mkdir -p "$TMP/stub"; printf '#!/bin/sh\necho "4096\t$3"\nexit 1\n' > "$TMP/stub
 out=$(PATH="$TMP/stub:$PATH" python3 "$S" --root "$P" --only clean 2>/dev/null)
 [ "$(col clean size_mb)" = "" ] && [ "$(col clean note)" = size-error ] && ok "du exit 1: size blank + size-error" || bad "du stub: $(grep '^clean' <<< "$out")"
 
+# --- xreview round 2: repo config and index flags cannot hide files; submodules are not entered ----------------
+R="$TMP/Projects3"; mkdir -p "$R"
+g init "$R/hideuntracked"; echo a > "$R/hideuntracked/a"; g -C "$R/hideuntracked" add a; g -C "$R/hideuntracked" commit -m one
+git -C "$R/hideuntracked" config status.showUntrackedFiles no; echo n > "$R/hideuntracked/new.txt"
+g init "$R/assume"; echo a > "$R/assume/a"; g -C "$R/assume" add a; g -C "$R/assume" commit -m one
+g -C "$R/assume" update-index --assume-unchanged a; echo changed > "$R/assume/a"
+g init "$R/skipwt"; echo a > "$R/skipwt/a"; g -C "$R/skipwt" add a; g -C "$R/skipwt" commit -m one
+g -C "$R/skipwt" update-index --skip-worktree a
+g init "$R/withsub"; echo a > "$R/withsub/a"; printf '[submodule "s"]\n\tpath = s\n\turl = ../none\n' > "$R/withsub/.gitmodules"
+g -C "$R/withsub" add a .gitmodules; g -C "$R/withsub" commit -m one
+g init "$R/sized"; printf 'scratch/\n' > "$R/sized/.gitignore"; g -C "$R/sized" add .gitignore; g -C "$R/sized" commit -m one
+mkdir -p "$R/sized/scratch/node_modules"; head -c 3145728 /dev/zero > "$R/sized/scratch/node_modules/big.bin"
+for i in $(seq 1 40); do head -c 40960 /dev/zero > "$R/sized/scratch/f$i.bin"; done
+out=$(python3 -I "$S" --root "$R" 2>"$TMP/summary3")
+[ "$(col hideuntracked untracked)" = 1 ] && ok "status.showUntrackedFiles=no cannot hide an untracked file" || bad "hideuntracked: $(grep '^hideuntracked' <<< "$out")"
+case "$(col assume note)" in *hidden-index-flags*) ok "assume-unchanged: hidden-index-flags" ;; *) bad "assume: $(grep '^assume' <<< "$out")" ;; esac
+case "$(col skipwt note)" in *hidden-index-flags*) ok "skip-worktree: hidden-index-flags" ;; *) bad "skipwt: $(grep '^skipwt' <<< "$out")" ;; esac
+case "$(col withsub note)" in *has-submodules*) ok "a repo with .gitmodules says has-submodules" ;; *) bad "withsub: $(grep '^withsub' <<< "$out")" ;; esac
+case "$(col hideuntracked note)" in *hidden*|*has-sub*) bad "a plain repo got a hidden/submodule note" ;; *) ok "a plain repo carries neither note" ;; esac
+mb=$(col sized kept_ignored_mb)
+awk -v m="$mb" 'BEGIN{exit !(m >= 1.4 && m <= 2.2)}' && ok "kept size: 40 small files sum to ~1.6 MB, the nested node_modules left out ($mb)" || bad "kept size $mb"
+grep -q "dirs not fully measured: 3 " "$TMP/summary3" && ok "hidden flags and submodules count as not fully measured" || bad "summary3: $(cat "$TMP/summary3")"
+
 echo "----"; echo "sync-inventory: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

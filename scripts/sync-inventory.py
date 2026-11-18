@@ -18,7 +18,8 @@ One TSV row per top-level directory (header first), then a `#` summary on stderr
     kept_ignored  ignored entries that are NOT regenerable (so: .env files, scratch/, data, local state). Dependency
                   and build dirs (node_modules, venvs, caches, build output) are left out: a clone rebuilds them.
     conflicts     `*.sync-conflict-*` files, outside .git / node_modules / .stversions
-    note          no-remote · no-commits · detached · has-filters · walk-error · size-error · git-error:<what>
+    note          no-remote · no-commits · detached · has-filters · has-submodules · hidden-index-flags ·
+                  walk-error · size-error · git-error:<what>
 
 A number is printed only when it was measured. A git command that could not answer leaves its columns BLANK and
 adds `git-error:<what>`; a walk that met an unreadable directory adds `walk-error` (the count is then a floor); a du
@@ -28,6 +29,9 @@ Read-only, and what that covers: git runs with GIT_OPTIONAL_LOCKS=0 (no index re
 only rev-parse / symbolic-ref / remote / rev-list / status / config --get-regexp. One limit: `git status` may run
 a repo's own configured clean/process FILTER (git-lfs, git-crypt) to compare contents. A repo with such a filter is
 NOT given to `git status`: its dirty/untracked/kept columns stay blank and the note says `has-filters`.
+Submodules are never entered (`--ignore-submodules=all`); a repo with `.gitmodules` says `has-submodules`. Files
+flagged assume-unchanged or skip-worktree are invisible to status: such a repo says `hidden-index-flags`. The
+repo's own `status.showUntrackedFiles` is overridden (`--untracked-files=normal`).
 
 In a tree whose `.git` does not sync, `dirty` can be the refs lagging the files rather than real edits: align the
 refs (housekeep → "Synced trees") before committing anything this lists. Heavy on a big tree: run it on a lane host
@@ -63,14 +67,14 @@ def git(repo, *args, timeout=120):
         return 127, ""
 
 
-def du_mb(path, exclude_git=True):
-    """Size in MB by du (one process); None unless du exited 0 with a number (a partial read is not a size)."""
-    cmd = ["du", "-sk"] + (["--exclude=.git"] if exclude_git else []) + ["--", path]
+def du_kb(path, exclude=(".git",)):
+    """Size in KB by du (one process); None unless du exited 0 with a number (a partial read is not a size)."""
+    cmd = ["du", "-sk"] + [f"--exclude={x}" for x in exclude] + ["--", path]
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
         if p.returncode != 0:
             return None
-        return round(int(p.stdout.split()[0]) / 1024, 1)
+        return int(p.stdout.split()[0])
     except (OSError, ValueError, IndexError, subprocess.TimeoutExpired):
         return None
 
@@ -134,7 +138,19 @@ def inspect_git(repo, want_size):
         note("git-error:config")
         return row
 
-    rc, out = git(repo, "status", "--porcelain=v1", "-z", "--ignored", timeout=600)
+    # Index flags can hide a changed tracked file from status: say so, never print a clean zero over it.
+    rc, out = git(repo, "ls-files", "-v", "-z", timeout=600)
+    if rc != 0:
+        note("git-error:ls-files")
+        return row
+    if any(e[:1].islower() or e[:1] == "S" for e in out.split("\0") if e):
+        note("hidden-index-flags")              # assume-unchanged (lower case) or skip-worktree (S)
+
+    # Submodules are never entered (their own filters could run): a repo with any is marked, not measured inside.
+    if os.path.lexists(os.path.join(repo, ".gitmodules")):
+        note("has-submodules")
+    rc, out = git(repo, "status", "--porcelain=v1", "-z", "--ignored", "--untracked-files=normal",
+                  "--ignore-submodules=all", timeout=600)
     if rc != 0:
         note("git-error:status")
         return row
@@ -157,11 +173,11 @@ def inspect_git(repo, want_size):
             if not regenerable(rel):
                 kept += 1
                 if want_size:
-                    mb = du_mb(os.path.join(repo, rel), exclude_git=False)
-                    if mb is None:
+                    kb = du_kb(os.path.join(repo, rel), exclude=sorted(REGENERABLE))
+                    if kb is None:
                         size_ok = False
                     else:
-                        kept_kb += int(mb * 1024)
+                        kept_kb += kb
         else:
             dirty += 1
     row.update(dirty=dirty, untracked=untracked, kept_ignored=kept)
@@ -210,18 +226,19 @@ def main(argv):
         if not complete:
             row["note"].append("walk-error")
         if not ns.no_size:
-            mb = du_mb(p)
-            if mb is None:
+            kb = du_kb(p)
+            if kb is None:
                 if "size-error" not in row["note"]:
                     row["note"].append("size-error")
             else:
-                row["size_mb"] = mb
+                row["size_mb"] = round(kb / 1024, 1)
         tot[row["kind"]] += 1
         for k, src in (("unpushed", "unpushed"), ("dirty", "dirty"), ("untracked", "untracked"),
                        ("kept", "kept_ignored"), ("conflicts", "conflicts")):
             v = row.get(src)
             tot[k] += v if isinstance(v, int) else 0
-        unmeasured = any(x in ("walk-error", "size-error", "has-filters") or x.startswith("git-error")
+        unmeasured = any(x in ("walk-error", "size-error", "has-filters", "has-submodules", "hidden-index-flags")
+                         or x.startswith("git-error")
                          for x in row["note"])
         tot["unmeasured"] += 1 if unmeasured else 0
         if row["kind"] == "plain" or unmeasured or "no-remote" in row["note"] \

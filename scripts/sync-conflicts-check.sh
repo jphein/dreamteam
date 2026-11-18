@@ -64,10 +64,12 @@ total=0; parts=""; n_roots=0
 for r in "${ROOTS[@]}"; do
   [ -n "$r" ] || continue
   n_roots=$((n_roots + 1))
+  # absolute paths only: a relative root named like a find operator (`!`, `-delete`) would be read as an expression
+  case "$r" in /*) ;; *) check_line "$NAME" fail "root '${r//[^[:print:]]/?}' is not an absolute path" "$OWNER"; exit $? ;; esac
   if [ ! -d "$r" ] || [ ! -r "$r" ]; then
     check_line "$NAME" fail "root ${r/#$HOME/\~} unreadable or absent" "$OWNER"; exit $?
   fi
-  before=$(wc -l < "$tmp")
+  before=$(wc -l < "$tmp") && [[ "$before" =~ ^[0-9]+$ ]] || { check_line "$NAME" fail "cannot count the list" "$OWNER"; exit $?; }
   # -print0 is not used: one path per line is the list file's format, and a newline in a conflict name would only
   # inflate the count (a louder warn), never hide a file.
   # -H: a root that is a symlink is followed (plain find would not descend, and report a clean zero)
@@ -76,7 +78,8 @@ for r in "${ROOTS[@]}"; do
     # find exits non-zero on any unreadable subdirectory; a partial walk is not a measurement of zero
     partial=1
   fi
-  k=$(( $(wc -l < "$tmp") - before ))
+  now=$(wc -l < "$tmp") && [[ "$now" =~ ^[0-9]+$ ]] || { check_line "$NAME" fail "cannot count the list" "$OWNER"; exit $?; }
+  k=$(( now - before ))
   total=$((total + k))
   parts="${parts:+$parts, }$k in ${r/#$HOME/\~}"
 done
