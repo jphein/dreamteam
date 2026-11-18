@@ -711,7 +711,8 @@ skip() { # reason
 # (a2) memory (Sen 2026-11-17): MemAvailable and swap free, both from config (0 = no floor; familiar's overlay sets
 # 5500/4096). Judged after the work gate like the quota, so a quiet night stays silent.
 # One validated integer throughout (xreview #230 r1): an invalid floor or an unreadable measurement is a HOLD.
-MEM_MIN=$(oc min_available_mb 0); SWAP_MIN=$(oc min_swap_free_mb 0)
+MEM_MIN=$(dreamteam_cfg_raw "$CFGJSON" overnight min_available_mb); [ "$MEM_MIN" = ABSENT ] && MEM_MIN=0
+SWAP_MIN=$(dreamteam_cfg_raw "$CFGJSON" overnight min_swap_free_mb); [ "$SWAP_MIN" = ABSENT ] && SWAP_MIN=0
 dreamteam_uint "$MEM_MIN" 10000000 || skip "memory: overnight.min_available_mb is '$MEM_MIN', not an integer"
 dreamteam_uint "$SWAP_MIN" 10000000 || skip "memory: overnight.min_swap_free_mb is '$SWAP_MIN', not an integer"
 if [ "$MEM_MIN" -gt 0 ] || [ "$SWAP_MIN" -gt 0 ]; then

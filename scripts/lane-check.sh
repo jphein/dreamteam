@@ -11,7 +11,7 @@ CFGJSON="$(dreamteam_config "$CFG")"
 # an unreadable or invalid number is HELD (exit 1), never read as "no floor" (xreview #230 r1)
 held() { echo "lane-check held: $1 ($(dreamteam_host))"; exit 1; }
 num() { # key → NUM (no subshell, so a held line reaches stdout)
-  local v; v=$(jq -r --arg k "$1" '.lane[$k] // 0 | tostring' <<<"$CFGJSON" 2>/dev/null) || v=x
+  local v; v=$(dreamteam_cfg_raw "$CFGJSON" lane "$1"); [ "$v" = ABSENT ] && v=0
   dreamteam_uint "$v" 10000000 || held "lane.$1 is '$v', not an integer"; NUM=$((10#$v)); }
 num minAvailableMB; MA=$NUM; num minSwapFreeMB; MS=$NUM
 AV=$(free -m | awk '/^Mem:/{print $7}'); SF=$(free -m | awk '/^Swap:/{print $4}')

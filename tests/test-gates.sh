@@ -253,6 +253,26 @@ for c in 'minAvailableMB|"bad"' 'minAvailableMB|-5' 'hostReserveMB|-9000' 'perAg
   g DREAMTEAM_CONFIG="$OV/config.json" DREAMTEAM_HOST=badnum FAKE_AVAIL=30000 FAKE_SWAP_FREE=8700
   [ "$GRC" -eq 2 ] && grep -qi "memory.$k" "$TMP/err" && pass "invalid number blocks (exit 2, names it): $k=$v" || fail "invalid $k=$v: exit $GRC $(head -1 "$TMP/err")"
 done
+# xreview #230 r2: a present false/null/"" is invalid, never "absent → default 0"; a boolean has its own reader
+for v in false null '""' '"3000"'; do
+  printf '{"memory":{"minSwapFreeMB":%s}}\n' "$v" > "$OV/config.badnum.json"
+  g DREAMTEAM_CONFIG="$OV/config.json" DREAMTEAM_HOST=badnum FAKE_AVAIL=30000 FAKE_SWAP_FREE=8700
+  [ "$GRC" -eq 2 ] && grep -q "memory.minSwapFreeMB is '$v'" "$TMP/err" && pass "a present $v is invalid (exit 2), not the default 0" || fail "present $v: exit $GRC $(head -1 "$TMP/err")"
+done
+for v in true false; do
+  printf '{"memory":{"scopeToDreamteam":%s}}\n' "$v" > "$OV/config.scope.json"
+  g DREAMTEAM_CONFIG="$OV/config.json" DREAMTEAM_HOST=scope DREAMTEAM_STATE="$TMP/nostate" FAKE_AVAIL=1000 FAKE_SWAP_FREE=8700
+  if [ $v = true ]; then [ "$GRC" -eq 0 ] && [ ! -s "$TMP/err" ] && pass "scopeToDreamteam true with no active team: the gate stands aside (exit 0, no message)" || fail "scope true: exit $GRC $(head -1 "$TMP/err")"
+  else [ "$GRC" -eq 2 ] && grep -q '< 8000MiB floor' "$TMP/err" && pass "scopeToDreamteam false: the gate judges (blocks at 1000 MiB)" || fail "scope false: exit $GRC $(head -1 "$TMP/err")"; fi
+done
+printf '{"memory":{"scopeToDreamteam":"yes"}}\n' > "$OV/config.scope.json"
+g DREAMTEAM_CONFIG="$OV/config.json" DREAMTEAM_HOST=scope FAKE_AVAIL=30000 FAKE_SWAP_FREE=8700
+[ "$GRC" -eq 2 ] && grep -q 'not true/false' "$TMP/err" && pass "scopeToDreamteam 'yes' is invalid (exit 2)" || fail "scope yes: exit $GRC"
+for v in '"1e4"' 9000.5 -1 99999999999; do
+  printf '{"local":{"enabled":true,"reserveMB":%s}}\n' "$v" > "$OV/config.local.json"
+  g DREAMTEAM_CONFIG="$OV/config.json" DREAMTEAM_HOST=local FAKE_AVAIL=30000 FAKE_SWAP_FREE=8700
+  [ "$GRC" -eq 2 ] && grep -q 'local.reserveMB' "$TMP/err" && pass "local.reserveMB $v with the lane armed is invalid (exit 2)" || fail "local reserve $v: exit $GRC $(head -1 "$TMP/err")"
+done
 printf '{"memory":{"minSwapFreeMB":2048}}\n' > "$OV/config.swapread.json"
 g DREAMTEAM_CONFIG="$OV/config.json" DREAMTEAM_HOST=swapread FAKE_AVAIL=30000 FAKE_SWAP_FREE=junk
 [ "$GRC" -eq 2 ] && grep -q 'no readable swap free' "$TMP/err" && pass "an unreadable swap measurement under a swap floor blocks" || fail "swap read: exit $GRC $(head -1 "$TMP/err")"
@@ -272,7 +292,10 @@ o=$(DREAMTEAM_CONFIG="$OV/config.json" DREAMTEAM_HOST=katana FAKE_AVAIL=1000 FAK
 [ $rc = 0 ] && pass "lane-check: katana (no overlay) is never held" || fail "lane-check katana: $rc '$o'"
 printf '%s\n' '{"lane":{"minAvailableMB":"6800MB"}}' > "$OV/config.badlane.json"
 o=$(DREAMTEAM_CONFIG="$OV/config.json" DREAMTEAM_HOST=badlane FAKE_AVAIL=30000 FAKE_SWAP_FREE=8700 bash "$ROOT/scripts/lane-check.sh"); rc=$?
-[ $rc = 1 ] && [[ "$o" == *"lane.minAvailableMB is '6800MB', not an integer"* ]] && pass "lane-check: an invalid floor is held, never 'no floor'" || fail "lane-check badlane: $rc '$o'"
+[ $rc = 1 ] && [[ "$o" == *"lane.minAvailableMB is '\"6800MB\"', not an integer"* ]] && pass "lane-check: an invalid floor is held, never 'no floor'" || fail "lane-check badlane: $rc '$o'"
+printf '%s\n' '{"lane":{"minSwapFreeMB":false}}' > "$OV/config.badlane.json"
+o=$(DREAMTEAM_CONFIG="$OV/config.json" DREAMTEAM_HOST=badlane FAKE_AVAIL=30000 FAKE_SWAP_FREE=8700 bash "$ROOT/scripts/lane-check.sh"); rc=$?
+[ $rc = 1 ] && [[ "$o" == *"lane.minSwapFreeMB is 'false'"* ]] && pass "lane-check: a present false is held, not 'no floor'" || fail "lane-check false: $rc '$o'"
 o=$(DREAMTEAM_CONFIG="$OV/config.json" DREAMTEAM_HOST=katana FAKE_AVAIL=junk FAKE_SWAP_FREE=8700 bash "$ROOT/scripts/lane-check.sh"); rc=$?
 [ $rc = 1 ] && [[ "$o" == *"no readable available memory"* ]] && pass "lane-check: an unreadable MemAvailable is held" || fail "lane-check junk: $rc '$o'"
 # the repo's own config.familiar.json parses and carries the accepted numbers (balloon stays the base's)

@@ -31,11 +31,17 @@ invalid() { echo "🚫 DREAMTEAM MEMORY GATE — spawn blocked: $1 (config $CFG 
 CFGJSON="$(dreamteam_config "$CFG")"
 jq -e 'type == "object"' <<<"$CFGJSON" >/dev/null 2>&1 || invalid "the merged config is not one JSON object"
 MAXMB=10000000
-getcfg() { # key default → the value, or exit 2 when it is set but is not an integer 0..MAXMB
-  local v; v=$(jq -r --arg k "$1" '.memory[$k] // empty | tostring' <<<"$CFGJSON" 2>/dev/null) || invalid "memory.$1 unreadable"
-  [ -n "$v" ] || v="$2"
+getcfg() { # key default → the value; absent → default; present but not an integer 0..MAXMB (false, null, "", "3000"
+  # included: xreview #230 r2) → exit 2
+  local v; v=$(dreamteam_cfg_raw "$CFGJSON" memory "$1")
+  case "$v" in ABSENT) v="$2";; BADSECTION) invalid "memory is not an object";; esac
   dreamteam_uint "$v" "$MAXMB" || invalid "memory.$1 is '$v', not an integer 0..$MAXMB"
   printf '%s' "$((10#$v))"
+}
+getbool() { # section key default → true|false; present but not a JSON boolean → exit 2
+  local v; v=$(dreamteam_cfg_raw "$CFGJSON" "$1" "$2")
+  case "$v" in ABSENT) printf '%s' "$3";; true|false) printf '%s' "$v";; BADSECTION) invalid "$1 is not an object";;
+    *) invalid "$1.$2 is '$v', not true/false";; esac
 }
 PER_AGENT=$(getcfg perAgentMB 400) || exit 2
 HOST_RESERVE=$(getcfg hostReserveMB 6000) || exit 2
@@ -44,7 +50,7 @@ MIN_AVAIL=$(getcfg minAvailableMB 8000) || exit 2
 MIN_SWAP_FREE=$(getcfg minSwapFreeMB 0) || exit 2
 MAX_AGENTS=$(getcfg maxAgents 30) || exit 2
 [ "$PER_AGENT" -ge 1 ] || invalid "memory.perAgentMB is 0"
-SCOPE_ONLY=$(getcfg scopeToDreamteam false)
+SCOPE_ONLY=$(getbool memory scopeToDreamteam false) || exit 2
 if [ "$SCOPE_ONLY" = "true" ] && [ ! -f "$STATE/active" ]; then exit 0; fi
 
 # Local-model lane reserve (#37): when the ollama lane is ARMED (.local.enabled ==
@@ -54,8 +60,10 @@ if [ "$SCOPE_ONLY" = "true" ] && [ ! -f "$STATE/active" ]; then exit 0; fi
 # for post-admission growth. ==false-safe (only a literal true arms it); zero effect
 # when the lane is off (the default).
 getlocal() { jq -r --arg k "$1" --arg d "$2" ".local[\$k] // \$d" <<<"$CFGJSON" 2>/dev/null || printf '%s' "$2"; }
-LOCAL_ARMED=$(jq -r 'if .local.enabled == true then 1 else 0 end' <<<"$CFGJSON" 2>/dev/null || echo 0)
-LOCAL_RESERVE=$(getlocal reserveMB 9000); LOCAL_RESERVE=${LOCAL_RESERVE//[!0-9]/}; [ -n "$LOCAL_RESERVE" ] || LOCAL_RESERVE=9000
+LA=$(getbool local enabled false) || exit 2; [ "$LA" = true ] && LOCAL_ARMED=1 || LOCAL_ARMED=0
+LOCAL_RESERVE=$(dreamteam_cfg_raw "$CFGJSON" local reserveMB); [ "$LOCAL_RESERVE" = ABSENT ] && LOCAL_RESERVE=$(getlocal reserveMB 9000)
+dreamteam_uint "$LOCAL_RESERVE" "$MAXMB" || invalid "local.reserveMB is '$LOCAL_RESERVE', not an integer 0..$MAXMB"
+LOCAL_RESERVE=$((10#$LOCAL_RESERVE))
 if [ "$LOCAL_ARMED" = 1 ]; then LOCAL_EFF=$LOCAL_RESERVE; LOCAL_NOTE="  local_reserve=${LOCAL_RESERVE} (ollama lane armed)"; else LOCAL_EFF=0; LOCAL_NOTE=""; fi
 
 # Balloon reserve is sized for ONE team's build spikes; scale by scopes actually

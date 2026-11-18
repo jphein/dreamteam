@@ -30,3 +30,10 @@ dreamteam_config() {
   printf '%s\n' "$b"
 }
 dreamteam_uint() { [[ "$1" =~ ^[0-9]{1,9}$ ]] && [ "$((10#$1))" -le "$2" ]; }
+# dreamteam_cfg_raw <json> <section> <key>: "ABSENT" when the key is not there (or the section is absent), else the
+# value as JSON text (so false, null, "" and "3000" stay visibly what they are). A section that is present but not an
+# object prints "BADSECTION". Callers decide: ABSENT → their default; anything else must validate or they block.
+dreamteam_cfg_raw() {
+  jq -r --arg s "$2" --arg k "$3" 'if has($s) | not then "ABSENT" elif (.[$s] | type) != "object" then "BADSECTION"
+    elif (.[$s] | has($k)) then (.[$s][$k] | tojson) else "ABSENT" end' <<<"$1" 2>/dev/null || printf 'BADSECTION'
+}

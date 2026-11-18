@@ -747,8 +747,12 @@ FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 DREAMTEAM_HOST=ka
 printf '%s\n' '{"overnight":{"min_available_mb":"5500MiB"}}' > "$TMP/config.familiar.json"
 reset; mkqueue jphein/realmwatch:2
 FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 DREAMTEAM_HOST=familiar FAKE_AVAIL=30000 run_g >/dev/null
-[ "$(gj .decision)" = no-start ] && [[ "$(gj .reason)" == *"min_available_mb is '5500MiB', not an integer"* ]] && [ ! -s "$TMP/claude.log" ] \
+[ "$(gj .decision)" = no-start ] && [[ "$(gj .reason)" == *"min_available_mb is '\"5500MiB\"', not an integer"* ]] && [ ! -s "$TMP/claude.log" ] \
   && pass "memory: an invalid floor ('5500MiB') is a hold, never 'no floor'" || fail "bad floor: $(gj .decision) '$(gj .reason)'"
+printf '%s\n' '{"overnight":{"min_swap_free_mb":null}}' > "$TMP/config.familiar.json"
+reset; mkqueue jphein/realmwatch:2
+FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 DREAMTEAM_HOST=familiar FAKE_AVAIL=30000 run_g >/dev/null
+[ "$(gj .decision)" = no-start ] && [[ "$(gj .reason)" == *"min_swap_free_mb is 'null'"* ]] && pass "memory: a present null floor is a hold, never 'no floor'" || fail "null floor: $(gj .decision) '$(gj .reason)'"
 printf '%s\n' '{"overnight":{"min_available_mb":5500,"min_swap_free_mb":4096}}' > "$TMP/config.familiar.json"
 reset; mkqueue jphein/starcharts:0
 out=$(FAKE_QUOTA="$Q_OK" DREAMTEAM_HOST=familiar FAKE_AVAIL=1000 run_g)
