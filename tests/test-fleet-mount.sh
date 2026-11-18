@@ -13,8 +13,10 @@ cat > "$TMP/bin/sc" <<EOF
 #!/bin/sh
 echo "\$*" >> "$TMP/sc.log"
 case "\$1" in
-  is-enabled) cat "$TMP/enabled" 2>/dev/null || echo disabled ;;
-  is-active)  case "\$2" in *.mount) cat "$TMP/mount.active" 2>/dev/null || echo inactive ;; *) cat "$TMP/active" 2>/dev/null || echo inactive ;; esac ;;
+  is-enabled) v=\$(cat "$TMP/enabled" 2>/dev/null || echo disabled); echo "\$v"; [ "\$v" = enabled ]; exit ;;
+  is-active)  case "\$2" in *.mount) v=\$(cat "$TMP/mount.active" 2>/dev/null || echo inactive) ;; *) v=\$(cat "$TMP/active" 2>/dev/null || echo inactive) ;; esac
+              [ -e "$TMP/isactive.broken" ] && exit 4      # like the real one: non-zero unless active
+              echo "\$v"; [ "\$v" = active ]; exit ;;
   enable)     [ -e "$TMP/enable.broken" ] && exit 1; echo enabled > "$TMP/enabled"; echo active > "$TMP/active" ;;
   disable)    [ -e "$TMP/disable.broken" ] && exit 1; echo disabled > "$TMP/enabled"; echo inactive > "$TMP/active" ;;
   stop)       [ -e "$TMP/stop.broken" ] && exit 1 ;;
@@ -161,12 +163,17 @@ run install >/dev/null
 printf '\n\n' >> "$U/srv-fleet.mount"
 run check >/dev/null; [ $? = 1 ] && ok "check sees blank lines appended to a unit (byte compare)" || bad "appended newlines invisible to check"
 echo active > "$TMP/mount.active"
-out=$(run install)
-grep -q "^note: /srv/fleet is mounted now and keeps its earlier options" <<< "$out" && ok "install repairs the unit and says the live mount keeps its earlier options" || bad "no live-mount note: '$out'"
+out=$(run install); rc=$?
+[ "$rc" = 0 ] && grep -q "^note: /srv/fleet is mounted now and keeps its earlier options" <<< "$out" && grep -q "unmounted and mounted again" <<< "$out" && ! grep -q "restart" <<< "$out" \
+  && ok "install repairs the unit (rc 0) and says the live mount keeps its earlier options until it is mounted again" || bad "live-mount note: rc=$rc '$out'"
+run check >/dev/null; [ $? = 0 ] && ok "check is clean again after the repair (bytes restored)" || bad "check after the repair"
 ! grep -q "restart srv-fleet\|stop srv-fleet.mount" "$TMP/sc.log" && ok "install never remounts a live share" || bad "install touched the live mount"
 out=$(run install); ! grep -q "^note:" <<< "$out" && ok "no note when nothing was rewritten" || bad "note without a rewrite"
 sed -i 's/soft,/hard,/' "$U/srv-fleet.mount"; echo inactive > "$TMP/mount.active"
-out=$(run install); ! grep -q "^note:" <<< "$out" && ok "no note when the share is not mounted" || bad "note with an inactive mount"
+out=$(run install); rc=$?; [ "$rc" = 0 ] && ! grep -q "^note:" <<< "$out" && ok "no note, and rc 0, when the share is not mounted (is-active exits non-zero)" || bad "inactive mount: rc=$rc"
+sed -i 's/soft,/hard,/' "$U/srv-fleet.mount"; touch "$TMP/isactive.broken"
+out=$(run install); rc=$?; rm -f "$TMP/isactive.broken"
+[ "$rc" = 0 ] && ! grep -q "^note:" <<< "$out" && grep -q "soft," "$U/srv-fleet.mount" && ok "an is-active query that does not answer never makes install fail" || bad "broken is-active: rc=$rc"
 
 # --- arguments and values --------------------------------------------------------------------------------------
 run >/dev/null 2>&1; [ $? = 2 ] && ok "no argument: exit 2" || bad "no argument rc"

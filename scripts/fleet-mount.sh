@@ -146,7 +146,7 @@ case "$MODE" in
     # mount. Say so; never remount under a lane that may be writing.
     if [ "$rewrote" = 1 ] && [ "$("$SC" is-active "$unit.mount" 2>/dev/null)" = active ]; then
       echo "note: $MP is mounted now and keeps its earlier options; the rewritten units apply at the next mount"
-      echo "      (after 10 idle minutes, or 'systemctl restart $unit.automount' when no lane is using the share)"
+      echo "      (once the share has been unmounted and mounted again: it unmounts itself after 10 idle minutes)"
     fi
     ;;
   uninstall)
