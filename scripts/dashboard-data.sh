@@ -82,6 +82,25 @@ _full_cfg = {}
 try: _full_cfg = json.load(open(CFG))
 except Exception: _full_cfg = {}
 if not isinstance(_full_cfg, dict): _full_cfg = {}
+# this host's overlay, config.<host>.json beside it, deep-merged over it: the same rule as scripts/lib/config.sh
+# (jq `*`: objects merge recursively, anything else is replaced); an overlay that does not parse is ignored
+def _host():
+    import socket
+    h = os.environ.get("DREAMTEAM_HOST") or socket.gethostname().split(".")[0]
+    h = "".join(c for c in h.lower() if c.isalnum() or c == "-")
+    return h or "unknown"
+def _deep(a, b):
+    if isinstance(a, dict) and isinstance(b, dict):
+        out = dict(a)
+        for k, v in b.items(): out[k] = _deep(a[k], v) if k in a else v
+        return out
+    return b
+_ov_path = (CFG[:-5] if CFG.endswith(".json") else CFG) + "." + _host() + ".json"
+try:
+    _ov = json.load(open(_ov_path)) if os.path.isfile(_ov_path) else None
+except Exception:
+    _ov = None
+if isinstance(_ov, dict): _full_cfg = _deep(_full_cfg, _ov)
 cfg       = _full_cfg.get("memory", {})
 scope_cfg = _full_cfg.get("scope", {}) if isinstance(_full_cfg.get("scope"), dict) else {}
 def m(k, d):

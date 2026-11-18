@@ -23,11 +23,15 @@ TOOL="$(printf '%s' "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)"
 case "$TOOL" in Agent|Task) ;; *) exit 0 ;; esac
 
 # --- config (defaults baked in so it works before config.json exists) ---
-getcfg() { jq -r --arg k "$1" --arg d "$2" ".memory[\$k] // \$d" "$CFG" 2>/dev/null || printf '%s' "$2"; }
+# the config with this host's overlay (config.<host>.json) deep-merged over it: scripts/lib/config.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/config.sh"
+CFGJSON="$(dreamteam_config "$CFG")"
+getcfg() { jq -r --arg k "$1" --arg d "$2" ".memory[\$k] // \$d" <<<"$CFGJSON" 2>/dev/null || printf '%s' "$2"; }
 PER_AGENT=$(getcfg perAgentMB 400)
 HOST_RESERVE=$(getcfg hostReserveMB 6000)
 BALLOON=$(getcfg balloonReserveMB 8000)
 MIN_AVAIL=$(getcfg minAvailableMB 8000)
+MIN_SWAP_FREE=$(getcfg minSwapFreeMB 0); MIN_SWAP_FREE=${MIN_SWAP_FREE//[!0-9]/}; MIN_SWAP_FREE=${MIN_SWAP_FREE:-0}
 MAX_AGENTS=$(getcfg maxAgents 30)
 SCOPE_ONLY=$(getcfg scopeToDreamteam false)
 if [ "$SCOPE_ONLY" = "true" ] && [ ! -f "$STATE/active" ]; then exit 0; fi
@@ -38,8 +42,8 @@ if [ "$SCOPE_ONLY" = "true" ] && [ ! -f "$STATE/active" ]; then exit 0; fi
 # reserve whether or not the model is currently loaded — exactly as BALLOON reserves
 # for post-admission growth. ==false-safe (only a literal true arms it); zero effect
 # when the lane is off (the default).
-getlocal() { jq -r --arg k "$1" --arg d "$2" ".local[\$k] // \$d" "$CFG" 2>/dev/null || printf '%s' "$2"; }
-LOCAL_ARMED=$(jq -r 'if .local.enabled == true then 1 else 0 end' "$CFG" 2>/dev/null || echo 0)
+getlocal() { jq -r --arg k "$1" --arg d "$2" ".local[\$k] // \$d" <<<"$CFGJSON" 2>/dev/null || printf '%s' "$2"; }
+LOCAL_ARMED=$(jq -r 'if .local.enabled == true then 1 else 0 end' <<<"$CFGJSON" 2>/dev/null || echo 0)
 LOCAL_RESERVE=$(getlocal reserveMB 9000); LOCAL_RESERVE=${LOCAL_RESERVE//[!0-9]/}; [ -n "$LOCAL_RESERVE" ] || LOCAL_RESERVE=9000
 if [ "$LOCAL_ARMED" = 1 ]; then LOCAL_EFF=$LOCAL_RESERVE; LOCAL_NOTE="  local_reserve=${LOCAL_RESERVE} (ollama lane armed)"; else LOCAL_EFF=0; LOCAL_NOTE=""; fi
 
@@ -56,6 +60,7 @@ done
 # --- measure RAM (instant — this is the real OOM guard, runs BEFORE the count) ---
 AVAIL=$(free -m | awk '/^Mem:/{print $7}')
 SWAP_USED=$(free -m | awk '/^Swap:/{print $3}')
+SWAP_FREE=$(free -m | awk '/^Swap:/{print $4}')
 HEADROOM=$(( AVAIL - HOST_RESERVE - BALLOON - LOCAL_EFF ))
 BUDGET=$(( HEADROOM / PER_AGENT )); [ "$BUDGET" -lt 0 ] && BUDGET=0
 
@@ -73,6 +78,8 @@ block() {
 
 # RAM-based blocks first (don't wait on the agent count for the real guard):
 [ "$AVAIL" -lt "$MIN_AVAIL" ] && block "only ${AVAIL}MiB RAM available (< ${MIN_AVAIL}MiB floor)."
+# swap free (a full zram looks like nothing to MemAvailable; the next balloon then meets the OOM killer). 0 = no floor.
+[ "$MIN_SWAP_FREE" -gt 0 ] && [ "${SWAP_FREE:-0}" -lt "$MIN_SWAP_FREE" ] && block "only ${SWAP_FREE}MiB swap free (< ${MIN_SWAP_FREE}MiB swap floor)."
 [ "$BUDGET" -le 0 ]          && block "no budget for another agent (need ${PER_AGENT}+${BALLOON}MiB headroom)."
 
 # Count cap last — uses `claude agents --json` (real status), pgrep fallback (see lib.sh).

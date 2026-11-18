@@ -97,6 +97,12 @@ gh pr create --fill --head fix/x >/dev/null 2>&1 || true
 if [ -n "${FAKE_CLAUDE_RC:-}" ]; then echo "[claude] teamclaude proxy :3456 down" >&2; exit "$FAKE_CLAUDE_RC"; fi
 echo '{"type":"result","result":"done\nSWEEP-RESULT {\"fixed\":[{\"repo\":\"jphein/realmwatch\",\"number\":7,\"pr\":12,\"sha\":\"\"}],\"reviewed_not_merged\":[{\"repo\":\"jphein/realmwatch\",\"pr\":42}],\"too_large\":[]}"}'
 S
+cat > "$BIN/free" <<'S'
+#!/bin/bash
+echo "              total        used        free      shared  buff/cache   available"
+echo "Mem:          31000       20000        1000        100        8000       ${FAKE_AVAIL:-20000}"
+echo "Swap:          8191           0        ${FAKE_SWAP_FREE:-8191}"
+S
 cat > "$BIN/tmux-probe" <<'S'
 #!/bin/bash
 # list-panes -F '#{pane_dead}' on the runner's session: FAKE_SESSION alive (default) | gone | noserver | deadpane |
@@ -724,6 +730,20 @@ gl=$(sed -n '/^guard_line() {/,/^}/p' "$G"); nl=$(sed -n '/^nightly_lock() {/,/^
 [ "$(grep -c 'check_line "$(check_name nightly-guarded)"' "$G")" = 1 ] && sed -n '/^publish_nightly() {/,/^}/p' "$G" | grep -q 'check_line "$(check_name nightly-guarded)"' \
   && pass "every nightly publication goes through publish_nightly (one check_line call site)" || fail "a nightly check_line outside publish_nightly"
 [ -z "$(ls "$TMP/state/overnight-runs" 2>/dev/null)" ] && [ ! -s "$TMP/claude.log" ] && pass "--check-line runs nothing (no run dir, no coordinator)" || fail "--check-line ran something"
+
+echo "── memory hold (config.<host>.json; familiar: 5500 MiB available, 4096 MiB swap free) ──"
+printf '%s\n' '{"overnight":{"min_available_mb":5500,"min_swap_free_mb":4096}}' > "$TMP/config.familiar.json"
+reset; mkqueue jphein/realmwatch:2
+FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 DREAMTEAM_HOST=familiar FAKE_AVAIL=5000 run_g >/dev/null
+[ "$(gj .decision)" = no-start ] && [[ "$(gj .reason)" == "memory: 5000 MiB available < 5500" ]] && [ ! -s "$TMP/claude.log" ] \
+  && pass "memory: familiar under its 5500 floor → held (no-start, the reason names it), nothing run" || fail "mem hold: $(gj .decision) '$(gj .reason)'"
+reset; mkqueue jphein/realmwatch:2
+FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 DREAMTEAM_HOST=familiar FAKE_AVAIL=9000 FAKE_SWAP_FREE=2000 run_g >/dev/null
+[ "$(gj .decision)" = no-start ] && [[ "$(gj .reason)" == "memory: 2000 MiB swap free < 4096" ]] && pass "memory: familiar with swap under 4096 → held" || fail "swap hold: $(gj .decision) '$(gj .reason)'"
+reset; mkqueue jphein/realmwatch:2
+FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 DREAMTEAM_HOST=katana FAKE_AVAIL=5000 run_g >/dev/null
+[ "$(gj .decision)" = started ] && pass "memory: katana (no overlay, no floor) starts at the same 5000 MiB" || fail "katana mem: $(gj .decision) '$(gj .reason)'"
+rm -f "$TMP/config.familiar.json"
 
 echo "── 2026-11-16 23:41: the coordinator, a killed runner, the watchdog ──"
 # the coordinator waits for its own background Workflow (print mode otherwise kills it 10 min after the turn ends:

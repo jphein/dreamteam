@@ -8,8 +8,11 @@ ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 CFG="${DREAMTEAM_CONFIG:-$ROOT/config.json}"
 # shellcheck source=/dev/null
 [ -f "$ROOT/scripts/lib.sh" ] && . "$ROOT/scripts/lib.sh"
-getcfg() { jq -r --arg k "$1" --arg d "$2" ".memory[\$k] // \$d" "$CFG" 2>/dev/null || printf '%s' "$2"; }
-getscope() { jq -r --arg k "$1" --arg d "$2" ".scope[\$k] // \$d" "$CFG" 2>/dev/null || printf '%s' "$2"; }
+# the config with this host's overlay (config.<host>.json) deep-merged over it: scripts/lib/config.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/config.sh"
+CFGJSON="$(dreamteam_config "$CFG")"
+getcfg() { jq -r --arg k "$1" --arg d "$2" ".memory[\$k] // \$d" <<<"$CFGJSON" 2>/dev/null || printf '%s' "$2"; }
+getscope() { jq -r --arg k "$1" --arg d "$2" ".scope[\$k] // \$d" <<<"$CFGJSON" 2>/dev/null || printf '%s' "$2"; }
 PER_AGENT=$(getcfg perAgentMB 400); HOST_RESERVE=$(getcfg hostReserveMB 6000)
 BALLOON=$(getcfg balloonReserveMB 8000); MIN_AVAIL=$(getcfg minAvailableMB 8000)
 MAX_AGENTS=$(getcfg maxAgents 30)
@@ -18,8 +21,8 @@ MAX_AGENTS=$(getcfg maxAgents 30)
 # (.local.enabled == true); its resident model is invisible to the claude-proc
 # accounting. ==false-safe. Default 9000 MUST match mem-gate.sh + dashboard-data.sh
 # (test-roster.sh defaults-agreement guard enforces this).
-getlocal() { jq -r --arg k "$1" --arg d "$2" ".local[\$k] // \$d" "$CFG" 2>/dev/null || printf '%s' "$2"; }
-LOCAL_ARMED=$(jq -r 'if .local.enabled == true then 1 else 0 end' "$CFG" 2>/dev/null || echo 0)
+getlocal() { jq -r --arg k "$1" --arg d "$2" ".local[\$k] // \$d" <<<"$CFGJSON" 2>/dev/null || printf '%s' "$2"; }
+LOCAL_ARMED=$(jq -r 'if .local.enabled == true then 1 else 0 end' <<<"$CFGJSON" 2>/dev/null || echo 0)
 LOCAL_RESERVE=$(getlocal reserveMB 9000); LOCAL_RESERVE=${LOCAL_RESERVE//[!0-9]/}; [ -n "$LOCAL_RESERVE" ] || LOCAL_RESERVE=9000
 [ "$LOCAL_ARMED" = 1 ] && LOCAL_EFF=$LOCAL_RESERVE || LOCAL_EFF=0
 

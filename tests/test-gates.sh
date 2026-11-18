@@ -41,7 +41,7 @@ cat > "$BIN/free" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "              total        used        free      shared  buff/cache   available"
 printf 'Mem:          64000        2000        1000           0        1000       %s\n' "${FAKE_AVAIL:-16000}"
-printf 'Swap:          8191        %s        7614\n' "${FAKE_SWAP_USED:-500}"
+printf 'Swap:          8191        %s        %s\n' "${FAKE_SWAP_USED:-500}" "${FAKE_SWAP_FREE:-7614}"
 STUB
 chmod +x "$BIN/free"
 # fake `systemctl` -- mem-gate scales its balloon reserve by LIVE dreamteam-*.scope
@@ -206,6 +206,54 @@ else
 fi
 
 echo "─────────────────────────────────────────────────────────────────"
+echo "── per-host overlay (config.<host>.json deep-merged over config.json; Sen 2026-11-17) ──"
+# A fixture root: the real config.json plus a familiar overlay with the accepted floors. katana has none.
+OV="$TMP/ovroot"; mkdir -p "$OV"; cp "$ROOT/config.json" "$OV/config.json"
+cat > "$OV/config.familiar.json" <<'J'
+{"memory":{"minAvailableMB":3000,"minSwapFreeMB":2048,"perAgentMB":750,"hostReserveMB":2048}}
+J
+# 7000 MiB available, 8.7 GB swap free: the base floor (8000) blocks; familiar's overlay admits one (2048 host + 4000
+# balloon + 750 = 6798 needed; at its 6700 idle the BUDGET, not the 3000 floor, is what binds)
+DREAMTEAM_CONFIG="$OV/config.json" DREAMTEAM_HOST=familiar FAKE_AVAIL=7000 FAKE_SWAP_FREE=8700 FAKE_PGREP_COUNT=1 \
+  run_gate "$MEM_GATE" '{"tool_name":"Agent","tool_input":{"prompt":"x"}}'
+[ "$GRC" -eq 0 ] && pass "overlay: familiar at 7000 MiB is ADMITTED under config.familiar.json" || fail "overlay familiar: exit $GRC $(head -2 "$TMP/err")"
+DREAMTEAM_CONFIG="$OV/config.json" DREAMTEAM_HOST=katana FAKE_AVAIL=7000 FAKE_SWAP_FREE=8700 FAKE_PGREP_COUNT=1 \
+  run_gate "$MEM_GATE" '{"tool_name":"Agent","tool_input":{"prompt":"x"}}'
+[ "$GRC" -eq 2 ] && grep -q '< 8000MiB floor' "$TMP/err" && pass "overlay: katana (no overlay) keeps the base verdict: blocked under the 8000 floor" || fail "no overlay changed katana: exit $GRC $(head -1 "$TMP/err")"
+# the swap floor is the overlay's: familiar with RAM to spare but swap nearly gone is blocked; katana (default 0) is not
+DREAMTEAM_CONFIG="$OV/config.json" DREAMTEAM_HOST=familiar FAKE_AVAIL=12000 FAKE_SWAP_FREE=900 FAKE_PGREP_COUNT=1 \
+  run_gate "$MEM_GATE" '{"tool_name":"Agent","tool_input":{"prompt":"x"}}'
+[ "$GRC" -eq 2 ] && grep -q 'swap free' "$TMP/err" && pass "overlay: familiar with 900 MiB swap free is blocked (minSwapFreeMB 2048)" || fail "swap floor: exit $GRC $(head -1 "$TMP/err")"
+DREAMTEAM_CONFIG="$OV/config.json" DREAMTEAM_HOST=katana FAKE_AVAIL=20000 FAKE_SWAP_FREE=900 FAKE_PGREP_COUNT=1 \
+  run_gate "$MEM_GATE" '{"tool_name":"Agent","tool_input":{"prompt":"x"}}'
+[ "$GRC" -eq 0 ] && pass "overlay: katana has no swap floor (default 0), so the same swap does not block it" || fail "katana swap: exit $GRC $(head -1 "$TMP/err")"
+# a deep merge, not a replacement: the overlay's .memory keeps the base's other keys (balloonReserveMB 4000 stays)
+DREAMTEAM_CONFIG="$OV/config.json" DREAMTEAM_HOST=familiar FAKE_AVAIL=6700 FAKE_SWAP_FREE=8700 FAKE_PGREP_COUNT=1 \
+  run_gate "$MEM_GATE" '{"tool_name":"Agent","tool_input":{"prompt":"x"}}'
+DREAMTEAM_CONFIG="$OV/config.json" DREAMTEAM_HOST=familiar FAKE_AVAIL=4000 FAKE_SWAP_FREE=8700 FAKE_PGREP_COUNT=1 \
+  run_gate "$MEM_GATE" '{"tool_name":"Agent","tool_input":{"prompt":"x"}}'
+[ "$GRC" -eq 2 ] && grep -q 'balloon_reserve=4000' "$TMP/err" && grep -q 'per_agent=750' "$TMP/err" && grep -q 'host_reserve=2048' "$TMP/err" \
+  && pass "overlay: deep merge (per_agent 750 and host_reserve 2048 from the overlay, balloon 4000 kept from the base)" || fail "deep merge: $(sed -n 3p "$TMP/err")"
+# a broken overlay is ignored for the STRICTER base, never half-read
+printf '{"memory":' > "$OV/config.broken.json"
+DREAMTEAM_CONFIG="$OV/config.json" DREAMTEAM_HOST=broken FAKE_AVAIL=6700 FAKE_SWAP_FREE=8700 FAKE_PGREP_COUNT=1 \
+  run_gate "$MEM_GATE" '{"tool_name":"Agent","tool_input":{"prompt":"x"}}'
+[ "$GRC" -eq 2 ] && grep -q '< 8000MiB floor' "$TMP/err" && pass "overlay: an unreadable overlay falls back to the base (stricter), never a half-read" || fail "broken overlay: exit $GRC"
+
+# lane-check.sh: the lane-start floor (familiar 6800/4096; no overlay = no floor)
+printf '%s\n' '{"lane":{"minAvailableMB":6800,"minSwapFreeMB":4096}}' > "$OV/config.familiar.json"
+o=$(DREAMTEAM_CONFIG="$OV/config.json" DREAMTEAM_HOST=familiar FAKE_AVAIL=6700 FAKE_SWAP_FREE=8700 bash "$ROOT/scripts/lane-check.sh"); rc=$?
+[ $rc = 1 ] && [[ "$o" == "lane-check held: 6700 MiB available < 6800 (familiar)" ]] && pass "lane-check: familiar at 6700 is held under 6800" || fail "lane-check familiar: $rc '$o'"
+o=$(DREAMTEAM_CONFIG="$OV/config.json" DREAMTEAM_HOST=familiar FAKE_AVAIL=9000 FAKE_SWAP_FREE=3000 bash "$ROOT/scripts/lane-check.sh"); rc=$?
+[ $rc = 1 ] && [[ "$o" == *"3000 MiB swap free < 4096"* ]] && pass "lane-check: familiar with 3000 swap free is held under 4096" || fail "lane-check swap: $rc '$o'"
+o=$(DREAMTEAM_CONFIG="$OV/config.json" DREAMTEAM_HOST=katana FAKE_AVAIL=1000 FAKE_SWAP_FREE=0 bash "$ROOT/scripts/lane-check.sh"); rc=$?
+[ $rc = 0 ] && pass "lane-check: katana (no overlay) is never held" || fail "lane-check katana: $rc '$o'"
+# the repo's own config.familiar.json parses and carries the accepted numbers (balloon stays the base's)
+jq -e '.memory == {"minAvailableMB":3000,"minSwapFreeMB":2048,"perAgentMB":750,"hostReserveMB":2048} and .lane == {"minAvailableMB":6800,"minSwapFreeMB":4096}
+       and .overnight == {"min_available_mb":5500,"min_swap_free_mb":4096} and (.memory | has("balloonReserveMB") | not)' "$ROOT/config.familiar.json" >/dev/null \
+  && pass "config.familiar.json: the accepted floors, balloonReserveMB left to the base" || fail "config.familiar.json content"
+
+grep -q 'DREAMTEAM_HOST=dreamteam-test' "$ROOT/tests/run.sh" && pass "tests/run.sh pins DREAMTEAM_HOST, so no real host's overlay reaches a suite" || fail "run.sh does not pin DREAMTEAM_HOST"
 echo "SUMMARY: $PASS passed, $FAIL failed, $((PASS+FAIL)) total"
 [ "$FAIL" -eq 0 ] || exit 1
 exit 0

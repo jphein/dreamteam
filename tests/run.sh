@@ -21,7 +21,8 @@ fi
 trap 'rm -rf -- "$PRIV"' EXIT
 export DREAMTEAM_REAL_HOME="$HOME" HOME="$PRIV/home" DREAMTEAM_CHECKS_DIR="$PRIV/checks" \
        XDG_CONFIG_HOME="$PRIV/home/.config" XDG_STATE_HOME="$PRIV/home/.local/state" \
-       XDG_DATA_HOME="$PRIV/home/.local/share" XDG_CACHE_HOME="$PRIV/home/.cache"   # an inherited XDG dir never leaks in
+       XDG_DATA_HOME="$PRIV/home/.local/share" XDG_CACHE_HOME="$PRIV/home/.cache" \
+       DREAMTEAM_HOST=dreamteam-test   # an inherited XDG dir never leaks in; no real host's config.<host>.json applies
 
 fail=0; ran=0; failed_suites=""
 for t in "$DIR"/test-*.sh; do

@@ -180,9 +180,12 @@ guard_line() {
 }
 
 log() { echo "$(date +%FT%T) overnight-guarded: $*" >> "$LOG" 2>/dev/null || true; }
-oc()  { jq -r --arg k "$1" --arg d "$2" '(.overnight[$k] // $d) | tostring' "$CFG" 2>/dev/null || printf '%s' "$2"; }
-sc()  { jq -r --arg k "$1" --arg d "$2" '.scope[$k] // $d' "$CFG" 2>/dev/null || printf '%s' "$2"; }
-olist() { jq -c --arg k "$1" '.overnight[$k] // []' "$CFG" 2>/dev/null || echo '[]'; }
+# the config with this host's overlay (config.<host>.json) deep-merged over it: scripts/lib/config.sh
+. "$ROOT/scripts/lib/config.sh"
+CFGJSON="$(dreamteam_config "$CFG")"
+oc()  { jq -r --arg k "$1" --arg d "$2" '(.overnight[$k] // $d) | tostring' <<<"$CFGJSON" 2>/dev/null || printf '%s' "$2"; }
+sc()  { jq -r --arg k "$1" --arg d "$2" '.scope[$k] // $d' <<<"$CFGJSON" 2>/dev/null || printf '%s' "$2"; }
+olist() { jq -c --arg k "$1" '.overnight[$k] // []' <<<"$CFGJSON" 2>/dev/null || echo '[]'; }
 ge()  { awk -v a="$1" -v b="$2" 'BEGIN{exit !((a+0) >= (b+0))}'; }
 isnum() { [[ "$1" =~ ^[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?$ ]]; }
 
@@ -705,6 +708,12 @@ skip() { # reason
   exit 0
 }
 [ $QRC -eq 0 ] || skip "$QR"
+# (a2) memory (Sen 2026-11-17): MemAvailable and swap free, both from config (0 = no floor; familiar's overlay sets
+# 5500/4096). Judged after the work gate like the quota, so a quiet night stays silent.
+MEM_MIN=$(oc min_available_mb 0); SWAP_MIN=$(oc min_swap_free_mb 0)
+MEM_AV=$(free -m | awk '/^Mem:/{print $7}'); SWAP_FR=$(free -m | awk '/^Swap:/{print $4}')
+if [ "${MEM_MIN//[!0-9]/}" -gt 0 ] 2>/dev/null && [ "${MEM_AV:-0}" -lt "$MEM_MIN" ]; then skip "memory: ${MEM_AV} MiB available < ${MEM_MIN}"; fi
+if [ "${SWAP_MIN//[!0-9]/}" -gt 0 ] 2>/dev/null && [ "${SWAP_FR:-0}" -lt "$SWAP_MIN" ]; then skip "memory: ${SWAP_FR} MiB swap free < ${SWAP_MIN}"; fi
 
 DEADLINE=$(deadline_epoch); LEFT=$(( DEADLINE - $(date +%s) ))
 # the night window: a start more than max_hours before stop_at is a daytime start, refused (not clamped:
