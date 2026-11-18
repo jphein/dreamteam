@@ -129,5 +129,13 @@ mb=$(col sized kept_ignored_mb)
 awk -v m="$mb" 'BEGIN{exit !(m >= 1.4 && m <= 2.2)}' && ok "kept size: 40 small files sum to ~1.6 MB, the nested node_modules left out ($mb)" || bad "kept size $mb"
 grep -q "dirs not fully measured: 3 " "$TMP/summary3" && ok "hidden flags and submodules count as not fully measured" || bad "summary3: $(cat "$TMP/summary3")"
 
+# --- xreview round 3: every git call runs with lazy fetch off and optional locks off --------------------------
+REALGIT="$(command -v git)"; mkdir -p "$TMP/gitstub"
+printf '#!/bin/sh\necho "${GIT_NO_LAZY_FETCH:-unset} ${GIT_OPTIONAL_LOCKS:-unset}" >> "%s"\nexec "%s" "$@"\n' "$TMP/git-env.log" "$REALGIT" > "$TMP/gitstub/git"
+chmod +x "$TMP/gitstub/git"
+PATH="$TMP/gitstub:$PATH" python3 "$S" --root "$P" --no-size --only busy >/dev/null 2>&1
+[ -s "$TMP/git-env.log" ] && [ "$(sort -u "$TMP/git-env.log")" = "1 0" ] \
+  && ok "every git call: GIT_NO_LAZY_FETCH=1, GIT_OPTIONAL_LOCKS=0 ($(wc -l < "$TMP/git-env.log") calls)" || bad "git env: $(sort -u "$TMP/git-env.log" 2>/dev/null)"
+
 echo "----"; echo "sync-inventory: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

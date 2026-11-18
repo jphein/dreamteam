@@ -51,7 +51,9 @@ REGENERABLE = {
 PRUNE = {".git", "node_modules", ".stversions"}
 COLS = ["name", "kind", "size_mb", "branch", "unpushed", "dirty", "untracked", "kept_ignored", "kept_ignored_mb",
         "conflicts", "note"]
-ENV = dict(os.environ, GIT_OPTIONAL_LOCKS="0", LC_ALL="C", GIT_TERMINAL_PROMPT="0")
+# GIT_NO_LAZY_FETCH: in a partial (promisor) clone a missing object would otherwise be FETCHED, which writes into
+# .git and runs the configured transport. With it set, git reports the object as absent and the row gets git-error.
+ENV = dict(os.environ, GIT_OPTIONAL_LOCKS="0", LC_ALL="C", GIT_TERMINAL_PROMPT="0", GIT_NO_LAZY_FETCH="1")
 SAFE = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.untrackedCache=false"]
 
 
