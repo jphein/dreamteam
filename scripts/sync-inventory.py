@@ -11,19 +11,27 @@ One TSV row per top-level directory (header first), then a `#` summary on stderr
     name  kind  size_mb  branch  unpushed  dirty  untracked  kept_ignored  kept_ignored_mb  conflicts  note
 
     kind          git | plain (no .git: everything in it is unversioned)
-    size_mb       du of the tree without .git (blank with --no-size)
+    size_mb       du of the tree without .git (blank with --no-size, or when du could not read all of it)
     unpushed      commits on HEAD that no remote branch holds (all of them when the repo has no remote)
     dirty         tracked files that differ from HEAD
     untracked     untracked, not ignored entries (a directory counts once)
     kept_ignored  ignored entries that are NOT regenerable (so: .env files, scratch/, data, local state). Dependency
                   and build dirs (node_modules, venvs, caches, build output) are left out: a clone rebuilds them.
     conflicts     `*.sync-conflict-*` files, outside .git / node_modules / .stversions
-    note          no-remote · no-commits · detached · refs-may-lag · git-error:<what>
+    note          no-remote · no-commits · detached · has-filters · walk-error · size-error · git-error:<what>
 
-It never writes: git runs with GIT_OPTIONAL_LOCKS=0 (no index refresh) and only status / rev-list / rev-parse /
-remote. In a tree whose `.git` does not sync, `dirty` can be the refs lagging the files rather than real edits; the
-row then says `refs-may-lag` (HEAD's commit is older than the newest tracked file change by more than a day) so
-nobody commits a phantom diff. Heavy on a big tree: run it on a lane host or under `ionice -c3 nice -n 15`.
+A number is printed only when it was measured. A git command that could not answer leaves its columns BLANK and
+adds `git-error:<what>`; a walk that met an unreadable directory adds `walk-error` (the count is then a floor); a du
+that did not exit 0 leaves the size blank and adds `size-error`. The summary says how many rows carry such a note.
+
+Read-only, and what that covers: git runs with GIT_OPTIONAL_LOCKS=0 (no index refresh), fsmonitor off, hooks off, and
+only rev-parse / symbolic-ref / remote / rev-list / status / config --get-regexp. One limit: `git status` may run
+a repo's own configured clean/process FILTER (git-lfs, git-crypt) to compare contents. A repo with such a filter is
+NOT given to `git status`: its dirty/untracked/kept columns stay blank and the note says `has-filters`.
+
+In a tree whose `.git` does not sync, `dirty` can be the refs lagging the files rather than real edits: align the
+refs (housekeep → "Synced trees") before committing anything this lists. Heavy on a big tree: run it on a lane host
+or under `ionice -c3 nice -n 15`.
 
 Exit: 0 inventory written · 2 the root is not a readable directory · 22 bad arguments.
 """
@@ -39,14 +47,15 @@ REGENERABLE = {
 PRUNE = {".git", "node_modules", ".stversions"}
 COLS = ["name", "kind", "size_mb", "branch", "unpushed", "dirty", "untracked", "kept_ignored", "kept_ignored_mb",
         "conflicts", "note"]
-ENV = dict(os.environ, GIT_OPTIONAL_LOCKS="0", LC_ALL="C")
+ENV = dict(os.environ, GIT_OPTIONAL_LOCKS="0", LC_ALL="C", GIT_TERMINAL_PROMPT="0")
+SAFE = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.untrackedCache=false"]
 
 
 def git(repo, *args, timeout=120):
-    """(rc, stdout) of a read-only git command in repo; rc 124 on timeout, 127 when git is absent."""
+    """(rc, stdout) of a read-only git command in repo; rc 124 on timeout, 127 when git cannot be run."""
     try:
-        p = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, env=ENV, timeout=timeout,
-                           errors="replace")
+        p = subprocess.run(["git", "-C", repo, *SAFE, *args], capture_output=True, text=True, env=ENV,
+                           timeout=timeout, errors="replace")
         return p.returncode, p.stdout
     except subprocess.TimeoutExpired:
         return 124, ""
@@ -55,21 +64,25 @@ def git(repo, *args, timeout=120):
 
 
 def du_mb(path, exclude_git=True):
-    """Size in MB by du (fast, one process); None when du cannot read it."""
+    """Size in MB by du (one process); None unless du exited 0 with a number (a partial read is not a size)."""
     cmd = ["du", "-sk"] + (["--exclude=.git"] if exclude_git else []) + ["--", path]
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+        if p.returncode != 0:
+            return None
         return round(int(p.stdout.split()[0]) / 1024, 1)
     except (OSError, ValueError, IndexError, subprocess.TimeoutExpired):
         return None
 
 
 def conflicts(path):
+    """(count, complete): complete is False when any directory could not be listed (the count is then a floor)."""
     n = 0
-    for _dir, dirs, files in os.walk(path, onerror=lambda e: None):
+    errs = []
+    for _dir, dirs, files in os.walk(path, onerror=errs.append):
         dirs[:] = [d for d in dirs if d not in PRUNE]
         n += sum(1 for f in files if ".sync-conflict-" in f)
-    return n
+    return n, not errs
 
 
 def regenerable(rel):
@@ -77,32 +90,57 @@ def regenerable(rel):
 
 
 def inspect_git(repo, want_size):
+    """Columns for one repo. A column is set only when its git command answered."""
     row = {"kind": "git", "note": []}
+    note = row["note"].append
+
     rc, head = git(repo, "rev-parse", "--verify", "-q", "HEAD")
-    if rc in (124, 127):
-        row["note"].append("git-error:" + ("timeout" if rc == 124 else "no-git"))
-        return row
-    if rc != 0:
-        row["note"].append("no-commits")
+    if rc == 1 and not head.strip():
+        has_head = False
+        note("no-commits")                      # -q exits 1, silently, exactly when HEAD names no commit
+    elif rc == 0 and head.strip():
+        has_head = True
+    else:
+        note("git-error:" + {124: "timeout", 127: "no-git"}.get(rc, "rev-parse"))
+        return row                              # nothing below can be trusted
+
     rc, br = git(repo, "symbolic-ref", "-q", "--short", "HEAD")
-    row["branch"] = br.strip() if rc == 0 else ""
-    if rc != 0 and head.strip():
-        row["note"].append("detached")
+    if rc == 0:
+        row["branch"] = br.strip()
+    elif rc == 1:                               # -q exits 1 exactly when HEAD is not a symbolic ref
+        note("detached")
+    else:
+        note("git-error:symbolic-ref")
+
     rc, remotes = git(repo, "remote")
-    has_remote = rc == 0 and bool(remotes.strip())
-    if not has_remote:
-        row["note"].append("no-remote")
-    if head.strip():
+    if rc != 0:
+        note("git-error:remote")
+    elif not remotes.strip():
+        note("no-remote")
+
+    if has_head:
         rc, out = git(repo, "rev-list", "--count", "HEAD", "--not", "--remotes")
-        row["unpushed"] = int(out.strip()) if rc == 0 and out.strip().isdigit() else ""
-        if rc != 0:
-            row["note"].append("git-error:rev-list")
+        if rc == 0 and out.strip().isdigit():
+            row["unpushed"] = int(out.strip())
+        else:
+            note("git-error:rev-list")
+
+    # A configured clean/process filter is an external program `git status` may run: do not run status there.
+    rc, out = git(repo, "config", "--get-regexp", r"^filter\..*\.(clean|process)$")
+    if rc == 0 and out.strip():
+        note("has-filters")
+        return row
+    if rc not in (0, 1):                        # 1 = no such key; anything else = config unreadable
+        note("git-error:config")
+        return row
+
     rc, out = git(repo, "status", "--porcelain=v1", "-z", "--ignored", timeout=600)
     if rc != 0:
-        row["note"].append("git-error:status")
+        note("git-error:status")
         return row
     dirty = untracked = kept = 0
     kept_kb = 0
+    size_ok = True
     entries = out.split("\0")
     i = 0
     while i < len(entries):
@@ -120,21 +158,18 @@ def inspect_git(repo, want_size):
                 kept += 1
                 if want_size:
                     mb = du_mb(os.path.join(repo, rel), exclude_git=False)
-                    kept_kb += int((mb or 0) * 1024)
+                    if mb is None:
+                        size_ok = False
+                    else:
+                        kept_kb += int(mb * 1024)
         else:
             dirty += 1
     row.update(dirty=dirty, untracked=untracked, kept_ignored=kept)
     if want_size:
-        row["kept_ignored_mb"] = round(kept_kb / 1024, 1)
-    if dirty and head.strip():
-        rc, out = git(repo, "log", "-1", "--format=%ct", "HEAD")
-        try:
-            newest = max(os.lstat(os.path.join(repo, f)).st_mtime
-                         for f in os.listdir(repo) if f != ".git")
-            if rc == 0 and newest - int(out.strip()) > 86400:
-                row["note"].append("refs-may-lag")
-        except (OSError, ValueError):
-            pass
+        if size_ok:
+            row["kept_ignored_mb"] = round(kept_kb / 1024, 1)
+        else:
+            note("size-error")
     return row
 
 
@@ -161,32 +196,45 @@ def main(argv):
             return 22
         names = [n for n in names if n in ns.only]
     print("\t".join(COLS))
-    tot = {"git": 0, "plain": 0, "unpushed": 0, "dirty": 0, "untracked": 0, "kept": 0, "conflicts": 0, "stranded": 0}
+    tot = {"git": 0, "plain": 0, "unpushed": 0, "dirty": 0, "untracked": 0, "kept": 0, "conflicts": 0,
+           "stranded": 0, "unmeasured": 0}
     for n in names:
         p = os.path.join(root, n)
-        if os.path.exists(os.path.join(p, ".git")):
+        if os.path.lexists(os.path.join(p, ".git")):
             row = inspect_git(p, not ns.no_size)
         else:
             row = {"kind": "plain", "note": []}
         row["name"] = n
-        row["conflicts"] = conflicts(p)
+        count, complete = conflicts(p)
+        row["conflicts"] = count
+        if not complete:
+            row["note"].append("walk-error")
         if not ns.no_size:
             mb = du_mb(p)
-            row["size_mb"] = "" if mb is None else mb
+            if mb is None:
+                if "size-error" not in row["note"]:
+                    row["note"].append("size-error")
+            else:
+                row["size_mb"] = mb
         tot[row["kind"]] += 1
         for k, src in (("unpushed", "unpushed"), ("dirty", "dirty"), ("untracked", "untracked"),
                        ("kept", "kept_ignored"), ("conflicts", "conflicts")):
             v = row.get(src)
             tot[k] += v if isinstance(v, int) else 0
-        if row["kind"] == "plain" or any(isinstance(row.get(k), int) and row.get(k) > 0
-                                         for k in ("unpushed", "dirty", "untracked", "kept_ignored")) \
-                or "no-remote" in row["note"]:
-            tot["stranded"] += 1
+        unmeasured = any(x in ("walk-error", "size-error", "has-filters") or x.startswith("git-error")
+                         for x in row["note"])
+        tot["unmeasured"] += 1 if unmeasured else 0
+        if row["kind"] == "plain" or unmeasured or "no-remote" in row["note"] \
+                or any(isinstance(row.get(k), int) and row.get(k) > 0
+                       for k in ("unpushed", "dirty", "untracked", "kept_ignored")):
+            tot["stranded"] += 1                 # an unmeasured dir is never counted as safe to convert
         row["note"] = " ".join(row["note"])
         print("\t".join(str(row.get(c, "")).replace("\t", " ").replace("\n", " ") for c in COLS))
+    floor = " (a floor: see the notes)" if tot["unmeasured"] else ""
     print(f"# {len(names)} dirs: {tot['git']} git, {tot['plain']} plain · unpushed commits {tot['unpushed']} · "
           f"dirty {tot['dirty']} · untracked {tot['untracked']} · kept ignored {tot['kept']} · "
-          f"conflict copies {tot['conflicts']} · dirs with something a clone would not carry: {tot['stranded']}",
+          f"conflict copies {tot['conflicts']} · dirs with something a clone would not carry: {tot['stranded']} · "
+          f"dirs not fully measured: {tot['unmeasured']}{floor}",
           file=sys.stderr)
     return 0
 

@@ -62,7 +62,7 @@ col() { awk -F'\t' -v n="$1" -v c="$2" 'NR==1{for(i=1;i<=NF;i++)h[$i]=i} $1==n{p
 [ "$(col empty note)" = "no-commits no-remote" ] && [ "$(col empty unpushed)" = "" ] && ok "empty repo: noted, no number invented" || bad "empty: $(grep '^empty' <<< "$out")"
 [ "$(col plain kind)" = plain ] && [ "$(col plain dirty)" = "" ] && ok "plain dir: kind plain, git columns blank" || bad "plain: $(grep '^plain' <<< "$out")"
 [ -n "$(col busy size_mb)" ] && ok "size column filled" || bad "size blank"
-grep -q "5 dirs: 4 git, 1 plain · unpushed commits 3 · dirty 1 · untracked 2 · kept ignored 2 · conflict copies 1 · dirs with something a clone would not carry: 4" "$TMP/summary" \
+grep -q "5 dirs: 4 git, 1 plain · unpushed commits 3 · dirty 1 · untracked 2 · kept ignored 2 · conflict copies 1 · dirs with something a clone would not carry: 4 · dirs not fully measured: 0$" "$TMP/summary" \
   && ok "summary line on stderr" || bad "summary: $(cat "$TMP/summary")"
 
 out=$(python3 -I "$S" --root "$P" --no-size --only busy clean 2>/dev/null)
@@ -70,6 +70,41 @@ out=$(python3 -I "$S" --root "$P" --no-size --only busy clean 2>/dev/null)
 python3 -I "$S" --root "$P" --only nope >/dev/null 2>&1; [ $? = 22 ] && ok "--only with an unknown name: exit 22" || bad "--only unknown rc"
 python3 -I "$S" --root "$TMP/absent" >/dev/null 2>&1; [ $? = 2 ] && ok "absent root: exit 2" || bad "absent root rc"
 python3 -I "$S" --bogus >/dev/null 2>&1; [ $? = 22 ] && ok "bad option: exit 22" || bad "bad option rc"
+
+# --- xreview round 1: a number is printed only when it was measured -------------------------------------------
+Q="$TMP/Projects2"; mkdir -p "$Q"
+# (a) a repo whose clean filter would write a marker: status must not run there
+g init "$Q/filtered"; echo a > "$Q/filtered/a.dat"; g -C "$Q/filtered" add a.dat; g -C "$Q/filtered" commit -m one
+git -C "$Q/filtered" config filter.mark.clean "sh -c 'touch \"$TMP/FILTER-RAN\"; cat'"
+echo '*.dat filter=mark' > "$Q/filtered/.gitattributes"; echo changed > "$Q/filtered/a.dat"
+# (b) a .git that git cannot read as a repo
+mkdir -p "$Q/corrupt"; echo "not a gitdir" > "$Q/corrupt/.git"; echo x > "$Q/corrupt/x.txt"
+# (c) a detached HEAD
+g init "$Q/detached"; echo a > "$Q/detached/a"; g -C "$Q/detached" add a; g -C "$Q/detached" commit -m one
+g -C "$Q/detached" checkout --detach
+# (d) a plain dir with an unreadable subdirectory holding a conflict copy
+mkdir -p "$Q/locked/in"; touch "$Q/locked/top.sync-conflict-20261117-000000-ABCDEFG" "$Q/locked/in/hid.sync-conflict-20261117-000000-ABCDEFG"
+[ "$(id -u)" != 0 ] && chmod 000 "$Q/locked/in"
+out=$(python3 -I "$S" --root "$Q" --no-size 2>"$TMP/summary2"); rc=$?
+[ "$(id -u)" != 0 ] && chmod 700 "$Q/locked/in"
+[ "$rc" = 0 ] && ok "second fixture: exit 0" || bad "second fixture rc=$rc"
+[ ! -e "$TMP/FILTER-RAN" ] && ok "a repo's clean filter is never run" || bad "the clean filter ran"
+[ "$(col filtered note)" = "no-remote has-filters" ] && [ "$(col filtered dirty)" = "" ] && [ "$(col filtered unpushed)" = 1 ] \
+  && ok "has-filters: status columns blank, unpushed still measured" || bad "filtered: $(grep '^filtered' <<< "$out")"
+[ "$(col corrupt note)" = "git-error:rev-parse" ] && [ "$(col corrupt unpushed)$(col corrupt dirty)$(col corrupt branch)" = "" ] \
+  && ok "unreadable .git: git-error, no fact invented (not 'no-commits')" || bad "corrupt: $(grep '^corrupt' <<< "$out")"
+case "$(col detached note)" in "detached no-remote") ok "detached HEAD noted" ;; *) bad "detached: $(grep '^detached' <<< "$out")" ;; esac
+if [ "$(id -u)" != 0 ]; then
+  [ "$(col locked conflicts)" = 1 ] && [ "$(col locked note)" = walk-error ] && ok "unreadable subdir: walk-error, the count is a floor" || bad "locked: $(grep '^locked' <<< "$out")"
+  grep -q "dirs not fully measured: 3 (a floor: see the notes)$" "$TMP/summary2" && ok "summary counts the unmeasured dirs" || bad "summary2: $(cat "$TMP/summary2")"
+  grep -q "would not carry: 4 " "$TMP/summary2" && ok "an unmeasured dir is never counted as safe" || bad "stranded count: $(cat "$TMP/summary2")"
+else
+  ok "unreadable subdir: skipped as root"; ok "summary: skipped as root"; ok "stranded: skipped as root"
+fi
+# (e) a du that prints a number but exits non-zero is not a size
+mkdir -p "$TMP/stub"; printf '#!/bin/sh\necho "4096\t$3"\nexit 1\n' > "$TMP/stub/du"; chmod +x "$TMP/stub/du"
+out=$(PATH="$TMP/stub:$PATH" python3 "$S" --root "$P" --only clean 2>/dev/null)
+[ "$(col clean size_mb)" = "" ] && [ "$(col clean note)" = size-error ] && ok "du exit 1: size blank + size-error" || bad "du stub: $(grep '^clean' <<< "$out")"
 
 echo "----"; echo "sync-inventory: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

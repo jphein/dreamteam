@@ -19,7 +19,9 @@
 # Mail:   $DREAMTEAM_MAIL_CMD (default `agent-mail send`) to $DREAMTEAM_LEAD_MAIL (default `sen`), only when the count
 #         is non-zero AND differs from the count last mailed. A mail that cannot be sent never changes the line.
 # State:  ${XDG_STATE_HOME:-~/.local/state}/dreamteam/sync-conflicts.{list,mailed} (0600).
-# Exit:   0 line published (any status) · 1 line could not be published · 22 bad argument.
+# Lock:   flock on $STATE/sync-conflicts.lock for the whole run (walk, list, line, mail).
+# Exit:   0 line published (any status) · 1 line could not be published · 22 bad argument · 75 another run holds
+#         the lock (nothing published).
 set -uo pipefail
 ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # shellcheck disable=SC1091
@@ -38,9 +40,18 @@ NAME="$(check_name sync-conflicts)"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/dreamteam"
 OWNER="daily, owner Sen"
 roots_raw="${DREAMTEAM_SYNC_ROOTS:-$HOME/Projects:$HOME/.claude}"
+# `read` stops at the first newline, which would silently drop every root after it: refuse, never scan a prefix.
+case "$roots_raw" in *$'\n'*|*$'\r'*) check_line "$NAME" fail "DREAMTEAM_SYNC_ROOTS holds a newline" "$OWNER"; exit $? ;; esac
 IFS=: read -r -a ROOTS <<< "$roots_raw"
 
 mkdir -p "$STATE" 2>/dev/null && [ -d "$STATE" ] || { check_line "$NAME" fail "no state dir $STATE" "$OWNER"; exit $?; }
+
+# One run at a time per state dir: two overlapping runs could both mail, or an older walk could replace a newer
+# list. The timer never overlaps itself; a hand run beside it waits its turn out (exit 75, nothing published).
+exec 9> "$STATE/sync-conflicts.lock" || { check_line "$NAME" fail "cannot open the lock in $STATE" "$OWNER"; exit $?; }
+if ! flock -n 9; then
+  echo "sync-conflicts-check: another run holds the lock; nothing published" >&2; exit 75
+fi
 
 idle=()
 command -v ionice >/dev/null 2>&1 && idle+=(ionice -c3)
@@ -59,7 +70,8 @@ for r in "${ROOTS[@]}"; do
   before=$(wc -l < "$tmp")
   # -print0 is not used: one path per line is the list file's format, and a newline in a conflict name would only
   # inflate the count (a louder warn), never hide a file.
-  if ! "${idle[@]}" find "$r" \( -name .git -o -name node_modules -o -name .stversions \) -prune -o \
+  # -H: a root that is a symlink is followed (plain find would not descend, and report a clean zero)
+  if ! "${idle[@]}" find -H "$r" \( -name .git -o -name node_modules -o -name .stversions \) -prune -o \
          -name '*.sync-conflict-*' -print >> "$tmp" 2>/dev/null; then
     # find exits non-zero on any unreadable subdirectory; a partial walk is not a measurement of zero
     partial=1
@@ -97,7 +109,8 @@ if [ "$status" = warn ] && [ "$last" != "$total" ]; then
   read -r -a mailcmd <<< "${DREAMTEAM_MAIL_CMD:-agent-mail send}"
   host="${DREAMTEAM_CHECK_HOST:-$(hostname 2>/dev/null)}"
   if "${mailcmd[@]}" "${DREAMTEAM_LEAD_MAIL:-sen}" "CHECK $NAME warn: $fact on ${host:-?}; list ${listf/#$HOME/\~}" >/dev/null 2>&1; then
-    printf '%s\n' "$total" > "$mailed"
+    mt=$(mktemp "$STATE/.sync-conflicts.mailed.XXXXXX" 2>/dev/null) && printf '%s\n' "$total" > "$mt" \
+      && mv -T -f -- "$mt" "$mailed" || { rm -f -- "${mt:-}"; echo "sync-conflicts-check: mailed count not recorded" >&2; }
   else
     echo "sync-conflicts-check: mail to the lead not sent (will retry next run)" >&2
   fi

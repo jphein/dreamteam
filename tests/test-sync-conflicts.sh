@@ -101,5 +101,20 @@ out=$(bash "$S" --list | tail -1)
 bash "$S" --nope >/dev/null 2>&1; [ $? = 22 ] && ok "unknown argument: exit 22" || bad "unknown argument rc"
 bash "$S" --list extra >/dev/null 2>&1; [ $? = 22 ] && ok "extra argument: exit 22" || bad "extra argument rc"
 
+# --- 8. xreview round 1: a symlinked root is walked; a newline in the roots is refused; one run at a time --------
+ln -s "$A" "$TMP/ProjectsLink"
+out=$(DREAMTEAM_SYNC_ROOTS="$TMP/ProjectsLink" bash "$S")
+case "$out" in "CHECK sync-conflicts warn · 1 conflict copies (1 in $TMP/ProjectsLink)"*) ok "a symlinked root is followed, not read as a clean zero" ;; *) bad "symlink root: '$out'" ;; esac
+out=$(DREAMTEAM_SYNC_ROOTS="$B"$'\n'"$A" bash "$S")
+case "$out" in "CHECK sync-conflicts fail · DREAMTEAM_SYNC_ROOTS holds a newline · "*) ok "a newline in the roots is a fail (no prefix scan)" ;; *) bad "newline roots: '$out'" ;; esac
+bash "$S" >/dev/null; cp "$LINE" "$TMP/line.before"; n=$(mails)
+touch "$A/repo/src/g.sync-conflict-20261117-141414-ABCDEFG.txt"
+( exec 9> "$XDG_STATE_HOME/dreamteam/sync-conflicts.lock"; flock -n 9 || exit 9
+  bash "$S" 9>&- >"$TMP/locked.out" 2>"$TMP/locked.err"; echo $? > "$TMP/locked.rc" )
+[ "$(cat "$TMP/locked.rc")" = 75 ] && [ ! -s "$TMP/locked.out" ] && ok "lock held elsewhere: exit 75, nothing printed" || bad "lock held: rc=$(cat "$TMP/locked.rc") out=$(cat "$TMP/locked.out")"
+cmp -s "$LINE" "$TMP/line.before" && [ "$(mails)" = "$n" ] && ok "lock held elsewhere: line and mail untouched" || bad "lock held: the line or mail changed"
+out=$(bash "$S")
+case "$out" in "CHECK sync-conflicts warn · 2 conflict copies"*) ok "lock free again: the run publishes" ;; *) bad "after the lock: '$out'" ;; esac
+
 echo "----"; echo "sync-conflicts: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
