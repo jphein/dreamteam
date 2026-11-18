@@ -12,3 +12,7 @@ state/*
 __pycache__/
 scripts/quota_resume_state.*.json
 scripts/quota_resume.log
+
+# Per-host overlays (config.<host>.json) are host data: this repo is public. They live untracked in the synced tree
+# (each host reads only its own); the derivation of each host's floors goes in scratch/memory-floors-*.md.
+/config.*.json

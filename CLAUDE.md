@@ -180,3 +180,7 @@ CLAUDE_PLUGIN_ROOT=$PWD scripts/mem-budget.sh   # set CLAUDE_PLUGIN_ROOT so it r
 ## Stack choices (STACK-CHOICES rule)
 
 - **Local model lane: Ollama + `qwen3.5:9b-q4_K_M` on the desktop 2080 Ti** (2026-11-12). Ollama because `local-model.sh` speaks its API (config change only, no adapter). That model because it is the newest that fits an 11 GiB Turing card entirely in VRAM with headroom left for the desktop and NVENC. The stronger MoE models (qwen3.6-35B-A3B) need their experts in the desktop's RAM and CPU, so they stay on the server GPU. Shortlist, sources and limits: `docs/BACKENDS.md`. Host and address live in a private per-host overlay, never in this public repo.
+
+## Per-host overlays
+
+`config.<host>.json` beside `config.json` is deep-merged over it by `scripts/lib/config_merge.py` (every reader). Overlays are **host data**: this repo is public, so they are gitignored and live only in the Syncthing'd tree (each host reads only its own). A host's floors and how they were derived go in `scratch/memory-floors-*.md`. Mechanism: `.gitignore` `/config.*.json` and the test-roster check "no per-host overlay is tracked".
