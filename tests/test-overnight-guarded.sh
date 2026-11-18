@@ -84,15 +84,38 @@ exit 0
 S
 cat > "$BIN/claude-rec" <<'S'
 #!/bin/bash
-echo claude >> "${SEQ_LOG:-/dev/null}"
+echo claude >> "${SEQ_LOG:-/dev/null}"; echo $$ > "${CLAUDE_LOG%.log}.pid"
 { echo "CWD=$PWD"; echo "HTTPS_PROXY=${HTTPS_PROXY:-}"; echo "NODE_EXTRA_CA_CERTS=${NODE_EXTRA_CA_CERTS:-}";
-  echo "ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-unset}"; echo "SCOPE=${DREAMTEAM_SCOPE_NAME:-unset}"; echo "DIRECT=${TEAMCLAUDE_ALLOW_DIRECT:-unset}${TEAMCLAUDE_BYPASS:-}"; echo "PATH1=${PATH%%:*}"
+  echo "ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-unset}"; echo "SCOPE=${DREAMTEAM_SCOPE_NAME:-unset}"; echo "OWNED=${DREAMTEAM_SCOPE_OWNED:-unset}"; echo "BGWAIT=${CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS:-unset}"; echo "DIRECT=${TEAMCLAUDE_ALLOW_DIRECT:-unset}${TEAMCLAUDE_BYPASS:-}"; echo "PATH1=${PATH%%:*}"
   printf 'ARG=%s\n' "$@"; echo "---"; } >> "$CLAUDE_LOG"
-if [ -n "${FAKE_CLAUDE_SLEEP:-}" ]; then sleep "$FAKE_CLAUDE_SLEEP"; echo "END-NOT-KILLED" >> "$CLAUDE_LOG"; fi
+# FAKE_TERM_DELAY: the coordinator takes that long to exit on TERM (so a signal can land while the runner waits)
+[ -n "${FAKE_TERM_DELAY:-}" ] && trap 'sleep "$FAKE_TERM_DELAY"; exit 143' TERM
+if [ -n "${FAKE_STUBBORN:-}" ]; then ( trap '' TERM; exec sleep 300 ) & echo $! > "${CLAUDE_LOG%.log}.stubborn"; fi
+if [ -n "${FAKE_CLAUDE_SLEEP:-}" ]; then sleep "$FAKE_CLAUDE_SLEEP" & wait $!; echo "END-NOT-KILLED" >> "$CLAUDE_LOG"; fi
 # like a real fixer: open a PR through whatever gh is first on PATH (the shim in a PR-only repo)
 gh pr create --fill --head fix/x >/dev/null 2>&1 || true
 if [ -n "${FAKE_CLAUDE_RC:-}" ]; then echo "[claude] teamclaude proxy :3456 down" >&2; exit "$FAKE_CLAUDE_RC"; fi
 echo '{"type":"result","result":"done\nSWEEP-RESULT {\"fixed\":[{\"repo\":\"jphein/realmwatch\",\"number\":7,\"pr\":12,\"sha\":\"\"}],\"reviewed_not_merged\":[{\"repo\":\"jphein/realmwatch\",\"pr\":42}],\"too_large\":[]}"}'
+S
+cat > "$BIN/tmux-probe" <<'S'
+#!/bin/bash
+# list-panes -F '#{pane_dead}' on the runner's session: FAKE_SESSION alive (default) | gone | noserver | deadpane |
+# denied | weird. The error texts are tmux 3.6's own words (checked against real tmux, 2026-11-17).
+echo "probe $*" >> "${PROBE_LOG:-/dev/null}"
+case "${FAKE_SESSION:-alive}" in
+  alive) echo 0; exit 0;;
+  deadpane) echo 1; exit 0;;
+  gone) echo "can't find session: nightly-t" >&2; exit 1;;
+  noserver) echo "error connecting to /tmp/tmux-1000/dreamteam-nightly (No such file or directory)" >&2; exit 1;;
+  denied) echo "error connecting to /tmp/tmux-1000/dreamteam-nightly (Permission denied)" >&2; exit 1;;
+  *) echo "lost server" >&2; exit 1;;
+esac
+S
+cat > "$BIN/notify-rec" <<'S'
+#!/bin/bash
+[ -n "${FAKE_NOTIFY_SLEEP:-}" ] && sleep "$FAKE_NOTIFY_SLEEP"
+printf '%s\n' "$*" >> "$NOTIFY_LOG"
+exit "${FAKE_NOTIFY_RC:-0}"
 S
 chmod +x "$BIN"/*
 
@@ -120,6 +143,7 @@ run_g(){ # env passthrough via caller prefix assignments; extra args to the scri
   DREAMTEAM_WT_BASE="$TMP/wt" DREAMTEAM_CLAUDE_BIN="$BIN/claude-rec" DREAMTEAM_PLAN_DATA="$TMP/plan-data" \
   DREAMTEAM_DEADLINE_EPOCH="${DEADLINE:-$(( $(date +%s) + 6*3600 ))}" \
   GH_LOG="$TMP/gh.log" GIT_LOG="$TMP/git.log" CLAUDE_LOG="$TMP/claude.log" \
+  DREAMTEAM_TMUX_PROBE="$BIN/tmux-probe" DREAMTEAM_NOTIFY_CMD="$BIN/notify-rec" NOTIFY_LOG="$TMP/notify.txt" PROBE_LOG="$TMP/probe.txt" \
   PATH="$BIN:$PATH" bash "$G" "$@"
 }
 gj(){ jq -r "$1" "$TMP/state/overnight-guard.json" 2>/dev/null; }
@@ -139,6 +163,16 @@ if command -v systemd-analyze >/dev/null 2>&1 && [ -f "$T" ]; then
   # only findings about OUR units count (verify also lints unrelated system units it loads)
   out=$(systemd-analyze --user verify "$T" "$S" 2>&1 | grep 'dreamteam-nightly-guarded'); [ -z "$out" ] \
     && pass "systemd-analyze --user verify: guarded timer+service" || fail "systemd-analyze: $out"
+fi
+
+# the watch pair (2026-11-17): every 5 min through the night, installed by timers-ctl
+WT="$ROOT/systemd/dreamteam-nightly-watch.timer"; WS="$ROOT/systemd/dreamteam-nightly-watch.service"
+grep -q -- '--watch' "$WS" 2>/dev/null && grep -q '^Type=oneshot' "$WS" && grep -q 'dreamteam-nightly-watch.timer' "$ROOT/scripts/timers-ctl.sh" \
+  && [ "$(grep '^OnCalendar=' "$WT" | cut -d= -f2- | tr '\n' '|')" = '*-*-* 23:35/5:00|*-*-* 00..06:00/5:00|*-*-* 07:00:00|' ] \
+  && systemd-analyze calendar '*-*-* 23:35/5:00' '*-*-* 00..06:00/5:00' '*-*-* 07:00:00' >/dev/null 2>&1 \
+  && pass "watch pair: oneshot --watch, a 5-min calendar, installed by timers-ctl" || fail "watch pair shape"
+if command -v systemd-analyze >/dev/null 2>&1; then
+  out=$(systemd-analyze --user verify "$WT" "$WS" 2>&1 | grep 'dreamteam-nightly-watch'); [ -z "$out" ] && pass "systemd-analyze --user verify: watch timer+service" || fail "systemd-analyze watch: $out"
 fi
 
 echo "── (a) quota guard ──────────────────────────────────────────────"
@@ -690,6 +724,100 @@ gl=$(sed -n '/^guard_line() {/,/^}/p' "$G"); nl=$(sed -n '/^nightly_lock() {/,/^
 [ "$(grep -c 'check_line "$(check_name nightly-guarded)"' "$G")" = 1 ] && sed -n '/^publish_nightly() {/,/^}/p' "$G" | grep -q 'check_line "$(check_name nightly-guarded)"' \
   && pass "every nightly publication goes through publish_nightly (one check_line call site)" || fail "a nightly check_line outside publish_nightly"
 [ -z "$(ls "$TMP/state/overnight-runs" 2>/dev/null)" ] && [ ! -s "$TMP/claude.log" ] && pass "--check-line runs nothing (no run dir, no coordinator)" || fail "--check-line ran something"
+
+echo "── 2026-11-16 23:41: the coordinator, a killed runner, the watchdog ──"
+# the coordinator waits for its own background Workflow (print mode otherwise kills it 10 min after the turn ends:
+# the 11-16 coordinator ended its turn with "the harness will re-invoke me"), and marks the scope as not its own
+reset; mkqueue jphein/realmwatch:2
+FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 run_g >/dev/null
+grep -qx 'BGWAIT=0' "$TMP/claude.log" && pass "coordinator: CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 (waits for its Workflow; timeout still caps)" || fail "bgwait: $(grep BGWAIT "$TMP/claude.log")"
+grep -qx 'OWNED=1' "$TMP/claude.log" && pass "coordinator: DREAMTEAM_SCOPE_OWNED=1 (its SessionEnd never stops the night's scope)" || fail "owned: $(grep OWNED "$TMP/claude.log")"
+# a runner killed by SIGHUP (its tmux server stopped) still writes its end: the repo stopped, FINISHED, a FAIL line
+reset; rm -rf "$TMP/checks"; mkqueue jphein/realmwatch:2
+( FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 FAKE_CLAUDE_SLEEP=30 FAKE_STUBBORN=1 DREAMTEAM_STOP_GRACE=2 run_g >/dev/null ) &
+SUB=$!
+for _ in $(seq 100); do grep -q '^---$' "$TMP/claude.log" 2>/dev/null && break; sleep 0.1; done
+GPID=$(pgrep -f -n "bash $G" 2>/dev/null)
+[ -n "$GPID" ] && kill -HUP "$GPID"
+for _ in $(seq 100); do kill -0 "$SUB" 2>/dev/null || break; sleep 0.1; done; kill -0 "$SUB" 2>/dev/null && kill "$SUB"
+grep -q "^FINISHED nightly-.*Stopped: runner killed (SIGHUP)" "$TMP/state/overnight-pending.md" 2>/dev/null \
+  && [ "$(gj '.runs[] | select(.repo=="jphein/realmwatch") | .status')" = stopped ] \
+  && [[ "$(cl)" == "CHECK nightly-guarded fail · "*"runner killed (SIGHUP)"* ]] \
+  && ! grep -q END-NOT-KILLED "$TMP/claude.log" && ! kill -0 "$(cat "$TMP/claude.pid" 2>/dev/null || echo 999999)" 2>/dev/null \
+  && [ -s "$TMP/claude.stubborn" ] && ! kill -0 "$(cat "$TMP/claude.stubborn")" 2>/dev/null \
+  && [ -s "$TMP/state/overnight-runs/$(gj .run_id)/killed" ] \
+  && pass "SIGHUP mid-coordinator: its whole group gone (a TERM-ignoring descendant KILLed after the grace), repo stopped, FINISHED names the signal, line FAIL" \
+  || fail "sighup: runs=$(jq -c .runs "$TMP/state/overnight-guard.json") pid=$GPID pending=$(grep FINISHED "$TMP/state/overnight-pending.md" 2>/dev/null) status=$(gj '.runs[0].status') line='$(cl)'"
+# a signal that lands while the runner WAITS (here after a quota stop) still gets the bounded group stop
+reset; rm -rf "$TMP/checks"; mkqueue jphein/realmwatch:2; rm -f "$TMP/claude.stubborn"
+( FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 DREAMTEAM_QUOTA_SEQ="0.92 0.92 0.30" DREAMTEAM_WATCH_SEC=1 \
+  FAKE_CLAUDE_SLEEP=30 FAKE_TERM_DELAY=20 FAKE_STUBBORN=1 DREAMTEAM_STOP_GRACE=2 run_g >/dev/null ) &
+SUB=$!
+for _ in $(seq 200); do grep -q "stopping realmwatch mid-run" "$TMP/state/dreamteam.log" 2>/dev/null && break; sleep 0.1; done
+sleep 0.5; GPID=$(pgrep -f -n "bash $G" 2>/dev/null); T0=$(date +%s); [ -n "$GPID" ] && kill -HUP "$GPID"
+for _ in $(seq 300); do kill -0 "$SUB" 2>/dev/null || break; sleep 0.1; done; T1=$(date +%s); kill -0 "$SUB" 2>/dev/null && kill "$SUB"
+[ $(( T1 - T0 )) -lt 12 ] && [ -s "$TMP/claude.stubborn" ] && ! kill -0 "$(cat "$TMP/claude.stubborn")" 2>/dev/null \
+  && grep -q "Stopped: runner killed (SIGHUP)" "$TMP/state/overnight-pending.md" \
+  && pass "SIGHUP during the runner's wait (after a quota stop): bounded by the grace ($(( T1 - T0 ))s, not the coordinator's 20 s), stubborn descendant gone, FINISHED names it" \
+  || fail "late signal: took $(( T1 - T0 ))s stubborn=$(cat "$TMP/claude.stubborn" 2>/dev/null) alive=$(kill -0 "$(cat "$TMP/claude.stubborn" 2>/dev/null)" 2>/dev/null && echo yes) pending=$(grep FINISHED "$TMP/state/overnight-pending.md")"
+kill "$(cat "$TMP/claude.stubborn" 2>/dev/null)" 2>/dev/null
+
+# a coordinator that finishes normally but leaves a TERM-ignoring member in its group: swept after the leader exits
+reset; mkqueue jphein/realmwatch:2; rm -f "$TMP/claude.stubborn"
+FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 FAKE_STUBBORN=1 DREAMTEAM_STOP_GRACE=2 run_g >/dev/null
+[ -s "$TMP/claude.stubborn" ] && ! kill -0 "$(cat "$TMP/claude.stubborn")" 2>/dev/null && pass "normal finish: a leftover group member is swept (nothing of a finished coordinator keeps running)" \
+  || { fail "normal-finish sweep: stubborn $(cat "$TMP/claude.stubborn" 2>/dev/null) still alive"; kill -KILL "$(cat "$TMP/claude.stubborn" 2>/dev/null)" 2>/dev/null; }
+# HUP in the hand-off window (leader reaped, CPID cleared, sweep not yet run)
+reset; rm -rf "$TMP/checks"; mkqueue jphein/realmwatch:2; rm -f "$TMP/claude.stubborn" "$TMP/tailpause"
+( FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 FAKE_STUBBORN=1 DREAMTEAM_STOP_GRACE=2 DREAMTEAM_TEST_TAIL_PAUSE="$TMP/tailpause" run_g >/dev/null ) &
+SUB=$!
+for _ in $(seq 200); do [ -e "$TMP/tailpause" ] && break; sleep 0.05; done
+GPID=$(pgrep -f -n "bash $G" 2>/dev/null); [ -n "$GPID" ] && kill -HUP "$GPID"
+for _ in $(seq 200); do kill -0 "$SUB" 2>/dev/null || break; sleep 0.1; done; kill -0 "$SUB" 2>/dev/null && kill "$SUB"
+[ -e "$TMP/tailpause" ] && [ -s "$TMP/claude.stubborn" ] && ! kill -0 "$(cat "$TMP/claude.stubborn")" 2>/dev/null \
+  && [[ "$(cl)" == "CHECK nightly-guarded fail · "*"runner killed (SIGHUP)"* ]] \
+  && pass "HUP in the hand-off window: the stubborn member is swept, and the night is FAIL (run-level marker)" \
+  || { fail "handoff: pause=$([ -e "$TMP/tailpause" ] && echo y) stubborn-alive=$(kill -0 "$(cat "$TMP/claude.stubborn" 2>/dev/null)" 2>/dev/null && echo y) line='$(cl)'"; kill -KILL "$(cat "$TMP/claude.stubborn" 2>/dev/null)" 2>/dev/null; }
+
+# the watchdog: a started night whose runner session is gone before its cap is FAIL at once, not at 06:30
+OLD=$(date -Iseconds -d '-10 minutes'); FRESH=$(date -Iseconds -d '-30 seconds')
+FAKE_SESSION=gone rec started "$OLD" "guard passed" '[{"repo":"a/x","status":"started"}]' "$(( NOWE + 3*3600 ))"
+[[ "$(cl)" == "CHECK nightly-guarded fail · "*"runner gone before its "*"cap (no live runner pane in tmux session nightly-t)"* ]] && pass "watch: runner session gone before the cap → FAIL now" || fail "watch gone: '$(cl)'"
+grep -qF -- "-L dreamteam-nightly list-panes -t =nightly-t -F #{pane_dead}" "$TMP/probe.txt" && pass "watch: the probe asks the night's own tmux server for exactly this run's pane state" || fail "probe argv: $(cat "$TMP/probe.txt")"
+FAKE_SESSION=deadpane rec started "$OLD" "guard passed" '[{"repo":"a/x","status":"started"}]' "$(( NOWE + 3*3600 ))"
+[[ "$(cl)" == "CHECK nightly-guarded fail · "*"no live runner pane"* ]] && pass "watch: the session is there but its pane is dead (remain-on-exit) → FAIL" || fail "watch deadpane: '$(cl)'"
+FAKE_SESSION=denied rec started "$OLD" "guard passed" '[{"repo":"a/x","status":"started"}]' "$(( NOWE + 3*3600 ))"
+[[ "$(cl)" == "CHECK nightly-guarded warn · "*"runner liveness unmeasured"* ]] && pass "watch: a socket we cannot open (Permission denied) is unmeasured, not dead" || fail "watch denied: '$(cl)'"
+FAKE_SESSION=noserver rec started "$OLD" "guard passed" '[{"repo":"a/x","status":"started"}]' "$(( NOWE + 3*3600 ))"
+[[ "$(cl)" == "CHECK nightly-guarded fail · "*"runner gone before its "* ]] && pass "watch: the night's tmux SERVER gone (tmux 3.6: 'Error connecting to …', the 11-16 state) → FAIL" || fail "watch noserver: '$(cl)'"
+FAKE_SESSION=alive rec started "$OLD" "guard passed" '[{"repo":"a/x","status":"started"}]' "$(( NOWE + 3*3600 ))"
+[[ "$(cl)" == "CHECK nightly-guarded ok · "*"running until "* ]] && pass "watch: session alive → ok, running (control)" || fail "watch alive: '$(cl)'"
+FAKE_SESSION=gone rec started "$FRESH" "guard passed" '[]' "$(( NOWE + 3*3600 ))"
+[[ "$(cl)" == "CHECK nightly-guarded ok · "* ]] && pass "watch: a record under 2 min old is not judged dead (the launch is still starting)" || fail "watch grace: '$(cl)'"
+FAKE_SESSION=weird rec started "$OLD" "guard passed" '[{"repo":"a/x","status":"started"}]' "$(( NOWE + 3*3600 ))"
+[[ "$(cl)" == "CHECK nightly-guarded warn · "*"runner liveness unmeasured"* ]] && pass "watch: an answer the probe cannot read → warn, unmeasured (never ok, never a guess)" || fail "watch weird: '$(cl)'"
+# the run-level marker alone makes the night FAIL (a signal after the last repo record, or in a one-repo run)
+rec started "$RECENT" "guard passed" '[{"repo":"a/x","status":"finished"},{"repo":"a/y","status":"finished"},{"repo":"a/z","status":"finished"}]' "$(( NOWE + 3600 ))"
+printf 'SIGTERM 2026-11-17T23:59:00-08:00\n' > "$TMP/state/overnight-runs/nightly-t/killed"; run_g --check-line >/dev/null
+[[ "$(cl)" == "CHECK nightly-guarded fail · "*"finished 3"*"runner killed (SIGTERM)"* ]] && pass "line: the run-level killed marker → FAIL even when every repo reads finished" || fail "killed marker: '$(cl)'"
+# --watch tells the lead once per dead run, and never when the run is alive
+FAKE_SESSION=alive rec started "$OLD" "guard passed" '[{"repo":"a/x","status":"started"}]' "$(( NOWE + 3*3600 ))"; rm -f "$TMP/notify.txt"
+FAKE_SESSION=alive run_g --watch >/dev/null
+[ ! -s "$TMP/notify.txt" ] && pass "--watch: alive → the lead is not told" || fail "watch alive notified: $(cat "$TMP/notify.txt")"
+FAKE_SESSION=gone run_g --watch >/dev/null; FAKE_SESSION=gone run_g --watch >/dev/null
+[ "$(wc -l < "$TMP/notify.txt" 2>/dev/null)" = 1 ] && grep -q "nightly-t" "$TMP/notify.txt" && grep -q "runner gone" "$TMP/notify.txt" \
+  && pass "--watch: dead → the lead is told once per run (run id and reason), not every 5 min" || fail "watch notify: $(cat "$TMP/notify.txt" 2>/dev/null)"
+# a send that fails writes no stamp, so the next tick tries again
+FAKE_SESSION=gone rec started "$OLD" "guard passed" '[{"repo":"a/x","status":"started"}]' "$(( NOWE + 3*3600 ))"; rm -f "$TMP/notify.txt" "$TMP/state/.watch-told-"*
+FAKE_NOTIFY_RC=1 FAKE_SESSION=gone run_g --watch >/dev/null
+s1=$(ls "$TMP/state/.watch-told-"* 2>/dev/null | wc -l)
+FAKE_SESSION=gone run_g --watch >/dev/null
+[ "$s1" = 0 ] && [ "$(wc -l < "$TMP/notify.txt")" = 2 ] && [ -e "$TMP/state/.watch-told-nightly-t" ] \
+  && pass "--watch: a failed send leaves no stamp; the next tick sends again and stamps" || fail "watch retry: s1=$s1 sends=$(wc -l < "$TMP/notify.txt")"
+# two watches at once send once (check, send and stamp under one lock)
+FAKE_SESSION=gone rec started "$OLD" "guard passed" '[{"repo":"a/x","status":"started"}]' "$(( NOWE + 3*3600 ))"; rm -f "$TMP/notify.txt" "$TMP/state/.watch-told-"*
+( FAKE_NOTIFY_SLEEP=2 FAKE_SESSION=gone run_g --watch >/dev/null ) & ( FAKE_NOTIFY_SLEEP=2 FAKE_SESSION=gone run_g --watch >/dev/null ) & wait
+[ "$(wc -l < "$TMP/notify.txt")" = 1 ] && pass "--watch: two concurrent watches send once" || fail "watch concurrent: $(wc -l < "$TMP/notify.txt") sends"
 
 [ ! -s "$TMP/launch-attempts.txt" ] && pass "no test attempted a real scope/tmux launch" || fail "a test reached the launch: $(head -3 "$TMP/launch-attempts.txt")"
 echo "─────────────────────────────────────────────────────────────────"

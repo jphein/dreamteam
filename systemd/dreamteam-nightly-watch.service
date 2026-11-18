@@ -1,0 +1,14 @@
+[Unit]
+Description=dreamteam nightly WATCH: republish CHECK nightly-guarded and tell the lead once when a started night is dead
+Documentation=https://github.com/jphein/dreamteam/blob/main/docs/CHECKS.md
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Projects/dreamteam
+Environment=CLAUDE_PLUGIN_ROOT=%h/Projects/dreamteam
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/bash %h/Projects/dreamteam/scripts/overnight-guarded.sh --watch
+# reads the guard record, probes one tmux session, maybe sends one raven message
+TimeoutStartSec=60
+MemoryMax=128M
+NoNewPrivileges=yes

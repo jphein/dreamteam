@@ -72,7 +72,7 @@ TMUX_SOCK="dreamteam-nightly"
 . "$ROOT/scripts/lib/check-line.sh"
 # Every nightly-guarded publication happens while holding state/.nightly-line.lock (REQUIRED: no lock, no line), so an
 # older reading never lands after a newer one. publish_nightly sets NIGHTLY_PUBLISHED to the exact text it published.
-NIGHTLY_LOCKFD=""; NIGHTLY_PUBLISHED=""
+NIGHTLY_LOCKFD=""; NIGHTLY_PUBLISHED=""; NIGHTLY_RID=""; NIGHTLY_DEC=""
 nightly_lock() {
   { exec {NIGHTLY_LOCKFD}>"$STATE/.nightly-line.lock"; } 2>/dev/null || { NIGHTLY_LOCKFD=""; return 1; }
   flock -w "${DREAMTEAM_LOCK_WAIT:-20}" "$NIGHTLY_LOCKFD" 2>/dev/null && return 0
@@ -94,7 +94,7 @@ guard_line() {
   if ! dec=$(jq -er '.decision' <<<"$snap" 2>/dev/null); then
     publish_nightly fail "no readable guard record ($g)"; nightly_unlock; return 0
   fi
-  rid=$(jq -r '.run_id // ""' <<<"$snap")
+  rid=$(jq -r '.run_id // ""' <<<"$snap"); NIGHTLY_RID="$rid" NIGHTLY_DEC="$dec"
   # the record's timestamp must be a real ISO time: GNU date reads "" as today's midnight, which would invent a night
   # and a fresh age for a record that has none
   local at at_s
@@ -132,6 +132,9 @@ guard_line() {
             ([ $exp[] as $r | ([ $runs[] | select(.repo == $r) ] | last | (.merged // []) | length) ] | add // 0) ]
         | @tsv' <<<"$snap" 2>/dev/null)
       read -r total fin stp skp prs mrg <<<"${counts:-0 0 0 0 0 0}"
+      # a runner killed by a signal (it recorded "runner killed (SIGx)" on the repo it was in): the night is dead
+      local killedwhy; killedwhy=$(jq -r --argjson exp "$exp" '[(.runs // [])[] | select(.repo as $r | $exp | index($r))
+        | (.reason // "") | strings | select(startswith("runner killed"))] | first // ""' <<<"$snap" 2>/dev/null | tr -cd 'A-Za-z0-9 ()' | cut -c1-40)
       fact="night $night: $rid, $(jq -r '.issues // 0' <<<"$snap") issue(s) in $total planned repo(s); finished $fin, stopped $stp, skipped $skp; PRs opened $prs, merged $mrg"
       if [ "${dl:-0}" -le 0 ] || [ "$total" -eq 0 ]; then
         st=fail; fact="$fact; no readable plan.json for $rid (cap and repos unknown)"
@@ -143,7 +146,30 @@ guard_line() {
         # still running: ok, unless a repo already stopped or was skipped (warn, naming it in the counts)
         [ $(( stp + skp )) -eq 0 ] && st=ok || st=warn
         fact="$fact; running until $(date -d "@$dl" +%H:%M)"
-      fi ;;
+        # ...and its runner must still be there (the watchdog's instrument; 11-16: dead at 23:41, FAIL only at 06:30).
+        # The runner lives in tmux session $rid on the night's own server. Not judged in the first 2 min (the launch is
+        # still starting). Only tmux's own "not there" answers mean gone; anything else is unmeasured, never ok.
+        if [ $(( now - at_s )) -gt 120 ]; then
+          # (xreview r1) the pane itself: the session holds exactly the runner's pane, and pane_dead says whether its
+          # process is gone (a session can outlive its process with remain-on-exit). Only "it is not there" answers
+          # mean gone: no such session, no server, or no socket file. Permission and other errors are unmeasured.
+          local pout perr prc
+          pout=$("${DREAMTEAM_TMUX_PROBE:-tmux}" -L "$TMUX_SOCK" list-panes -t "=$rid" -F '#{pane_dead}' 2>"$STATE/.probe.err"); prc=$?
+          perr=$(head -c 300 "$STATE/.probe.err" 2>/dev/null); rm -f "$STATE/.probe.err"
+          if [ "$prc" -eq 0 ] && [ "$pout" = 0 ]; then :
+          elif { [ "$prc" -eq 0 ] && grep -qx 1 <<<"$pout"; } \
+               || grep -qiE "can't find session|no server running|error connecting to [^ ]+ \(No such file or directory\)" <<<"$perr"; then
+            st=fail; fact="$fact; runner gone before its $(date -d "@$dl" +%H:%M) cap (no live runner pane in tmux session $rid)"
+          else
+            [ "$st" = ok ] && st=warn; fact="$fact; runner liveness unmeasured"
+          fi
+        fi
+      fi
+      # the run-level marker the runner's signal handler writes (independent of any repo record)
+      if [ -s "$STATE/overnight-runs/${rid//[^A-Za-z0-9-]/}/killed" ]; then
+        killedwhy="runner killed ($(head -c 20 "$STATE/overnight-runs/${rid//[^A-Za-z0-9-]/}/killed" | cut -d' ' -f1 | tr -cd 'A-Z'))"
+      fi
+      [ -n "$killedwhy" ] && { st=fail; fact="$fact; $killedwhy"; } ;;
     *) st=fail; fact="night $night: unknown decision '${dec//[^a-z-]/}'" ;;
   esac
   age=$(( now - at_s ))
@@ -380,11 +406,27 @@ run_runner() {
   # Pin any teammate a coordinator spawns to THIS scope: scope-attach.sh otherwise re-homes agent procs
   # into dreamteam-<repo>.scope, which has neither this night's aggregate cap nor its RuntimeMaxSec.
   export DREAMTEAM_SCOPE_NAME="dreamteam-$rid"
+  # ...and say the scope is not the coordinator's: its SessionEnd (cleanup-marker.sh) must never stop it. On 11-16 it
+  # did: tmux 3.6 had moved every pane into its own tmux-spawn scope, the night's scope looked empty, and stopping it
+  # killed the tmux server and this runner with it (23:41, no FINISHED line).
+  export DREAMTEAM_SCOPE_OWNED=1
+  # a trapped signal ends the night cleanly: the coordinator is stopped, its repo recorded, FINISHED written
+  # (xreview r1) the handler itself acts, so no window between checks can miss it: it writes the RUN-level marker
+  # $dir/killed (guard_line reads it: a killed night is FAIL whatever the repo records say) and TERMs the running
+  # coordinator's process group (timeout put itself in its own group, whose id is its pid).
+  RUNNER_SIG="" RUNNER_DIR="$dir" CPID=""
+  on_runner_signal() {
+    [ -n "$RUNNER_SIG" ] || { RUNNER_SIG="$1"; printf 'SIG%s %s\n' "$1" "$(date -Iseconds)" > "$RUNNER_DIR/killed" 2>/dev/null; }
+    # the group, or (in the instant before timeout has made its own group) the pid itself
+    [ -n "$CPID" ] && { kill -TERM -- "-$CPID" 2>/dev/null || kill -TERM "$CPID" 2>/dev/null; }
+  }
+  trap 'on_runner_signal HUP' HUP; trap 'on_runner_signal TERM' TERM; trap 'on_runner_signal INT' INT
   local real_gh; real_gh=$(command -v gh 2>/dev/null || echo /usr/bin/gh)
   local watch="${DREAMTEAM_WATCH_SEC:-600}"
   local done_n=0 results='[]' stop_reason="" i
   for ((i=0; i<n; i++)); do
     local r name pr_only issues left
+    if [ -n "$RUNNER_SIG" ]; then stop_reason="runner killed (SIG$RUNNER_SIG)"; log "runner $rid: $stop_reason"; break; fi
     r=$(jq -c ".repos[$i]" "$plan"); name=$(jq -r .name <<<"$r"); pr_only=$(jq -r .pr_only <<<"$r")
     left=$(( deadline - $(date +%s) ))
     if [ "$left" -lt $(( MIN_REPO_MIN * 60 )) ]; then stop_reason="the $stop_words cap: ${left}s left"; log "runner $rid: stop before $name — $stop_reason"; break; fi
@@ -419,18 +461,49 @@ Stop by $stop_words (the 07:03 briefing reads what you leave). Do not speak alou
 End your reply with ONE line: SWEEP-RESULT {\"opened\":[N, ...PRs this run opened],\"fixed\":[{\"repo\":\"owner/name\",\"number\":N,\"pr\":N,\"sha\":\"<merge sha or empty>\"}],\"reviewed_not_merged\":[{\"repo\":\"owner/name\",\"pr\":N}],\"too_large\":[{\"repo\":\"owner/name\",\"number\":N}]}"
     log "runner $rid: start $name (pr_only=$pr_only, $(jq length <<<"$issues") issue(s), ${left}s to cap)"
     repo_rec "$rid" "$(jq -r .repo <<<"$r")" "$(jq -nc --arg t "$(date -Iseconds)" '{status:"started", started_at:$t}')"
-    ( cd "$clone" && PATH="$cpath" exec timeout -k 60 "$left" "$claude_bin" -p "$prompt" --dangerously-skip-permissions --output-format json ) \
+    # CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0: print mode waits for the coordinator's own background Workflow instead of
+    # killing it 10 min after the turn ends (11-16: "Background tasks still running 10m after the last turn … stopping
+    # them"); `timeout` still ends the run at the cap.
+    ( cd "$clone" && PATH="$cpath" CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 exec timeout -k 60 "$left" "$claude_bin" -p "$prompt" --dangerously-skip-permissions --output-format json ) \
       > "$dir/$name.json" 2> "$dir/$name.err" &
-    local cpid=$! tick=0 killed=""
+    local cpid=$! tick=0 killed=""; CPID=$cpid
     # watchdog: re-probe the pool while the coordinator spends from it; under the floor → TERM it
     # (timeout forwards TERM to claude). One-second ticks so a finished run is noticed at once.
     while kill -0 "$cpid" 2>/dev/null; do
       sleep 1; tick=$((tick+1))
+      if [ -n "$RUNNER_SIG" ]; then log "runner $rid: SIG$RUNNER_SIG — stopping $name"; break; fi
       if [ $((tick % watch)) -eq 0 ] && kill -0 "$cpid" 2>/dev/null && ! quota_ok "$CONT_MIN"; then
         log "runner $rid: stopping $name mid-run — $QREASON"; killed="$QREASON"; kill -TERM "$cpid" 2>/dev/null; break
       fi
     done
-    wait "$cpid"; local rc=$?
+    # (xreview r2) after a signal, stop the coordinator's WHOLE group, bounded, BEFORE any blocking wait: TERM the
+    # group (or the pid, in the instant before timeout has made its group; a signal that landed between the launch
+    # and CPID's assignment is caught here too), wait up to the grace for every member, then KILL what is left. A
+    # teammate that ignores TERM is a group member, so it goes too.
+    # (xreview r3) every wait is re-checked: a signal at ANY point (before the wait, during it, after a quota stop)
+    # sends the loop through the bounded group stop; once the leader has exited, a final stop sweeps members it left.
+    stop_group() { # pgid: TERM the group (or the pid), up to the grace for every member, then KILL; idempotent
+      local g="$1" w=0 grace="${DREAMTEAM_STOP_GRACE:-60}"
+      { kill -0 -- "-$g" 2>/dev/null || kill -0 "$g" 2>/dev/null; } || return 0
+      kill -TERM -- "-$g" 2>/dev/null || kill -TERM "$g" 2>/dev/null
+      while { kill -0 -- "-$g" 2>/dev/null || kill -0 "$g" 2>/dev/null; } && [ "$w" -lt "$grace" ]; do sleep 1; w=$((w+1)); done
+      if kill -0 -- "-$g" 2>/dev/null || kill -0 "$g" 2>/dev/null; then
+        log "runner $rid: $name's group did not stop in ${grace}s; KILL"
+        kill -KILL -- "-$g" 2>/dev/null; kill -KILL "$g" 2>/dev/null
+      fi
+    }
+    local rc=0
+    while :; do
+      [ -n "$RUNNER_SIG" ] && stop_group "$cpid"
+      wait "$cpid"; rc=$?
+      kill -0 "$cpid" 2>/dev/null || break
+    done
+    # hand-off closed (xreview r4): the handler stops acting on this group first, then the saved group is swept
+    # UNCONDITIONALLY (a normal finish too: nothing of a finished coordinator may keep running). A signal from here on
+    # finds the group already being swept, or empty.
+    CPID=""
+    [ -n "${DREAMTEAM_TEST_TAIL_PAUSE:-}" ] && { : > "$DREAMTEAM_TEST_TAIL_PAUSE"; sleep 2; }   # tests only: the race window
+    stop_group "$cpid"
     log "runner $rid: $name finished rc=$rc"
     local repo_full; repo_full=$(jq -r .repo <<<"$r")
     local line; line=$(jq -r '.result // empty' "$dir/$name.json" 2>/dev/null | grep -o 'SWEEP-RESULT {.*}' | tail -n1 | sed 's/^SWEEP-RESULT //')
@@ -456,12 +529,15 @@ End your reply with ONE line: SWEEP-RESULT {\"opened\":[N, ...PRs this run opene
     local st=finished why=""
     [ -n "$killed" ] && { st=stopped; why="watchdog: $killed"; }
     [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] && [ -z "$killed" ] && { st=stopped; why="the $stop_words cap (timeout)"; }
+    # last: a trapped signal is why the coordinator stopped, whatever its exit (timeout's 124 after our TERM included)
+    [ -n "$RUNNER_SIG" ] && { st=stopped; why="runner killed (SIG$RUNNER_SIG)"; }
     repo_rec "$rid" "$repo_full" "$(jq -nc --arg t "$(date -Iseconds)" --arg s "$st" --arg why "$why" --argjson rc "$rc" --argjson p "$prs" --argjson m "$merged" --argjson v "$reviewed" '{status:$s, reason:$why, finished_at:$t, rc:$rc, prs_opened:$p, merged:$m, prs_reviewed:$v}')"
     done_n=$((done_n+1))
     jq --arg r "$(jq -r .repo <<<"$r")" --arg t "$(date -Iseconds)" '.[$r]=$t' "$STATE/overnight-rotation.json" 2>/dev/null > "$STATE/overnight-rotation.json.tmp" \
       || jq -n --arg r "$(jq -r .repo <<<"$r")" --arg t "$(date -Iseconds)" '{($r):$t}' > "$STATE/overnight-rotation.json.tmp"
     mv -f "$STATE/overnight-rotation.json.tmp" "$STATE/overnight-rotation.json"
     [ "$line" = '{}' ] || results=$(jq -c --argjson x "$line" '. + [$x]' <<<"$results")
+    if [ -n "$RUNNER_SIG" ]; then stop_reason="runner killed (SIG$RUNNER_SIG)"; i=$((i+1)); break; fi
   done
   # repos never reached: a skipped line each, with the reason the night stopped
   if [ -n "$stop_reason" ]; then
@@ -472,6 +548,7 @@ End your reply with ONE line: SWEEP-RESULT {\"opened\":[N, ...PRs this run opene
       repo_rec "$rid" "$rj" "$(jq -nc --arg why "$stop_reason" '{status:"skipped", reason:$why}')"
     done
   fi
+  [ -n "$RUNNER_SIG" ] && [ -z "$stop_reason" ] && stop_reason="runner killed (SIG$RUNNER_SIG)"
   # fold the per-repo results into the night's sweep-results.json
   local sw; sw=$(jq -c --argjson rs "$results" '
       .fixed = ([$rs[].fixed // [] | .[]]) | .reviewed_not_merged = ([$rs[].reviewed_not_merged // [] | .[]])
@@ -486,11 +563,29 @@ if [ "${1:-}" = "--check-line" ]; then
   guard_line; [ -n "$NIGHTLY_PUBLISHED" ] && printf '%s\n' "$NIGHTLY_PUBLISHED"
   exit 0
 fi
+if [ "${1:-}" = "--watch" ]; then
+  # the watchdog timer (dreamteam-nightly-watch.timer, every 5 min through the night): republish the line, and tell
+  # the lead ONCE per run when a started night reads fail (DREAMTEAM_NOTIFY_CMD <text>; default: raven mail to sen).
+  # A send that fails is retried on the next tick; the stamp is written only after a send succeeded.
+  guard_line
+  case "$NIGHTLY_PUBLISHED" in "CHECK nightly-guarded fail · "*)
+    # the run id and decision of the SAME locked snapshot the line came from; check, send and stamp under one lock, so
+    # two watches cannot both send. A crash between a delivered send and the stamp can still repeat the notice.
+    wrid=$(printf '%s' "$NIGHTLY_RID" | tr -cd 'A-Za-z0-9-')
+    exec {WATCHFD}>"$STATE/.watch.lock" && flock -w 30 "$WATCHFD" || { log "watch: lock not taken; not sent"; exit 0; }
+    if [ "$NIGHTLY_DEC" = started ] && [ -n "$wrid" ] && [ ! -e "$STATE/.watch-told-$wrid" ]; then
+      msg="dreamteam nightly $wrid is dead: $NIGHTLY_PUBLISHED"
+      if [ -n "${DREAMTEAM_NOTIFY_CMD:-}" ]; then "$DREAMTEAM_NOTIFY_CMD" "$msg"; else "$HOME/.local/bin/raven" send --as agent-familiar sen "$msg"; fi >/dev/null 2>&1 \
+        && : > "$STATE/.watch-told-$wrid" && log "watch: told the lead $wrid is dead" || log "watch: could not tell the lead $wrid is dead (retry next tick)"
+    fi ;;
+  esac
+  exit 0
+fi
 if [ "${1:-}" = "--runner" ]; then
   [ -n "${2:-}" ] || { echo "usage: overnight-guarded.sh --runner RUN_DIR" >&2; exit 2; }
   run_runner "$2"; exit 0
 fi
-[ -z "${1:-}" ] || { echo "usage: overnight-guarded.sh [--runner RUN_DIR | --check-line]" >&2; exit 2; }
+[ -z "${1:-}" ] || { echo "usage: overnight-guarded.sh [--runner RUN_DIR | --check-line | --watch]" >&2; exit 2; }
 
 # ════════════════════════════════ GUARD ════════════════════════════════
 NOW_ISO=$(date -Iseconds)

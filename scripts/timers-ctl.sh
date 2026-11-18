@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # dreamteam — timer control (issues #12–#15): install/manage the user timers.
 #
-#   timers-ctl.sh install     # link the 6 units (retiring the 02:11 pilot pair) into the user manager, enable+start the timers
+#   timers-ctl.sh install     # link the 8 units (retiring the 02:11 pilot pair) into the user manager, enable+start the timers
 #   timers-ctl.sh uninstall   # disable+stop the timers, unlink the units
 #   timers-ctl.sh retire-pilot [--retired-on YYYY-MM-DD]  # on THIS host: disable --now the 02:11 pilot pair if
 #                               # systemd still has it, unlink it; --retired-on records an earlier retirement of an
 #                               # absent pilot (a real, non-future date) so its CHECK line says when
 #                               # (host-local and idempotent; run it on every host that ever had the pilot)
-#   timers-ctl.sh start|stop  # start/stop all three timers
+#   timers-ctl.sh start|stop  # start/stop all four timers
 #   timers-ctl.sh status      # list-timers + per-unit is-active
 #   timers-ctl.sh logs [N]    # last N journal lines per service (default 20)
 #
@@ -15,15 +15,15 @@
 # truth) and are symlinked into ~/.config/systemd/user; install falls back to a
 # copy if linking isn't available. Mirrors dashboard-ctl.sh (issue #11).
 # NOTE: luna owns dreamteam-dashboard.service in systemd/ — this touches only the
-# dreamteam-{briefing,audit,nightly-guarded} pairs.
+# dreamteam-{briefing,audit,nightly-guarded,nightly-watch} pairs.
 set -uo pipefail
 ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 USER_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 
 # ONE nightly start: the guarded 23:30 pair (JP's 2026-11-14 "go"). The 02:11 PILOT pair
 # (dreamteam-nightly.*) is no longer installed; `uninstall` and `install` both retire it if found.
-TIMERS="dreamteam-briefing.timer dreamteam-audit.timer dreamteam-nightly-guarded.timer"
-SERVICES="dreamteam-briefing.service dreamteam-audit.service dreamteam-nightly-guarded.service"
+TIMERS="dreamteam-briefing.timer dreamteam-audit.timer dreamteam-nightly-guarded.timer dreamteam-nightly-watch.timer"
+SERVICES="dreamteam-briefing.service dreamteam-audit.service dreamteam-nightly-guarded.service dreamteam-nightly-watch.service"
 RETIRED="dreamteam-nightly.timer dreamteam-nightly.service"
 UNITS="$TIMERS $SERVICES"
 

@@ -127,6 +127,27 @@ the clone's real default branch (`origin/HEAD`) and main/master/trunk/production
    - The 07:03 `morning-briefing.sh` adds a "Nightly sweep" line with one clause per repo (status, PRs opened,
      merged, reason), and a started run counts as overnight activity.
 
+## The 2026-11-16 night, and the watch
+
+The first guarded night (`nightly-20261116-233001`) died at 23:41, 11 minutes in, with one repo begun and no FINISHED
+line. Three things lined up:
+
+1. The mempalace coordinator started its Workflow in the background and ended its turn ("the harness will re-invoke
+   me"). In `-p` mode nothing re-invokes it: print mode killed the workflow 10 minutes later and exited with no
+   SWEEP-RESULT. The coordinator now runs with `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0`, so it waits for its own
+   workflow; `timeout` still ends it at the cap.
+2. Its SessionEnd hook (`cleanup-marker.sh`) was given `DREAMTEAM_SCOPE_NAME=dreamteam-<run id>`, found no claude
+   process in that scope, and stopped it. The scope was not empty: it held the night's tmux server. tmux 3.6 moves
+   every new pane into its own `tmux-spawn-*.scope`, so no claude process ever lives in the night's scope. Stopping
+   it killed the tmux server, and the runner died of SIGHUP before it could write anything. `cleanup-marker.sh` now
+   never stops a `dreamteam-nightly-*` scope, nor one marked `DREAMTEAM_SCOPE_OWNED=1` (the runner sets both).
+3. Nothing noticed until the 07:03 briefing re-read the line after the cap.
+
+Now the runner traps HUP, TERM and INT: it stops the coordinator, records `runner killed (SIGx)` on its repo, and
+writes FINISHED. That line is FAIL. `dreamteam-nightly-watch.timer` runs `--watch` every 5 minutes from 23:35 to
+07:00. It republishes the line, and a started night whose tmux session is gone before its cap is FAIL at once (SIGKILL
+cannot be trapped; this is the net for it). The first FAIL for a run is sent to the lead once (raven mail to sen).
+
 ## Running it by hand
 
 ```bash
@@ -149,11 +170,15 @@ A dry run writes the guard record in `state/` and never publishes to the plan.
   - prompts that fence issue text as untrusted data;
   - the read-only oracle review;
   - PR-only by default, with the allowlist shim and the pre-push hook;
-  - the memory and runtime caps.
+  - the memory and runtime caps (nominal under tmux 3.6, see below).
 
   Branch protection, or a token without merge rights on production repos, is still the real boundary. It is not
   checked by this code.
 
+- **The memory and runtime caps are nominal (found 2026-11-17).** tmux 3.6 moves the runner's pane, and so every
+  coordinator and teammate under it, into its own `tmux-spawn-*.scope`. The night's scope (MemoryHigh/Max/SwapMax,
+  RuntimeMaxSec) then holds only the tmux server. The 11-16 run peaked at 3.3 GB outside it. The `timeout` cap per
+  coordinator still holds. Tracked as its own issue.
 - The seat-point cost per night is not measured yet. The continuation floor (0.40) and the three-repo cap bound it;
   the card's "about 50" is an estimate.
 - A plan.realm.watch `MODES` entry for `guarded` is still needed for the "next sweep" chip to show the mode. Until
