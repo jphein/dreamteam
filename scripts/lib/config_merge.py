@@ -15,6 +15,7 @@ unreadable, is {} (every reader then uses its baked defaults). The overlay is de
 recursively, anything else is replaced. The host: DREAMTEAM_HOST, else the short hostname, lower-cased, and it must then
 match ^[a-z0-9][a-z0-9-]{0,62}$ as is (never cleaned into another host's name); an invalid name takes no overlay.
 """
+import decimal
 import json
 import os
 import re
@@ -32,10 +33,28 @@ def _reject_constant(name):
     raise ValueError(f"non-JSON constant {name}")
 
 
+def _exact_number(lit):
+    """A JSON number with a fraction or an exponent, decided EXACTLY from its literal (xreview #230 r8):
+    an integral value becomes an exact int (7.5e2 → 750, -0.0 → 0); a magnitude beyond 10^18, or below 10^-18, makes the
+    file invalid (1e400 never becomes Infinity, and 1e400000000 is never built into an int); a non-integral value that a binary float would round to an integer (-1e-400 → -0.0, 3000.0000000000000001
+    → 3000.0) makes the file invalid; any other fraction stays a float (the quota thresholds such as 0.70 need it)."""
+    d = decimal.Decimal(lit)
+    if not d.is_finite():
+        raise ValueError(f"non-finite number {lit}")
+    if d != 0 and abs(d.adjusted()) > 18:   # beyond 64-bit magnitude (or a vanishing fraction): never built into an int
+        raise ValueError(f"number {lit} is out of range")
+    if d == d.to_integral_value():
+        return int(d)
+    f = float(lit)
+    if f != f or f in (float("inf"), float("-inf")) or f.is_integer():
+        raise ValueError(f"number {lit} is not exactly what a float would read")
+    return f
+
+
 def load_object(path):
     """The file's single JSON object, or raise."""
     with open(path, encoding="utf-8") as f:
-        v = json.load(f, parse_constant=_reject_constant)
+        v = json.load(f, parse_constant=_reject_constant, parse_float=_exact_number)
     if not isinstance(v, dict):
         raise ValueError("not an object")
     return v

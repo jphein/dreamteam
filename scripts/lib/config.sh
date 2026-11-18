@@ -6,9 +6,11 @@
 #                                  is never "cleaned" into another host's name (fami_liar must not become familiar); it
 #                                  prints nothing, and no overlay applies. tests/run.sh pins DREAMTEAM_HOST=dreamteam-test.
 #   dreamteam_config <config.json> the config as ONE JSON object on stdout: <config.json> deep-merged (jq `*`) with
-#                                  config.<host>.json beside it. Each file must hold exactly one JSON object. An overlay that
-#                                  is not that is ignored (the base, the stricter shared floors, applies); a base that is
-#                                  not that gives "{}" (every reader then uses its baked defaults, as before).
+#                                  config.<host>.json beside it, parsed by scripts/lib/config_merge.py (the one parser).
+#                                  rc 3 when this host's overlay EXISTS but is not one strict-JSON object: callers MUST
+#                                  treat the config as invalid (block / hold / report), never fall back to the base, whose
+#                                  floors may be looser or absent. A base that is not one object gives "{}" (every reader
+#                                  then uses its baked defaults, as before).
 #   dreamteam_uint <value> <max>   rc 0 when <value> is a decimal integer 0..max (no sign, no exponent, no fraction): used
 #                                  for MEASURED numbers (free -m). Config numbers go through dreamteam_int (policy below).
 dreamteam_host() {

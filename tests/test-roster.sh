@@ -187,12 +187,18 @@ for v in -0 -0.0 -0e2; do
   ge=$(printf '%s' '{"tool_name":"Agent"}' | DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=negzero CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$GATE" 2>&1)
   [ $brc = 0 ] && [ "$d" = $'\t0' ] && [[ "$ge" != *"not an integer"* ]] && pass "negative zero ($v) is 0 in all three readers" || fail "negzero $v: budget=$brc dashboard='$d' gate='$(head -c 90 <<<"$ge")'"
 done
+# a huge exponent, even in a key no reader uses: the file is invalid for every reader, and nothing ever carries Infinity
+# or builds a gigantic int (1e400000000 returns at once)
+printf '%s\n' '{"memory":{"someUnusedKey":1e400000000}}' > "$OVR/config.bigunused.json"
+out=$(DREAMTEAM_HOST=bigunused timeout 5 python3 -I "$ROOT/scripts/lib/config_merge.py" "$OVR/config.json"); rc=$?
+b=$(DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=bigunused CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$BUD" 2>&1); brc=$?
+[ $rc = 3 ] && [[ "$out" != *Infinity* ]] && jq -e . <<<"$out" >/dev/null && [ $brc = 2 ] && pass "1e400000000 in an unused key: invalid file (rc 3, at once), strict JSON out, mem-budget CONFIG INVALID" || fail "bigunused: rc=$rc brc=$brc out=$(head -c 80 <<<"$out")"
 # the scope exemption never hides an invalid config: scopeToDreamteam true, no active team, an invalid .local → exit 2
 printf '%s\n' '{"memory":{"scopeToDreamteam":true},"local":[]}' > "$OVR/config.scopebad.json"
 printf '%s' '{"tool_name":"Agent"}' | DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=scopebad DREAMTEAM_STATE="$TMP/no-active" CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$GATE" >/dev/null 2>&1; grc=$?
 b=$(DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=scopebad CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$BUD" 2>&1); brc=$?
 [ $grc = 2 ] && [ $brc = 2 ] && pass "scope exemption + invalid .local: the gate blocks (exit 2) as mem-budget reports" || fail "scope+badlocal: gate=$grc budget=$brc"
-for c in 'leadzero|{"memory":{"minAvailableMB":03000}}' 'nan|{"memory":{"minAvailableMB":NaN}}' 'null|null' 'localfalse|{"local":false}' 'localarr|{"local":[]}' 'memlist|{"memory":[]}' 'peragent0|{"memory":{"perAgentMB":0}}' 'peragent|{"memory":{"perAgentMB":"x"}}' 'memory|{"memory":{"minSwapFreeMB":false}}' 'local|{"local":{"enabled":true,"reserveMB":"1e4"}}' 'enabled|{"local":{"enabled":"yes"}}' 'trunc|{"memory":'; do
+for c in 'underflow|{"memory":{"minSwapFreeMB":-1e-400}}' 'nearint|{"memory":{"minAvailableMB":3000.0000000000000001}}' 'bigexp|{"memory":{"minAvailableMB":1e400}}' 'leadzero|{"memory":{"minAvailableMB":03000}}' 'nan|{"memory":{"minAvailableMB":NaN}}' 'null|null' 'localfalse|{"local":false}' 'localarr|{"local":[]}' 'memlist|{"memory":[]}' 'peragent0|{"memory":{"perAgentMB":0}}' 'peragent|{"memory":{"perAgentMB":"x"}}' 'memory|{"memory":{"minSwapFreeMB":false}}' 'local|{"local":{"enabled":true,"reserveMB":"1e4"}}' 'enabled|{"local":{"enabled":"yes"}}' 'trunc|{"memory":'; do
   n=${c%%|*}; printf '%s
 ' "${c#*|}" > "$OVR/config.inv$n.json"
   b=$(DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=inv$n CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$BUD" 2>&1); brc=$?
