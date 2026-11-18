@@ -78,37 +78,11 @@ def run(cmd, cwd=None, timeout=15):
         return ""
 
 # ── config (same keys/defaults as mem-budget.sh) ───────────────────────────
-_full_cfg = {}
-try: _full_cfg = json.load(open(CFG))
-except Exception: _full_cfg = {}
-if not isinstance(_full_cfg, dict): _full_cfg = {}
-# this host's overlay, config.<host>.json beside it, deep-merged over it: the same rule as scripts/lib/config.sh
-# (jq `*`: objects merge recursively, anything else is replaced); an overlay that does not parse is ignored
-def _host():  # the SAME rule as scripts/lib/config.sh: validated as is, never cleaned into another name
-    h = os.environ.get("DREAMTEAM_HOST") or socket.gethostname().split(".")[0]
-    h = h.lower()
-    return h if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", h) else ""
-def _deep(a, b):
-    if isinstance(a, dict) and isinstance(b, dict):
-        out = dict(a)
-        for k, v in b.items(): out[k] = _deep(a[k], v) if k in a else v
-        return out
-    return b
-_ov = None
-CONFIG_ERROR = ""   # set when the config the gate reads is invalid: the gate then blocks every spawn (xreview #230 r3)
-if _host():
-    _ov_path = (CFG[:-5] if CFG.endswith(".json") else CFG) + "." + _host() + ".json"
-    try:
-        _exists = os.path.lexists(_ov_path)                    # lexists: a dangling link is an unreadable overlay
-        _ov = json.load(open(_ov_path)) if _exists else None   # json.load: exactly one document
-    except Exception:
-        _ov = None
-        CONFIG_ERROR = "this host's overlay exists but is not one readable JSON object"
-    else:
-        if _exists and not isinstance(_ov, dict):              # null, a list, a number: not one object
-            _ov = None
-            CONFIG_ERROR = "this host's overlay exists but is not one readable JSON object"
-if isinstance(_ov, dict): _full_cfg = _deep(_full_cfg, _ov)
+# the config with this host's overlay: the ONE parser every reader uses (scripts/lib/config_merge.py; xreview #230 r7)
+import sys as _sys
+_sys.path.insert(0, os.path.join(os.environ["DT_ROOT"], "scripts", "lib"))
+import config_merge as _cm
+_full_cfg, CONFIG_ERROR = _cm.load(CFG)
 cfg       = _full_cfg.get("memory", {})
 if "memory" in _full_cfg and not isinstance(_full_cfg["memory"], dict):
     CONFIG_ERROR = CONFIG_ERROR or "memory is not an object"; cfg = {}

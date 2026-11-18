@@ -17,23 +17,11 @@ dreamteam_host() {
   h=$(printf '%s' "$h" | tr '[:upper:]' '[:lower:]')
   [[ "$h" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] && printf '%s' "$h"
 }
-_dreamteam_one_object() { # file → its single object, compact, or rc 1
-  local o; o=$(jq -cs 'if length == 1 and (.[0] | type) == "object" then .[0] else error("not one object") end' "$1" 2>/dev/null) \
-    && [ -n "$o" ] && printf '%s' "$o"
-}
-dreamteam_config() { # rc 0 ok (with or without an overlay); rc 3 = this host's overlay EXISTS but is not one
-  # readable JSON object: the base is printed, but callers must treat it as invalid (block / hold / report), because
-  # the overlay may hold floors the base does not have at all (xreview #230 r3: a truncated config.familiar.json must
-  # not drop familiar to the base's lane/nightly/swap floors of 0)
-  local base="$1" host b o ov
-  b=$(_dreamteam_one_object "$base") || b='{}'
-  host=$(dreamteam_host)
-  ov="${base%.json}.$host.json"
-  if [ -n "$host" ] && { [ -e "$ov" ] || [ -L "$ov" ]; }; then   # -L: a dangling link is an overlay that cannot be read
-    if o=$(_dreamteam_one_object "$ov") && jq -cn --argjson b "$b" --argjson o "$o" '$b * $o' 2>/dev/null; then return 0; fi
-    printf '%s\n' "$b"; return 3
-  fi
-  printf '%s\n' "$b"
+dreamteam_config() { # rc 0 ok (with or without an overlay); rc 3 = this host's overlay EXISTS but is not one strict-JSON
+  # object (the base is printed; callers must treat it as invalid: the overlay may hold floors the base does not have);
+  # any other non-zero = the parser could not run (callers: invalid). ONE parser for every reader: config_merge.py
+  # (xreview #230 r7: jq and Python disagreed on what a file says, e.g. 03000).
+  python3 -I "$(dirname "${BASH_SOURCE[0]}")/config_merge.py" "$1" 2>/dev/null
 }
 dreamteam_uint() { [[ "$1" =~ ^[0-9]{1,9}$ ]] && [ "$((10#$1))" -le "$2" ]; }
 # dreamteam_int <json> <section> <key> <default>: the integer (absent → default); rc 2 with the reason on stderr when it

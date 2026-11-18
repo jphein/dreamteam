@@ -192,7 +192,7 @@ printf '%s\n' '{"memory":{"scopeToDreamteam":true},"local":[]}' > "$OVR/config.s
 printf '%s' '{"tool_name":"Agent"}' | DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=scopebad DREAMTEAM_STATE="$TMP/no-active" CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$GATE" >/dev/null 2>&1; grc=$?
 b=$(DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=scopebad CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$BUD" 2>&1); brc=$?
 [ $grc = 2 ] && [ $brc = 2 ] && pass "scope exemption + invalid .local: the gate blocks (exit 2) as mem-budget reports" || fail "scope+badlocal: gate=$grc budget=$brc"
-for c in 'null|null' 'localfalse|{"local":false}' 'localarr|{"local":[]}' 'memlist|{"memory":[]}' 'peragent0|{"memory":{"perAgentMB":0}}' 'peragent|{"memory":{"perAgentMB":"x"}}' 'memory|{"memory":{"minSwapFreeMB":false}}' 'local|{"local":{"enabled":true,"reserveMB":"1e4"}}' 'enabled|{"local":{"enabled":"yes"}}' 'trunc|{"memory":'; do
+for c in 'leadzero|{"memory":{"minAvailableMB":03000}}' 'nan|{"memory":{"minAvailableMB":NaN}}' 'null|null' 'localfalse|{"local":false}' 'localarr|{"local":[]}' 'memlist|{"memory":[]}' 'peragent0|{"memory":{"perAgentMB":0}}' 'peragent|{"memory":{"perAgentMB":"x"}}' 'memory|{"memory":{"minSwapFreeMB":false}}' 'local|{"local":{"enabled":true,"reserveMB":"1e4"}}' 'enabled|{"local":{"enabled":"yes"}}' 'trunc|{"memory":'; do
   n=${c%%|*}; printf '%s
 ' "${c#*|}" > "$OVR/config.inv$n.json"
   b=$(DREAMTEAM_CONFIG="$OVR/config.json" DREAMTEAM_HOST=inv$n CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$TMP/ovbin:$PATH" bash "$BUD" 2>&1); brc=$?
