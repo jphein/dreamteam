@@ -77,6 +77,33 @@ check "$(claim gpu1:0 --lane drift-gems --until 2h --peak-ram 5356 --peak-vram 3
 check "$(claim gpu1:1 --lane morpheus-gems --until 2h --peak-ram 5356 --peak-vram 3000)" 75 "pair rule: a 5.23 GiB pair is REFUSED (the 19:29:47 OOM kill)"
 out=$(G "$ORCH" claim gpu1:1 --lane morpheus-gems --until 2h --peak-ram 5356 --peak-vram 3000 2>&1)
 case "$out" in *"rule 7"*) pass "the pair refusal cites FAMILIAR-RULES rule 7" ;; *) fail "pair refusal text: $out" ;; esac
+# ── 2b. #241: a host that also runs lanes (gpu0, gpu1) subtracts the LIVE lane footprint from the pair limit ──
+#        (Sen 2026-11-17 20:56, option b): the lane floor keeps a lane from starting beside a pair, but nothing kept a
+#        pair from being admitted beside a running lane, because the pair rule budgets a fixed number. The probe's LANE
+#        line is the RSS of every claude process and its descendants on the host; the ssh stub serves it canned.
+fresh; probe_fixture gpu1 1 0 10240; echo "LANE,1024000" >> "$PROBES/gpu1.probe"     # a lane holding 1000 MB
+check "$(claim gpu1:0 --lane drift-gems --until 2h --peak-ram 4322 --peak-vram 3000)" 0 "lane footprint: one 46-band run still fits beside a 1000 MB lane (4322 + 1536 <= 10444 - 1000)"
+check "$(claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 4322 --peak-vram 3000)" 75 "lane footprint (#241): a running lane of 1000 MB turns the fitting 46-band pair into a refusal (10180 > 9444)"
+out=$(G "$ORCH" claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 4322 --peak-vram 3000 2>&1)
+case "$out" in *"lane footprint"*"1000 MB"*) pass "the refusal names the live lane footprint" ;; *) fail "lane refusal text: $out" ;; esac
+check "$(claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 2878 --peak-vram 3000)" 0 "lane footprint: a 2.81 GiB second run fits beside the lane (4322 + 2878 + 1536 = 8736 <= 9444)"
+fresh; probe_fixture gpu1 1 0 10240; echo "LANE,0" >> "$PROBES/gpu1.probe"            # lanes idle: nothing subtracted
+check "$(claim gpu1:0 --lane drift-gems --until 2h --peak-ram 4322 --peak-vram 3000)" 0 "lane footprint 0: the first run"
+check "$(claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 4322 --peak-vram 3000)" 0 "lane footprint 0: the 46-band pair fits as before (no lane running)"
+fresh; rm -f "$PROBES/gpu1.probe"                                                     # the host asleep: unreadable, static rule
+check "$(claim gpu1:0 --lane drift-gems --until 2h --peak-ram 4322 --peak-vram 3000)" 0 "lane footprint unreadable (asleep): the first run"
+check "$(claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 4322 --peak-vram 3000)" 0 "lane footprint unreadable (asleep): the static pair rule alone admits the pair"
+out=$(G "$ORCH" claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 4322 --peak-vram 3000 --dry-run 2>&1)
+case "$out" in *"lane footprint"*"unreadable"*) pass "an unreadable footprint is SAID, not silently zero" ;; *) fail "asleep footprint text: $out" ;; esac
+fresh; probe_fixture gpu1 1 0 10240                                                  # an older probe with no LANE line: static rule, said
+check "$(claim gpu1:0 --lane drift-gems --until 2h --peak-ram 4322 --peak-vram 3000)" 0 "no LANE line: the first run"
+check "$(claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 4322 --peak-vram 3000)" 0 "no LANE line: the static pair rule admits the pair"
+# admit (the run's own recheck of a peak above its claim) applies the same subtraction
+fresh; probe_fixture gpu1 1 0 10240; echo "LANE,1024000" >> "$PROBES/gpu1.probe"
+claim gpu1:0 --lane drift-gems --until 2h --peak-ram 2878 --peak-vram 3000 >/dev/null
+claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 2878 --peak-vram 3000 >/dev/null
+check "$(rc G drift-gems@team admit --card gpu1:0 --peak-ram 5500)" 75 "admit (#241): a run peak above its claim is refused beside the lane (5500 + 2878 + 1536 = 9914 > 9444; it fit the static 10444)"
+probe_fixture gpu1 1 0 10240                                                          # restore the plain fixture for the sections below
 fresh
 check "$(claim gpu0:0 --lane nebula-gems --until 2h --peak-ram 3277 --peak-vram 1400)" 0 "gpu0: a DEM3 run (3.2 GB, 1.4 GiB VRAM)"
 check "$(claim gpu0:0 --lane drift-gems --until 2h --peak-ram 3277 --peak-vram 1400)" 0 "gpu0: a DEM3 pair SHARES its one card (RAM 8090 <= idle MemAvailable 9500; VRAM 2800 <= 3072)"

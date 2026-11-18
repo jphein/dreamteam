@@ -115,6 +115,12 @@ Every job prints its measured peak, and the claim is updated from it.
   needed" [rule].
 - The limit is keyed to the host's measured **idle MemAvailable**, not its total (drift-gems, 09-29): gpu1 10.2 GiB
   (10444 MiB); gpu0 about 9.5 GB. gpu0 has 11941 MB, but services hold about 2.4 GB.
+- **A host that also runs lanes subtracts the live lane footprint from that limit** (#241, Sen 2026-11-17 20:56,
+  option b; `lanes: true` on gpu0 and gpu1 in fleet.json). The lane floor (`minAvailableMB`) keeps a lane from
+  starting beside a pair; this keeps a pair from being admitted beside a running lane, which a fixed limit never saw.
+  The probe's `LANE` line is the RSS of every `claude` process and its descendants on the host; `claim` and `admit`
+  print `limit 10444 MB - lane footprint N MB = …` and refuse on the difference. An unreadable footprint (asleep, an
+  older probe) is printed and counts 0: the static rule still applies. Pinned by test-gpu.sh §2b.
 - STAGE3's measured full-run VmHWM: 26 bands 3.2 GiB, 32 bands 3.43, 34 bands 3.53, 46 bands 4.22. The 46-band pair
   is 2 × 4.22 + 1.5 = 9.94, so it fits.
 - The evidence: a 26-band pair on gpu1 was kernel-OOM-killed at 19:29:47 on 09-28 at 5.23 GiB each. The

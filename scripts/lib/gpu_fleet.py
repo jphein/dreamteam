@@ -249,7 +249,24 @@ def eff_vram(c: dict, fleet: dict) -> int:
     return int(math.ceil(c.get("peak_vram_mib", 0) * (fleet.get("defaults", {}).get("grows_margin", 1.5) if c.get("grows") else 1)))
 
 
-def host_budget(fleet: dict, host: str, claims: list, add: dict | None = None) -> list:
+
+def lane_footprint(fleet: dict, host: str) -> tuple:
+    """(MB, line): the live RSS of the claude sessions and their children on a host that also runs lanes (#241, Sen
+    2026-11-17 option b). The lane floor keeps a lane from starting beside a pair; this keeps a pair from being admitted
+    beside a running lane, which the fixed pair limit never saw. Unreadable (asleep, an older probe without the LANE
+    line) is SAID and counts 0: the static pair rule still applies. Hosts without "lanes" in fleet.json: nothing."""
+    h = fleet["hosts"][host]
+    if not h.get("lanes"):
+        return 0, ""
+    p = probe(fleet, host)
+    if not p.get("reachable"):
+        return 0, f"{host} lane footprint: unreadable (asleep); the static pair rule alone applies"
+    if "lane_mb" not in p:
+        return 0, f"{host} lane footprint: unreadable (the probe has no LANE line); the static pair rule alone applies"
+    return p["lane_mb"], (f"{host} lane footprint: {p['lane_mb']} MB live (claude sessions and their children), "
+                          f"subtracted from the pair limit (#241)")
+
+def host_budget(fleet: dict, host: str, claims: list, add: dict | None = None, lane: tuple | None = None) -> list:
     """The host-level arithmetic over claims that overlap in time, as lines. Raises Refused when it fails."""
     h = fleet["hosts"][host]
     b = h.get("budget", {})
@@ -263,11 +280,15 @@ def host_budget(fleet: dict, host: str, claims: list, add: dict | None = None) -
     if form == "remote":
         lim = b.get("pair_limit_mib", h["ram_mb"] - 512)
         margin = b.get("pair_margin_mib", 1536)
+        lane_mb, lane_line = lane or (0, "")
+        if lane_line:
+            lines.append(lane_line)
+        eff_lim = lim - lane_mb
         peaks = [(c["lane"], eff_peak(c, fleet)) for c in on_host]
         need = sum(p for _, p in peaks) + margin
         lines.append(f"{host} pair rule: peaks {' + '.join(f'{p} ({l})' for l, p in peaks) or '0'} + {margin} margin"
-                     f" = {need} MB <= limit {lim} MB")
-        if need > lim:
+                     f" = {need} MB <= limit {lim} MB" + (f" - lane footprint {lane_mb} MB = {eff_lim} MB" if lane_mb else ""))
+        if need > eff_lim:
             raise Refused(lines[-1].replace("<=", ">") + " (FAMILIAR-RULES rule 7, keyed to the host's idle MemAvailable)")
     elif form == "guest":
         caps = [cap_mb(c["peak_ram_mb"], c.get("grows", False), fleet) for c in on_host]
@@ -290,7 +311,7 @@ def host_budget(fleet: dict, host: str, claims: list, add: dict | None = None) -
 
 
 def check_claim(fleet: dict, claims: dict, new: dict, windows: dict, vulkan: bool = False,
-                override: str | None = None) -> list:
+                override: str | None = None, lane: tuple | None = None) -> list:
     """Every check a new claim must pass against the claims overlapping it in time. Returns the arithmetic lines,
     or raises Refused. A granter's --override REASON passes a window, exclusivity, solo or host-budget refusal
     (and says so in the lines); nothing overrides the physics: a compute-blocked card, or VRAM."""
@@ -343,7 +364,7 @@ def check_claim(fleet: dict, claims: dict, new: dict, windows: dict, vulkan: boo
         soft(lines[-1].replace("<=", ">") + shared)
     on_host = [v for v in over if fleet["cards"].get(v["card"], {}).get("host") == c["host"]]
     try:
-        lines += host_budget(fleet, c["host"], on_host, add=new)
+        lines += host_budget(fleet, c["host"], on_host, add=new, lane=lane)
     except Refused as e:
         soft(str(e))
     return lines
@@ -363,7 +384,8 @@ def cmd_claim(a, fleet, cfg) -> int:
            "grows": a.grows, "protected": a.protected, "estimate": a.estimate, "solo": a.solo, "exclusive": a.exclusive,
            "override": a.override or None, "by": lane_of(me) or "orchestrator", "jobs": []}
     with Ledger(write=not a.dry_run) as L:
-        lines = check_claim(fleet, L.data["claims"], new, L.data["windows"], vulkan=a.vulkan, override=a.override)
+        lines = check_claim(fleet, L.data["claims"], new, L.data["windows"], vulkan=a.vulkan, override=a.override,
+                            lane=lane_footprint(fleet, card_of(fleet, a.card)["host"]))
         new["cap_mb"] = cap_mb(new["peak_ram_mb"], new["grows"], fleet)
         for ln in lines:
             print("  " + ln)
@@ -480,7 +502,7 @@ def _recheck_peak(a, fleet, L, t, claim, peak, grows):
     host = fleet["cards"][a.card]["host"]
     others = [v for v in L.live(t).values() if claim_key(v) != claim_key(claim)
               and fleet["cards"].get(v["card"], {}).get("host") == host]
-    return host_budget(fleet, host, others, add={**claim, "peak_ram_mb": peak, "grows": grows})
+    return host_budget(fleet, host, others, add={**claim, "peak_ram_mb": peak, "grows": grows}, lane=lane_footprint(fleet, host))
 
 
 def live_vram_check(fleet: dict, card: str, peak_vram_mib: int) -> str:
@@ -522,6 +544,7 @@ PROBE = r"""
 nvidia-smi --query-gpu=index,pci.bus_id,memory.used,memory.total,utilization.gpu --format=csv,noheader,nounits 2>/dev/null | sed 's/^/GPU,/'
 nvidia-smi --query-compute-apps=gpu_bus_id,pid,used_memory,process_name --format=csv,noheader,nounits 2>/dev/null | sed 's/^/APP,/'
 awk '/MemAvailable/{a=$2}/SwapTotal/{t=$2}/SwapFree/{f=$2}END{print "MEM,"a","t","f}' /proc/meminfo
+ps -eo pid=,ppid=,rss=,comm= 2>/dev/null | awk '{pp[$1]=$2; rss[$1]=$3; c[$1]=$4; n++; id[n]=$1} END{for(i=1;i<=n;i++){q=id[i]; while(q>1 && (q in pp)){if(c[q]=="claude"){s+=rss[id[i]]; break}; q=pp[q]}}; print "LANE," s+0}'
 for p in __PATHS__; do printf 'DISK,%s,%s\n' "$p" "$(df -BG --output=avail "$p" 2>/dev/null | tail -1 | tr -dc 0-9)"; done
 if [ -n "__PAUSE__" ] && [ -e "__PAUSE__" ]; then echo PAUSE,1; else echo PAUSE,0; fi
 """
@@ -563,6 +586,8 @@ def probe(fleet: dict, host: str) -> dict:
             a, tot, free = (int(x or 0) for x in parts[1:4])
             out["avail_mb"] = a // 1024
             out["swap_pct"] = int(100 * (tot - free) / tot) if tot else 0
+        elif parts[0] == "LANE" and len(parts) >= 2 and parts[1].isdigit():   # kB: claude sessions + children (#241)
+            out["lane_mb"] = int(parts[1]) // 1024
         elif parts[0] == "DISK" and len(parts) >= 3:
             out["disk"][parts[1]] = int(parts[2]) if parts[2].isdigit() else None
         elif parts[0] == "PAUSE":
