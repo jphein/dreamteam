@@ -20,6 +20,8 @@
 # - `nosuid,nodev,noexec`: every client can write here, so nothing on the share may gain privilege or be executed
 #   directly; a script kept in scratch is run through its interpreter (`bash x.sh`, `python3 x.py`). The export
 #   is sec=sys behind an address fence on the server (ubox0-kit); there is no Kerberos in this homelab.
+# - A repaired or changed unit does NOT change a share that is already mounted: `check` compares the unit FILES,
+#   and install says so when it rewrote a unit while the mount was active. The new options apply at the next mount.
 # - It never installs a package: without mount.nfs4 it stops and names the apt line (apt is a visible, separate step).
 # - It never writes over, stops, disables or removes a unit file it did not write (first line = its own header):
 #   install and uninstall both check the two paths BEFORE any change and stop with exit 3 on a foreign file.
@@ -80,7 +82,8 @@ TimeoutIdleSec=600
 WantedBy=multi-user.target
 EOF
 }
-same() { [ -f "$2" ] && [ ! -L "$2" ] && [ "$(printf '%s\n' "$1")" = "$(cat -- "$2")" ]; }   # same <text> <file>
+# same <text> <file>: byte for byte (a command substitution would drop trailing newlines and hide appended lines)
+same() { [ -f "$2" ] && [ ! -L "$2" ] && cmp -s <(printf '%s\n' "$1") "$2"; }
 HEADER='# written by dreamteam scripts/fleet-mount.sh (sync replacement, phase 1); remove with: fleet-mount.sh uninstall'
 # a regular file whose WHOLE first line is the line this script writes (a longer or shorter first line is foreign)
 ours() { local first; [ -f "$1" ] && [ ! -L "$1" ] && IFS= read -r first < "$1" 2>/dev/null && [ "$first" = "$HEADER" ]; }
@@ -120,6 +123,7 @@ case "$MODE" in
     lock
     # Preflight BOTH paths before changing either: only an absent path or a file we wrote may be (re)written.
     ! foreign || { echo "fleet-mount: nothing changed" >&2; exit 3; }
+    rewrote=0
     for pair in "mount:$MOUNT_U" "auto:$AUTO_U"; do
       kind="${pair%%:*}"; dst="${pair#*:}"
       text="$([ "$kind" = mount ] && mount_text || auto_text)"
@@ -132,12 +136,18 @@ case "$MODE" in
         ln -T -- "$tmp" "$dst" 2>/dev/null || { rm -f -- "$tmp"; echo "fleet-mount: $dst appeared during the install; nothing written there" >&2; exit 3; }
         rm -f -- "$tmp"
       fi
-      echo "wrote $dst"
+      echo "wrote $dst"; rewrote=1
     done
     # Reload on EVERY install: a reload that did not work last time must not leave stale definitions to be enabled.
     "$SC" daemon-reload || { echo "fleet-mount: daemon-reload did not work; nothing enabled" >&2; exit 3; }
     "$SC" enable --now "$unit.automount" >/dev/null 2>&1 || { echo "fleet-mount: could not enable $unit.automount" >&2; exit 3; }
     echo "enabled $unit.automount (the share mounts at first use of $MP)"
+    # A share that is mounted RIGHT NOW keeps the options it was mounted with: rewritten units apply at the next
+    # mount. Say so; never remount under a lane that may be writing.
+    if [ "$rewrote" = 1 ] && [ "$("$SC" is-active "$unit.mount" 2>/dev/null)" = active ]; then
+      echo "note: $MP is mounted now and keeps its earlier options; the rewritten units apply at the next mount"
+      echo "      (once the share has been unmounted and mounted again: it unmounts itself after 10 idle minutes)"
+    fi
     ;;
   uninstall)
     need_root
