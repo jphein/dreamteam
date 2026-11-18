@@ -303,10 +303,15 @@ o=$(DREAMTEAM_CONFIG="$OV/config.json" DREAMTEAM_HOST=trunc FAKE_AVAIL=1000 FAKE
 [ $rc = 1 ] && [[ "$o" == *"overlay exists but is not one readable"* ]] && pass "lane-check: a truncated overlay holds (never the base's 'no floor')" || fail "lane-check trunc: $rc '$o'"
 g DREAMTEAM_CONFIG="$OV/config.json" DREAMTEAM_HOST=trunc FAKE_AVAIL=30000 FAKE_SWAP_FREE=0
 [ "$GRC" -eq 2 ] && pass "gate: a truncated overlay with plenty of RAM and no swap still blocks (its swap floor is unknowable)" || fail "gate trunc: exit $GRC"
-# the repo's own config.familiar.json parses and carries the accepted numbers (balloon stays the base's)
-jq -e '.memory == {"minAvailableMB":3000,"minSwapFreeMB":2048,"perAgentMB":750,"hostReserveMB":2048} and .lane == {"minAvailableMB":6800,"minSwapFreeMB":4096}
-       and .overnight == {"min_available_mb":5500,"min_swap_free_mb":4096} and (.memory | has("balloonReserveMB") | not)' "$ROOT/config.familiar.json" >/dev/null \
-  && pass "config.familiar.json: the accepted floors, balloonReserveMB left to the base" || fail "config.familiar.json content"
+# familiar's overlay is host data (untracked; it lives in the synced tree): when present here it carries the accepted
+# numbers (balloon stays the base's); a clean clone has none, and the check says so
+if [ -f "$ROOT/config.familiar.json" ]; then
+  jq -e '.memory == {"minAvailableMB":3000,"minSwapFreeMB":2048,"perAgentMB":750,"hostReserveMB":2048} and .lane == {"minAvailableMB":6800,"minSwapFreeMB":4096}
+         and .overnight == {"min_available_mb":5500,"min_swap_free_mb":4096} and (.memory | has("balloonReserveMB") | not)' "$ROOT/config.familiar.json" >/dev/null \
+    && pass "config.familiar.json (synced tree): the accepted floors, balloonReserveMB left to the base" || fail "config.familiar.json content"
+else
+  pass "config.familiar.json is not in this tree (host data, untracked): nothing to check"
+fi
 
 grep -q 'DREAMTEAM_HOST=dreamteam-test' "$ROOT/tests/run.sh" && pass "tests/run.sh pins DREAMTEAM_HOST, so no real host's overlay reaches a suite" || fail "run.sh does not pin DREAMTEAM_HOST"
 echo "SUMMARY: $PASS passed, $FAIL failed, $((PASS+FAIL)) total"
