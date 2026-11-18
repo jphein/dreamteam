@@ -18,7 +18,7 @@
 #         time); `.git`, `node_modules` and `.stversions` are pruned (version-store copies of conflicts are history).
 #         Only regular files count (a directory whose name matches is not a conflict copy).
 # Skips:  directories named in $DREAMTEAM_SYNC_SKIP_DIRS (colon-separated names or globs, no slash; default
-#         `.sync-conflicts-merged:sync-conflicts-archive-*:dreamteam-state-conflicts`) hold copies kept on purpose
+#         `.sync-conflicts-merged:sync-conflicts-archive-*:dreamteam-state-conflicts:align-backup-*:syncthing-backups`) hold copies kept on purpose
 #         and are not walked. Directories only: a FILE with such a name still counts. Each skipped directory is
 #         listed in sync-conflicts.skipped and the line says "K kept dirs skipped". Empty string = skip nothing.
 # Mail:   $DREAMTEAM_MAIL_CMD (default `agent-mail send`) to $DREAMTEAM_LEAD_MAIL (default `sen`), only when the count
@@ -66,10 +66,11 @@ if ! flock -n 9; then
 fi
 
 # Directories whose conflict copies are KEPT on purpose are skipped by NAME, at any depth. The default names say
-# what they are; a generic name such as `backups` is deliberately NOT a default (it would hide real conflicts in
+# what they are (`align-backup-*` is the align script's own backup dir, `syncthing-backups` a named rescue dir);
+# a generic name such as `backups` is deliberately NOT a default (it would hide real conflicts in
 # any backup dir). Every skipped directory is written to sync-conflicts.skipped and counted in the line, so a skip
 # is never silent.
-skip_raw="${DREAMTEAM_SYNC_SKIP_DIRS-.sync-conflicts-merged:sync-conflicts-archive-*:dreamteam-state-conflicts}"
+skip_raw="${DREAMTEAM_SYNC_SKIP_DIRS-.sync-conflicts-merged:sync-conflicts-archive-*:dreamteam-state-conflicts:align-backup-*:syncthing-backups}"
 IFS=: read -r -a SKIPS <<< "$skip_raw"
 skipexpr=()
 for sname in "${SKIPS[@]}"; do
