@@ -16,7 +16,9 @@ case "\$1" in
   is-enabled) cat "$TMP/enabled" 2>/dev/null || echo disabled ;;
   is-active)  cat "$TMP/active" 2>/dev/null || echo inactive ;;
   enable)     [ -e "$TMP/enable.broken" ] && exit 1; echo enabled > "$TMP/enabled"; echo active > "$TMP/active" ;;
-  disable)    echo disabled > "$TMP/enabled"; echo inactive > "$TMP/active" ;;
+  disable)    [ -e "$TMP/disable.broken" ] && exit 1; echo disabled > "$TMP/enabled"; echo inactive > "$TMP/active" ;;
+  stop)       [ -e "$TMP/stop.broken" ] && exit 1 ;;
+  daemon-reload) [ -e "$TMP/reload.broken" ] && exit 1 ;;
 esac
 exit 0
 EOF
@@ -45,7 +47,7 @@ out=$(run install); rc=$?
 [ "$rc" = 0 ] && [ -f "$U/srv-fleet.mount" ] && [ -f "$U/srv-fleet.automount" ] && ok "install writes both units" || bad "install: rc=$rc '$out'"
 grep -qx "What=10.0.6.11:/srv/fleet" "$U/srv-fleet.mount" && grep -qx "Where=/srv/fleet" "$U/srv-fleet.mount" && grep -qx "Type=nfs4" "$U/srv-fleet.mount" \
   && ok "mount unit: source, mount point, type" || bad "mount unit content"
-grep -qx "Options=rw,soft,timeo=50,retrans=3,noatime,_netdev" "$U/srv-fleet.mount" && ok "mount unit: soft with a bounded timeout (an error, not a hang)" || bad "mount options: $(grep Options "$U/srv-fleet.mount")"
+grep -qx "Options=rw,soft,timeo=50,retrans=3,noatime,nosuid,nodev,noexec,_netdev" "$U/srv-fleet.mount" && ok "mount unit: soft with a bounded timeout; nosuid, nodev, noexec" || bad "mount options: $(grep Options "$U/srv-fleet.mount")"
 grep -qx "TimeoutIdleSec=600" "$U/srv-fleet.automount" && grep -qx "WantedBy=multi-user.target" "$U/srv-fleet.automount" && ok "automount unit: idle release, wanted at boot" || bad "automount unit"
 ! grep -q "WantedBy" "$U/srv-fleet.mount" && ok "the mount unit itself is NOT wanted at boot (automount only)" || bad "mount unit is wanted at boot"
 [ "$(stat -c %a "$U/srv-fleet.mount")" = 644 ] && [ -d "$R/srv/fleet" ] && ok "units are 0644; the mount point exists" || bad "modes or mount point"
@@ -56,7 +58,13 @@ run check >/dev/null; [ $? = 0 ] && ok "check after install: rc 0" || bad "check
 # --- idempotent -------------------------------------------------------------------------------------------------
 : > "$TMP/sc.log"; i1=$(stat -c %i "$U/srv-fleet.mount")
 out=$(run install)
-[ "$(stat -c %i "$U/srv-fleet.mount")" = "$i1" ] && ! grep -qx "daemon-reload" "$TMP/sc.log" && grep -q "^ok " <<< "$out" && ok "a second install rewrites nothing and does not reload" || bad "second install: $(tr '\n' '|' < "$TMP/sc.log")"
+[ "$(stat -c %i "$U/srv-fleet.mount")" = "$i1" ] && grep -q "^ok " <<< "$out" && ok "a second install rewrites nothing" || bad "second install rewrote a unit"
+[ "$(tr '\n' '|' < "$TMP/sc.log")" = "daemon-reload|enable --now srv-fleet.automount|" ] && ok "every install reloads BEFORE it enables" || bad "second install calls: $(tr '\n' '|' < "$TMP/sc.log")"
+touch "$TMP/reload.broken"; : > "$TMP/sc.log"
+run install >/dev/null 2>&1; rc=$?
+[ "$rc" = 3 ] && ! grep -q "^enable" "$TMP/sc.log" && ok "a reload that does not work is exit 3 and nothing is enabled" || bad "broken reload: rc=$rc $(tr '\n' '|' < "$TMP/sc.log")"
+rm -f "$TMP/reload.broken"; : > "$TMP/sc.log"; run install >/dev/null
+grep -qx "daemon-reload" "$TMP/sc.log" && ok "the next install reloads again (no stale definitions enabled)" || bad "no reload after a broken one"
 
 # --- drift is seen and repaired --------------------------------------------------------------------------------
 sed -i 's/soft,/hard,/' "$U/srv-fleet.mount"
@@ -68,22 +76,42 @@ touch "$TMP/enable.broken"; echo disabled > "$TMP/enabled"
 run install >/dev/null 2>&1; [ $? = 3 ] && ok "an enable that does not work is exit 3, not a quiet success" || bad "broken enable rc"
 rm -f "$TMP/enable.broken"; run install >/dev/null
 
-# --- refuses to write through a symlink ------------------------------------------------------------------------
-echo sentinel > "$TMP/sentinel"; rm -f "$U/srv-fleet.mount"; ln -s "$TMP/sentinel" "$U/srv-fleet.mount"
+# --- install never writes over a unit it did not write (preflight on BOTH paths, before any change) -----------
+for victim in srv-fleet.mount srv-fleet.automount; do
+  run uninstall >/dev/null 2>&1; rm -f "$U/srv-fleet.mount" "$U/srv-fleet.automount"
+  printf '[Unit]\nDescription=someone else\n' > "$U/$victim"; : > "$TMP/sc.log"
+  run install >/dev/null 2>&1; rc=$?
+  other=$([ "$victim" = srv-fleet.mount ] && echo srv-fleet.automount || echo srv-fleet.mount)
+  [ "$rc" = 3 ] && grep -qx "Description=someone else" "$U/$victim" && [ ! -e "$U/$other" ] && [ ! -s "$TMP/sc.log" ] \
+    && ok "a foreign $victim: install refuses, writes neither unit, calls no systemctl" || bad "foreign $victim: rc=$rc log=$(tr '\n' '|' < "$TMP/sc.log")"
+  : > "$TMP/sc.log"; run uninstall >/dev/null 2>&1; rc=$?
+  [ "$rc" = 3 ] && grep -qx "Description=someone else" "$U/$victim" && [ ! -s "$TMP/sc.log" ] \
+    && ok "a foreign $victim: uninstall refuses and stops or disables nothing" || bad "uninstall over a foreign $victim: rc=$rc log=$(tr '\n' '|' < "$TMP/sc.log")"
+  rm -f "$U/$victim"
+done
+echo sentinel > "$TMP/sentinel"; ln -s "$TMP/sentinel" "$U/srv-fleet.mount"; : > "$TMP/sc.log"
 run install >/dev/null 2>&1; rc=$?
-[ "$rc" = 3 ] && [ "$(cat "$TMP/sentinel")" = sentinel ] && ok "a symlink at the unit path is refused; its target is untouched" || bad "symlink unit: rc=$rc"
+[ "$rc" = 3 ] && [ "$(cat "$TMP/sentinel")" = sentinel ] && [ ! -s "$TMP/sc.log" ] && ok "a symlink at the unit path is refused; its target is untouched" || bad "symlink unit: rc=$rc"
+run uninstall >/dev/null 2>&1; [ $? = 3 ] && [ -L "$U/srv-fleet.mount" ] && [ ! -s "$TMP/sc.log" ] && ok "uninstall also refuses a symlinked unit path" || bad "uninstall over a symlink"
 rm -f "$U/srv-fleet.mount"; run install >/dev/null
 
-# --- uninstall removes only its own files ----------------------------------------------------------------------
-echo "[Unit]" > "$U/other.mount"; : > "$TMP/sc.log"
+# --- uninstall: its own files only, both units disabled, and no success after a step that did not work ----------
+echo "[Unit]" > "$U/other.mount"
+for broken in stop disable; do
+  touch "$TMP/$broken.broken"; out=$(run uninstall 2>&1); rc=$?; rm -f "$TMP/$broken.broken"
+  [ "$rc" = 3 ] && [ -f "$U/srv-fleet.mount" ] && [ -f "$U/srv-fleet.automount" ] && ! grep -q "^uninstalled" <<< "$out" \
+    && ok "uninstall with a $broken that does not work: exit 3, both definitions kept" || bad "uninstall, broken $broken: rc=$rc '$out'"
+done
+touch "$TMP/reload.broken"; run uninstall >/dev/null 2>&1; rc=$?; rm -f "$TMP/reload.broken"
+[ "$rc" = 3 ] && ok "uninstall with a reload that does not work: exit 3" || bad "uninstall, broken reload: rc=$rc"
+run install >/dev/null; : > "$TMP/sc.log"
 out=$(run uninstall); rc=$?
 [ "$rc" = 0 ] && [ ! -e "$U/srv-fleet.mount" ] && [ ! -e "$U/srv-fleet.automount" ] && [ -f "$U/other.mount" ] && [ -d "$R/srv/fleet" ] \
   && ok "uninstall: both units gone, other units and the mount point stay" || bad "uninstall: rc=$rc '$out'"
-grep -qx "disable --now srv-fleet.automount" "$TMP/sc.log" && grep -qx "stop srv-fleet.mount" "$TMP/sc.log" && grep -qx "daemon-reload" "$TMP/sc.log" && ok "uninstall: disable the automount, stop the mount, reload" || bad "uninstall calls"
-echo "# someone else's unit" > "$U/srv-fleet.mount"
-out=$(run uninstall)
-[ -f "$U/srv-fleet.mount" ] && grep -q "left .*srv-fleet.mount" <<< "$out" && ok "uninstall leaves a unit it did not write" || bad "uninstall removed a foreign unit"
-rm -f "$U/srv-fleet.mount"
+[ "$(tr '\n' '|' < "$TMP/sc.log")" = "disable --now srv-fleet.automount|stop srv-fleet.mount|disable srv-fleet.mount|daemon-reload|" ] \
+  && ok "uninstall: disable the automount, stop and disable the mount, reload (in that order)" || bad "uninstall calls: $(tr '\n' '|' < "$TMP/sc.log")"
+: > "$TMP/sc.log"; out=$(run uninstall); rc=$?
+[ "$rc" = 0 ] && [ ! -s "$TMP/sc.log" ] && grep -q "nothing installed" <<< "$out" && ok "uninstall with nothing installed: says so, calls no systemctl" || bad "empty uninstall: rc=$rc"
 
 # --- arguments and values --------------------------------------------------------------------------------------
 run >/dev/null 2>&1; [ $? = 2 ] && ok "no argument: exit 2" || bad "no argument rc"
@@ -92,12 +120,25 @@ FLEET_SHARE_SOURCE=$'10.0.6.11:/srv/fleet\nExecStart=/bin/true' run install >/de
 FLEET_SHARE_SOURCE='host:/a b' run install >/dev/null 2>&1; [ $? = 2 ] && ok "a source with a space is refused" || bad "space source"
 FLEET_SHARE_MOUNTPOINT='srv/fleet' run install >/dev/null 2>&1; [ $? = 2 ] && ok "a relative mount point is refused" || bad "relative mount point"
 FLEET_SHARE_MOUNTPOINT='/srv/../etc' run install >/dev/null 2>&1; [ $? = 2 ] && ok "a mount point with .. is refused" || bad "dotdot mount point"
+FLEET_SHARE_MOUNTPOINT='/' run install >/dev/null 2>&1; [ $? = 2 ] && ok "the mount point / is refused" || bad "root mount point"
+printf '#!/bin/sh\nexit 1\n' > "$TMP/bin/noescape"; chmod +x "$TMP/bin/noescape"
+FLEET_MOUNT_ESCAPE="$TMP/bin/noescape" run install >/dev/null 2>&1; [ $? = 2 ] && ok "no working systemd-escape: exit 2, no guessed unit name" || bad "escape fallback"
+if command -v systemd-escape >/dev/null 2>&1; then
+  FLEET_SHARE_MOUNTPOINT='/srv/fleet-cache' run install >/dev/null; n='srv-fleet\x2dcache'
+  [ -f "$U/$n.mount" ] && grep -qx "Where=/srv/fleet-cache" "$U/$n.mount" && ok "a hyphen in the mount point is escaped in the unit name (systemd's own rule)" || bad "hyphenated mount point: $(ls "$U")"
+  FLEET_SHARE_MOUNTPOINT='/srv/fleet-cache' run uninstall >/dev/null
+fi
 ( unset FLEET_MOUNT_SKIP_ROOT; [ "$(id -u)" = 0 ] && exit 0; PATH="$BASE_PATH" bash "$S" install >/dev/null 2>&1; [ $? = 2 ] ) && ok "install without root: exit 2" || bad "non-root install rc"
 if command -v systemd-analyze >/dev/null 2>&1; then
   run install >/dev/null
-  # only complaints about OUR units count: verify also reports every other unit on the machine it loads
-  v=$(systemd-analyze verify "$U/srv-fleet.automount" "$U/srv-fleet.mount" 2>&1 | grep "srv-fleet\." | grep -v "mount.nfs4" || true)
-  [ -z "$v" ] && ok "systemd-analyze verify has no complaint about the two units" || bad "systemd-analyze verify: $(head -3 <<< "$v")"
+  # Verify against OUR unit dir plus the distribution's units only: the machine's own /etc units are not loaded, so
+  # the verifier's exit status is about these two files and is asserted as it is.
+  v=$(SYSTEMD_UNIT_PATH="$U:/usr/lib/systemd/system:/lib/systemd/system" systemd-analyze verify "$U/srv-fleet.automount" "$U/srv-fleet.mount" 2>&1); vrc=$?
+  [ "$vrc" = 0 ] && ! grep -q "srv-fleet" <<< "$v" && ok "systemd-analyze verify: exit 0 and no complaint about the two units" || bad "systemd-analyze verify rc=$vrc: $(head -3 <<< "$v")"
+  sed -i 's/^Type=nfs4$/Typo=nfs4/' "$U/srv-fleet.mount"
+  v=$(SYSTEMD_UNIT_PATH="$U:/usr/lib/systemd/system:/lib/systemd/system" systemd-analyze verify "$U/srv-fleet.mount" 2>&1); vrc=$?
+  { [ "$vrc" != 0 ] || grep -q "srv-fleet" <<< "$v"; } && ok "positive control: the same verify call objects to a broken unit" || bad "verify did not object to a broken unit"
+  run install >/dev/null
 fi
 
 echo "----"; echo "fleet-mount: $PASS passed, $FAIL failed"
