@@ -96,6 +96,13 @@ the clone's real default branch (`origin/HEAD`) and main/master/trunk/production
    `Delegate=yes`, plus `DREAMTEAM_SCOPE_NAME` exported to the coordinators, means `scope-attach.sh` keeps any
    teammate they spawn in this scope. Without it, a spawned teammate would be re-homed into
    `dreamteam-<repo>.scope`, which has neither this night's cap nor its runtime limit.
+   **The runner joins the scope itself (#225).** tmux 3.6, built with systemd support, starts every pane in its own
+   `tmux-spawn-<uuid>.scope`. So only the tmux server stays in the night's scope; the runner, its coordinators and
+   their teammates ran outside the caps (11-16: a tmux-spawn scope peaked at 3.3 G). The runner's first act is
+   `AttachProcessesToUnit` of its own pid to `dreamteam-<rid>.scope` (allowed by `Delegate=yes`), and everything it
+   starts after that inherits it. Measured on tmux 3.6, 2026-11-17: before the attach `tmux-spawn-….scope`, after it
+   the night's scope, and a child too. If it cannot join, the night stops before any coordinator: every repo is
+   recorded skipped with the reason, and FINISHED says "Stopped: the runner could not join the night's scope (#225)".
 6. **Runner.** For each repo in turn, the runner checks the clock (it needs ≥ `min_repo_minutes` left) and makes a
    fresh clone under `~/srv/wt/overnight/<night>/<name>` (git never touches the synced `~/Projects`). Right before
    the coordinator starts, it recomputes the time left and re-reads the quota:

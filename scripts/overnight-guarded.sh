@@ -427,8 +427,11 @@ run_runner() {
   local real_gh; real_gh=$(command -v gh 2>/dev/null || echo /usr/bin/gh)
   local watch="${DREAMTEAM_WATCH_SEC:-600}"
   local done_n=0 results='[]' stop_reason="" i
+  # the runner could not join the night's scope (#225): nothing runs outside its caps; every repo is skipped with why
+  if [ -n "${RUNNER_PRESTOP:-}" ]; then log "runner $rid: $RUNNER_PRESTOP"; fi
   for ((i=0; i<n; i++)); do
     local r name pr_only issues left
+    if [ -n "${RUNNER_PRESTOP:-}" ]; then stop_reason="$RUNNER_PRESTOP"; break; fi
     if [ -n "$RUNNER_SIG" ]; then stop_reason="runner killed (SIG$RUNNER_SIG)"; log "runner $rid: $stop_reason"; break; fi
     r=$(jq -c ".repos[$i]" "$plan"); name=$(jq -r .name <<<"$r"); pr_only=$(jq -r .pr_only <<<"$r")
     left=$(( deadline - $(date +%s) ))
@@ -584,8 +587,25 @@ if [ "${1:-}" = "--watch" ]; then
   esac
   exit 0
 fi
+# #225: tmux 3.6 (systemd build) starts every pane in its own tmux-spawn-*.scope, so the runner the launch line starts
+# inside `systemd-run --scope … tmux new-session` is NOT under the night's caps. The runner therefore attaches itself
+# to dreamteam-<rid>.scope (Delegate=yes allows it) before anything else; its coordinators and their teammates inherit
+# it. Proven on tmux 3.6, 2026-11-17: before tmux-spawn-….scope, after the night's scope, a child too. If it cannot
+# join, the night stops: every repo is skipped with the reason, and nothing runs uncapped.
+join_night_scope() { # $1 = run dir → 0 when this shell is in dreamteam-<rid>.scope
+  local rid unit cg
+  rid=$(jq -r '.run_id // ""' "$1/plan.json" 2>/dev/null)
+  [[ "$rid" =~ ^[A-Za-z0-9-]+$ ]] || return 1
+  unit="dreamteam-$rid.scope"; cg="${DREAMTEAM_CGROUP_FILE:-/proc/$$/cgroup}"
+  in_unit() { grep -qE "/${unit//./\\.}\$" "$cg" 2>/dev/null; }
+  in_unit && return 0
+  busctl call --user org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager \
+    AttachProcessesToUnit ssau "$unit" / 1 "$$" >/dev/null 2>&1 || return 1
+  in_unit
+}
 if [ "${1:-}" = "--runner" ]; then
   [ -n "${2:-}" ] || { echo "usage: overnight-guarded.sh --runner RUN_DIR" >&2; exit 2; }
+  join_night_scope "$2" || export RUNNER_PRESTOP="the runner could not join the night's scope (#225): nothing ran outside its caps"
   run_runner "$2"; exit 0
 fi
 [ -z "${1:-}" ] || { echo "usage: overnight-guarded.sh [--runner RUN_DIR | --check-line | --watch]" >&2; exit 2; }
