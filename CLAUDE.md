@@ -72,7 +72,10 @@ bash tests/run.sh          # runs every suite, exits non-zero on any failure
   not; fail-open controls each with ONE logged line (server unreachable, HTTP error, non-JSON, an unreadable row
   log, no key) and silent exits (stop_hook_active, the kill switch, the lead, no identity, malformed stdin); a
   missing config still enforces; identity from ASK_WHO, the tmux session, or a teammate id; the hooks.json Stop
-  entry and its seconds-not-ms timeout. `tests/perturb-flow-callout.sh` (by hand, not under run.sh) applies one
+  entry and its seconds-not-ms timeout; the file reads are bounded by min(1 s, the remaining budget) and a FIFO at the
+  key, config or log path fails open. Known limit (#237 r6, lead ruling): stat-class calls and the logger run outside
+  any timeout, so the hook's paths must stay on local disk, never a network mount; the harness's 12 s Stop-hook
+  timeout is the outer bound. `tests/perturb-flow-callout.sh` (by hand, not under run.sh) applies one
   mutation per rule to a COPY of the hook and requires each to turn the suite red: the evidence block for a review.
 - `tests/test-pr-tools.sh` — `pr-gate.sh` / `pr-merge.sh` / `cascade.sh` against a stubbed `gh`
   (fixture JSON piped through the real `jq` with the caller's real `--jq` filter, mutating calls

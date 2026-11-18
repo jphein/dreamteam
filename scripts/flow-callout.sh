@@ -34,6 +34,13 @@
 # reported as unchecked in the log line, never silently skipped. At most DREAMTEAM_FLOW_MAX_LOGS row logs (default 8,
 # newest rows first; a lane holding more is a ledger to tidy), reported the same way. TIMEOUTS ARE IN SECONDS.
 #
+# KNOWN LIMIT (xreview #237 r6, lead ruling 2026-11-18): the file reads are bounded (min 1 s, what is left of the
+# budget) and a FIFO at any path is refused before it is opened, but the stat-class calls (-f, -e, -L) and the
+# logger's mkdir + printf run outside any timeout, so a STALLED NETWORK MOUNT at one of these paths would hold the
+# hook until the harness's own Stop-hook timeout (hooks.json, 12 s) ends it: that timeout is the outer bound. It is
+# not a round because every path here lives on local disk: the plugin tree, ~/.claude/state/dreamteam, the config,
+# the key file. Never point DREAMTEAM_CONFIG, DREAMTEAM_FLOW_LOG or DREAMTEAM_ASK_KEY_FILE at a network mount.
+#
 # Seams (tests/test-flow-callout.sh): ASK_URL · ASK_KEY or DREAMTEAM_ASK_KEY_FILE · ASK_WHO · DREAMTEAM_AGENT_ID ·
 # DREAMTEAM_CONFIG · DREAMTEAM_FLOW_LOG · DREAMTEAM_FLOW_BUDGET · DREAMTEAM_FLOW_MAX_LOGS · curl and tmux from PATH.
 set -uo pipefail
@@ -54,6 +61,11 @@ note() {
 
 # ── (a) stdin: a Stop payload. stop_hook_active = the harness already continued once for a stop hook → never loop.
 BUDGET="${DREAMTEAM_FLOW_BUDGET:-9}"; case "$BUDGET" in ''|*[!0-9]*) BUDGET=9 ;; esac     # seconds, the whole hook
+left() { echo $(( BUDGET * 1000 - ($(( $(date +%s%N) / 1000000 )) - T0) )); }   # ms left of the budget
+secs() { printf '%d.%03d' $(( $1 / 1000 )) $(( $1 % 1000 )); }                     # ms → "s.mmm" for curl -m / timeout
+# the two file reads below (config, key) are bounded by min(1 s, what is left of the budget), floored at 0.1 s so a
+# spent budget still cuts the read rather than running it unbounded (xreview #237 r6 item 3)
+readcap() { local l; l=$(left); [ "$l" -gt 1000 ] && l=1000; [ "$l" -lt 100 ] && l=100; secs "$l"; }
 MAX_LOGS="${DREAMTEAM_FLOW_MAX_LOGS:-8}"; case "$MAX_LOGS" in ''|*[!0-9]*) MAX_LOGS=8 ;; esac
 INPUT="$(cat 2>/dev/null || true)"
 ACTIVE="$(printf '%s' "$INPUT" | jq -r 'if type == "object" then (.stop_hook_active // false | tostring) else error("x") end' 2>/dev/null)" || exit 0
@@ -67,7 +79,7 @@ ACTIVE="$(printf '%s' "$INPUT" | jq -r 'if type == "object" then (.stop_hook_act
 CFGTXT=""
 if [ -e "$CFG" ]; then
   if [ ! -f "$CFG" ] || [ -L "$CFG" ]; then note "config $CFG is not a regular file: open rows not checked"; exit 0; fi
-  CFGTXT=$(timeout -k 1 1 head -c 1048576 -- "$CFG" 2>/dev/null); cfgrc=$?
+  CFGTXT=$(timeout -k 1 "$(readcap)" head -c 1048576 -- "$CFG" 2>/dev/null); cfgrc=$?
   if [ "$cfgrc" -ne 0 ]; then note "config $CFG read timed out or failed (rc $cfgrc): open rows not checked"; exit 0; fi
 fi
 ENFORCE=$(jq -r 'if .flow.enforce == false then "false" else "true" end' <<<"$CFGTXT" 2>/dev/null || echo true)
@@ -106,7 +118,7 @@ if [ -z "$KEY" ]; then
   # stalled mount blocks head on a regular file too, r5), at most 200 bytes of it
   KEY=""
   if [ -f "$KF" ] && [ ! -L "$KF" ]; then
-    KEY="$(timeout -k 1 1 head -c 200 -- "$KF" 2>/dev/null | tr -d '[:space:]')" || KEY=""
+    KEY="$(timeout -k 1 "$(readcap)" head -c 200 -- "$KF" 2>/dev/null | tr -d '[:space:]')" || KEY=""
   fi
 fi
 if [ -z "$KEY" ]; then
@@ -119,8 +131,7 @@ URL="${ASK_URL:-http://127.0.0.1:7810}"; URL="${URL%/}"
 # ── (f) ONE budget for the whole stop (xreview #237 r1): every request's timeout is cut to what is left of it, and
 #        when it is spent the remaining rows are reported as unchecked, never silently skipped. Default 9 s inside the
 #        hook's 12 s; seconds. MAX_LOGS bounds the row logs read, newest rows first, and is reported the same way.
-left() { echo $(( BUDGET * 1000 - ($(( $(date +%s%N) / 1000000 )) - T0) )); }   # ms left of the budget
-secs() { printf '%d.%03d' $(( $1 / 1000 )) $(( $1 % 1000 )); }                     # ms → "s.mmm" for curl -m / timeout
+# (left and secs are defined beside BUDGET above: the config and key reads use them first)
 # the key reaches curl on stdin (-H @-), never in argv: /proc/<pid>/cmdline is readable by every process of this uid
 get() { # get <url> <max-ms>; a reply over 1 MiB is refused (the ledger's list is kilobytes)
   local m="$2" l; l=$(left); [ "$l" -ge 200 ] || return 28; [ "$m" -le "$l" ] || m="$l"

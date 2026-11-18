@@ -35,9 +35,10 @@ MUTATIONS=(
   'cap-skips-silently|s/then capped=\$((capped + 1)); continue; fi/then continue; fi/'
   'ordered-not-plainly-silent|s/if \[ "\$state" = "ordered" \]/if [ "$state" = "ordered-X" ]/'
   'lane-prefix-rule-dropped|s/startswith(\$x + ":")/startswith($x + "X:")/'
-  'key-read-untimed|s/KEY="\$(timeout -k 1 1 head -c 200/KEY="$(head -c 200/'
+  'key-read-untimed|s/KEY="\$(timeout -k 1 "\$(readcap)" head -c 200/KEY="$(head -c 200/'
   'config-type-unchecked|s/if \[ ! -f "\$CFG" \] || \[ -L "\$CFG" \]; then/if false; then/'
-  'config-read-untimed|s/CFGTXT=\$(timeout -k 1 1 head -c 1048576/CFGTXT=$(head -c 1048576/'
+  'config-read-untimed|s/CFGTXT=\$(timeout -k 1 "\$(readcap)" head -c 1048576/CFGTXT=$(head -c 1048576/'
+  'read-timeout-ignores-budget|s/^readcap() { local l; l=\$(left); \[ "\$l" -gt 1000 \] \&\& l=1000;/readcap() { local l; l=1000;/'
 )
 
 # one mutation per job, JOBS at a time (the suite carries deliberate sleeps: serial runs took over 40 minutes for 22

@@ -81,13 +81,13 @@ RC=0; ELAPSED=0
 # that does not exist, so no case can fall through to the real ~/Projects/plan.realm.watch/data/ask.key.
 FAKEKEY="k0000000000000000000000000000000000000000"
 run() {
-  RC=0; local t0; t0=$(date +%s)
+  RC=0; local t0 t0ns; t0=$(date +%s); t0ns=$(date +%s%N)
   printf '%s' "${1:-{\"hook_event_name\":\"Stop\",\"stop_hook_active\":false\}}" \
     | PATH="${EXTRA_PATH:+$EXTRA_PATH:}$TMP/bin:$PATH" FIX="$FIX" ASK_URL="http://plan.test" ASK_KEY="${ASK_KEY-$FAKEKEY}" DREAMTEAM_ASK_KEY_FILE="${KEYFILE-$TMP/no-such-key}" \
       ASK_WHO="${ASK_WHO-example-lane}" DREAMTEAM_AGENT_ID="${DREAMTEAM_AGENT_ID-}" DREAMTEAM_CONFIG="${CFG:-$TMP/on.json}" \
       TMUX="${TMUXV-/stub/tmux-socket,1,0}" DREAMTEAM_FLOW_BUDGET="${BUDGET-9}" DREAMTEAM_FLOW_MAX_LOGS="${MAXLOGS-8}" DREAMTEAM_FLOW_MAX_ROWS="${MAXROWS-200}" \
       DREAMTEAM_FLOW_LOG="${LOGV-$TMP/callout.log}" bash "$HOOK" >"$TMP/out" 2>"$TMP/err" || RC=$?
-  ELAPSED=$(( $(date +%s) - t0 ))
+  ELAPSED=$(( $(date +%s) - t0 )); ELAPSED_MS=$(( ($(date +%s%N) - t0ns) / 1000000 ))
 }
 blocked() { [ "$RC" -eq 2 ] && grep -q 'FLOW CALLOUT' "$TMP/err"; }
 allowed() { [ "$RC" -eq 0 ]; }
@@ -241,6 +241,13 @@ printf '%s' "$FAKEKEY" > "$TMP/key.real"; ln -sf "$TMP/key.real" "$TMP/key.link"
 reset; list "$(row 55550013 example-lane ordered $T0 null)"
 ASK_KEY="" KEYFILE="$TMP/key.link" run
 allowed && [ "$(calls)" -eq 0 ] && [ "$(loglines)" -eq 1 ] && pass "a symlink at the key path is never read: no key, allowed, said" || fail "key symlink: rc=$RC calls=$(calls) log=[$(cat "$TMP/callout.log")]"
+# r6 item 3: the 1 s read bounds honour a smaller remaining budget: min(1 s, what is left), floored at 0.1 s. A budget
+# of 0 (nothing left from the first line) and a stalled config read: the read is cut at the floor and the hook is
+# back in well under a second, said, allowed (a fixed 1 s read keeps it a full second); measured in ms. This case
+# does not depend on identity (the tmux fallback is skipped when the runner's own agent id is found, note above).
+reset; list "$(row 55550014 example-lane ordered $T0 null)"
+EXTRA_PATH="$TMP/slow" SLOW_PATH="$TMP/on.json" BUDGET=0 run
+allowed && [ "$ELAPSED_MS" -le 600 ] && [ "$(calls)" -eq 0 ] && grep -q "timed out" "$TMP/callout.log" && pass "a stalled read with no budget left is cut at the 0.1 s floor (${ELAPSED_MS} ms), not a full second" || fail "budget-capped read: rc=$RC elapsed=${ELAPSED_MS}ms calls=$(calls) log=[$(cat "$TMP/callout.log")]"
 
 # 6l) xreview #237 r5: the reads are TIME-bounded too, not only byte-bounded: a stalled mount at the key path or at the
 #     config (the head stub on EXTRA_PATH sleeps 30 s when its arguments name SLOW_PATH, else runs the real head), and
