@@ -14,7 +14,7 @@ cat > "$TMP/bin/sc" <<EOF
 echo "\$*" >> "$TMP/sc.log"
 case "\$1" in
   is-enabled) cat "$TMP/enabled" 2>/dev/null || echo disabled ;;
-  is-active)  cat "$TMP/active" 2>/dev/null || echo inactive ;;
+  is-active)  case "\$2" in *.mount) cat "$TMP/mount.active" 2>/dev/null || echo inactive ;; *) cat "$TMP/active" 2>/dev/null || echo inactive ;; esac ;;
   enable)     [ -e "$TMP/enable.broken" ] && exit 1; echo enabled > "$TMP/enabled"; echo active > "$TMP/active" ;;
   disable)    [ -e "$TMP/disable.broken" ] && exit 1; echo disabled > "$TMP/enabled"; echo inactive > "$TMP/active" ;;
   stop)       [ -e "$TMP/stop.broken" ] && exit 1 ;;
@@ -52,7 +52,7 @@ grep -qx "TimeoutIdleSec=600" "$U/srv-fleet.automount" && grep -qx "WantedBy=mul
 ! grep -q "WantedBy" "$U/srv-fleet.mount" && ok "the mount unit itself is NOT wanted at boot (automount only)" || bad "mount unit is wanted at boot"
 [ "$(stat -c %a "$U/srv-fleet.mount")" = 644 ] && [ -d "$R/srv/fleet" ] && ok "units are 0644; the mount point exists" || bad "modes or mount point"
 grep -qx "daemon-reload" "$TMP/sc.log" && grep -qx "enable --now srv-fleet.automount" "$TMP/sc.log" && ok "daemon-reload, then enable --now the AUTOMOUNT" || bad "systemctl calls: $(tr '\n' '|' < "$TMP/sc.log")"
-! grep -q "srv-fleet.mount" "$TMP/sc.log" && ok "install never starts the mount itself" || bad "install touched the mount unit"
+! grep -qE "^(start|stop|restart|reload|enable|disable)( --now)? srv-fleet\.mount" "$TMP/sc.log" && ok "install never starts, stops or enables the mount itself (it may ask whether it is active)" || bad "install changed the mount unit: $(tr '\n' '|' < "$TMP/sc.log")"
 run check >/dev/null; [ $? = 0 ] && ok "check after install: rc 0" || bad "check after install"
 
 # --- idempotent -------------------------------------------------------------------------------------------------
@@ -155,6 +155,18 @@ PATH="$TMP/racebin:$BASE_PATH" bash "$S" install >/dev/null 2>&1; rc=$?
   && ok "a unit that appears mid-install survives; exit 3; nothing reloaded or enabled" || bad "mid-install file: rc=$rc $(head -2 "$U/srv-fleet.mount" | tr '\n' '|')"
 [ -z "$(ls -A "$U" | grep '^\.fleet-mount\.[A-Za-z0-9]\{6\}$')" ] && ok "no temp file is left behind" || bad "temp file left: $(ls -A "$U")"
 rm -f "$U/srv-fleet.mount" "$U/srv-fleet.automount"; run install >/dev/null
+
+# --- issue #258: byte-exact check; a rewritten unit does not change a live mount, and install says so ------------
+run install >/dev/null
+printf '\n\n' >> "$U/srv-fleet.mount"
+run check >/dev/null; [ $? = 1 ] && ok "check sees blank lines appended to a unit (byte compare)" || bad "appended newlines invisible to check"
+echo active > "$TMP/mount.active"
+out=$(run install)
+grep -q "^note: /srv/fleet is mounted now and keeps its earlier options" <<< "$out" && ok "install repairs the unit and says the live mount keeps its earlier options" || bad "no live-mount note: '$out'"
+! grep -q "restart srv-fleet\|stop srv-fleet.mount" "$TMP/sc.log" && ok "install never remounts a live share" || bad "install touched the live mount"
+out=$(run install); ! grep -q "^note:" <<< "$out" && ok "no note when nothing was rewritten" || bad "note without a rewrite"
+sed -i 's/soft,/hard,/' "$U/srv-fleet.mount"; echo inactive > "$TMP/mount.active"
+out=$(run install); ! grep -q "^note:" <<< "$out" && ok "no note when the share is not mounted" || bad "note with an inactive mount"
 
 # --- arguments and values --------------------------------------------------------------------------------------
 run >/dev/null 2>&1; [ $? = 2 ] && ok "no argument: exit 2" || bad "no argument rc"
