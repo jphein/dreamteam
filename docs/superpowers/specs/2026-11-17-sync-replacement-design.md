@@ -1,7 +1,7 @@
 # What replaces Syncthing for `~/.claude` and `~/Projects` (design, for the owner's pick)
 
 - **Date:** 2026-11-17 (drafted 19:46–20:1x PST by nebula-management, a research lane on serialhub)
-- **Status:** proposal. Nothing here is applied. The owner picks an option in §5.
+- **Status:** proposal. Nothing here is applied. The owner picks an option in §6.
 - **Asked by:** the owner, 18:59, relayed by the lead: *"i thought we were going to upgrade from syncthing"*.
   No earlier decision is on record. Flow row `c4690369`.
 - **Scope:** the two synced folders on six hosts (familiar, katana, wakizashi, serialhub, gpu0, gpu1). Other
@@ -46,7 +46,7 @@ entirely. It is done in four reversible phases, starting on the three newest lan
 
 | # | Failure | Evidence | Class |
 |---|---|---|---|
-| F1 | **Git refs lag the synced tree.** `git status` is wrong until someone "aligns" refs by hand; eight git verbs are blocked by a hook; commits go through the GitHub API. | [log 11-17] three hand aligns 08:55–09:06 (one refused: local main shared no history with the remote); six aligns of `~/.claude` between 17:5x and 19:3x, one per merged PR. | Code in a file syncer |
+| F1 | **Git refs lag the synced tree.** `git status` is wrong until someone "aligns" refs by hand; eight git verbs are blocked by a hook; commits go through the GitHub API. | [log 11-17] three hand aligns 08:55–09:06 (one refused: local main shared no history with the remote); five rounds of `~/.claude` aligns between 17:5x and 19:3x, one per merged PR, each on two hosts. | Code in a file syncer |
 | F2 | **Conflict copies.** | [log 11-16] 80 `sync-conflict` copies and backups removed from `~/.claude`; one held a rotated API key. [log 11-16] six `.env` conflict leftovers. [measured] tonight: **124** conflict files in familiar's two trees; 21 in the top three levels of katana's `~/Projects`. | Two writers |
 | F3 | **Stale content replaces new.** | [log 11-16 09:25] a hand-off file committed at 08:39 held stale content at 09:15, with no version copy on familiar. The lead's brief also names a replaced transcript; I did not find that line myself. | Two writers |
 | F4 | **Version stores grow without bound, and keep secrets.** | [log 11-17 15:3x] 10 GB `.stversions` cleared on serialhub's first day. Housekeep skill: 8.6 GB → 71 GB overnight. [log 11-15] a scrubbed secret survived in version copies on three hosts. | N copies |
@@ -66,7 +66,7 @@ steps.
 | **C** | **A central share** for scratch, state and large data (NFS, or sshfs where NFS is awkward). | F2, F3, F4, F6, F7 for shared state; F5 for data | One host down takes every lane's scratch with it. NFS over WiFi is slow for many small files. **SQLite and other lock-heavy stores must not live on it.** ubox0 fits only ~30 GB, so the data would be served from familiar's archive disk (2.1 TB), and familiar is allowed to sleep. | 2 days · none | ~0 |
 | **D** | **Mutagen or Unison pairs** in a star around familiar. | F2 in part: both stop on a conflict instead of writing a copy. F4: no version store. | Still a file syncer under git, so F1 stays. Five pair sessions to watch; Unison needs the same version on both ends and runs in batches; Mutagen is a daemon per pair. A stopped pair is silent unless checked. | 2–3 days · none | as today |
 | **E** | **Split by kind** (recommended): B for code, one-way shipping for session state, C for shared state and large data. | F1–F7 | Three mechanisms to learn in place of one; the share is a single point of dependence for scratch (softened below). | 5–6 days in four phases · one tap per phase | 0.1–2 GB + mounts |
-| **F** | **Syncthing for `~/.claude` only**, B for projects. | F1 and F5 for projects | `~/.claude` is itself a git repo, so F1 stays there (tonight's six aligns were all `~/.claude`), with F2–F4 and F7. | 3–4 days · none | 8–9 GB |
+| **F** | **Syncthing for `~/.claude` only**, B for projects. | F1 and F5 for projects | `~/.claude` is itself a git repo, so F1 stays there (tonight's five rounds of aligns were all `~/.claude`), with F2–F4 and F7. | 3–4 days · none | 8–9 GB |
 
 **Read of the candidates.** B is necessary and not sufficient: it cures the code but strands scratch. C alone
 cannot hold code, since git over a network share is slow and its locks are fragile [inferred from the SQLite and
