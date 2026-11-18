@@ -22,7 +22,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-HOOK="$ROOT/scripts/flow-callout.sh"
+HOOK="${FLOW_CALLOUT_HOOK:-$ROOT/scripts/flow-callout.sh}"   # tests/perturb-flow-callout.sh points this at a mutated copy
 
 PASS=0; FAIL=0
 pass() { echo "PASS: $1"; PASS=$((PASS+1)); }
@@ -182,6 +182,22 @@ allowed && [ "$ELAPSED" -le 4 ] && [ "$(calls)" -le 2 ] && [ "$(loglines)" -eq 1
   && pass "a slow ledger: stops at the budget (${ELAPSED}s, $(calls) calls), the unchecked rows logged once" \
   || fail "budget: rc=$RC elapsed=${ELAPSED}s calls=$(calls) log=[$(cat "$TMP/callout.log")]"
 rm -f "$FIX/delay"
+# 6f2) xreview #237 r2: the clock starts before ANY external command, the tmux fallback included. A tmux that takes
+#      1 s and a server that takes 1 s, under a 2 s budget: the list is read, the row log is not (budget), ≤ 3 s.
+reset; printf '#!/usr/bin/env bash\nsleep 1; echo example-lane\n' > "$TMP/bin/tmux"
+list "$H1"; show 88880001 "$H1" "$SPOKE"; echo 1 > "$FIX/delay"
+ASK_WHO="" BUDGET=2 run
+allowed && [ "$ELAPSED" -le 3 ] && [ "$(calls)" -eq 1 ] && grep -q 'budget' "$TMP/callout.log" \
+  && pass "a slow tmux fallback spends the same budget: list only (${ELAPSED}s, $(calls) call), the row logged as past the budget" \
+  || fail "tmux on the clock: rc=$RC elapsed=${ELAPSED}s calls=$(calls) log=[$(cat "$TMP/callout.log")]"
+rm -f "$FIX/delay"; printf '#!/usr/bin/env bash\necho "%s"\n' "example-lane" > "$TMP/bin/tmux"
+
+# 6h) xreview #237 r2: a malformed LIST reply allows with the promised log line, shape by shape (like 6e)
+for shape in '<html>sorry</html>' '{' '{}' '[]' '{"rows":"nope"}' '{"count":1}' '{"rows":[1,2]}' 'null'; do
+  reset; printf '%s\n' "$shape" > "$FIX/list.json"; run
+  allowed && [ "$(loglines)" -eq 1 ] && [ "$(calls)" -eq 1 ] && pass "malformed list ${shape:0:12} → allowed, one logged line" \
+    || fail "malformed list ${shape:0:12}: rc=$RC calls=$(calls) log=[$(cat "$TMP/callout.log")]"
+done
 
 # 6g) xreview #237 r1: the row-log cap is visible, newest rows first. Nine in-progress rows, the OLDEST silent: with
 #     the cap at 8 the oldest is not read and the log says so; with the cap at 9 it is read and blocks.
@@ -232,8 +248,9 @@ grep -q 'mine=example-lane,morpheus-x\|mine=morpheus-x,example-lane' "$FIX/curl.
 reset; printf '#!/usr/bin/env bash\necho sen\n' > "$TMP/bin/tmux"; list "$(row ffff0019 morpheus-x ordered $T0 null)"
 ASK_WHO="" DREAMTEAM_AGENT_ID="morpheus-x@team" run
 blocked && ! grep -q 'sen' "$FIX/curl.log" && pass "a teammate inside the lead's tmux session is not the lead → still checked" || fail "teammate in lead tmux: rc=$RC $(urls)"
-# 11d) …and a session with NO identity of its own, hosted in a tmux session named like the lead, is not the lead either
-#      and not a lane: no identity → allowed, nothing asked (the fallback name never matches the lead)
+# 11d) …and a session with NO identity of its own, hosted in a tmux session named like the lead, is neither the lead
+#      nor a lane: allowed, nothing asked (a mutation showed a separate guard here is unobservable: step (d) exempts
+#      the same name, so the hook keeps one rule, not two)
 reset; list "$(row ffff0021 sen ordered $T0 null)"; ASK_WHO="" run
 allowed && [ "$(calls)" -eq 0 ] && pass "a tmux fallback name equal to the lead's is no identity → allowed, nothing asked" || fail "lead-named tmux fallback: rc=$RC calls=$(calls)"
 printf '#!/usr/bin/env bash\necho "%s"\n' "example-lane" > "$TMP/bin/tmux"
@@ -245,7 +262,7 @@ allowed && [ "$(calls)" -eq 0 ] && pass "no identity at all → allowed, nothing
 # 11b) OUTSIDE tmux ($TMUX unset) the tmux name is never consulted: `tmux display-message` then answers with the
 #      host's most recent session, which is somebody else's lane (measured on familiar 2026-11-17 20:09: "spire")
 reset; list "$(row ffff0017 example-lane ordered $T0 null)"; ASK_WHO="" TMUXV="" run
-allowed && [ "$(calls)" -eq 0 ] && pass "outside tmux the session name is not used → no identity → allowed" || fail "outside tmux: rc=$RC calls=$(calls) $(cat "$FIX/curl.log" 2>/dev/null)"
+allowed && [ "$(calls)" -eq 0 ] && pass "outside tmux the session name is not used → no identity → allowed" || fail "outside tmux: rc=$RC calls=$(calls) $(urls)"
 
 # 12) malformed stdin → allowed
 reset; run 'not json'; allowed && pass "malformed stdin → allowed" || fail "malformed: rc=$RC"

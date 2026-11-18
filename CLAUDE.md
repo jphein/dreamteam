@@ -72,7 +72,8 @@ bash tests/run.sh          # runs every suite, exits non-zero on any failure
   not; fail-open controls each with ONE logged line (server unreachable, HTTP error, non-JSON, an unreadable row
   log, no key) and silent exits (stop_hook_active, the kill switch, the lead, no identity, malformed stdin); a
   missing config still enforces; identity from ASK_WHO, the tmux session, or a teammate id; the hooks.json Stop
-  entry and its seconds-not-ms timeout.
+  entry and its seconds-not-ms timeout. `tests/perturb-flow-callout.sh` (by hand, not under run.sh) applies one
+  mutation per rule to a COPY of the hook and requires each to turn the suite red: the evidence block for a review.
 - `tests/test-pr-tools.sh` — `pr-gate.sh` / `pr-merge.sh` / `cascade.sh` against a stubbed `gh`
   (fixture JSON piped through the real `jq` with the caller's real `--jq` filter, mutating calls
   logged so the tests assert what the tools DID). Pins the two traps: **a blank conclusion is a

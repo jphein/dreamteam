@@ -37,6 +37,7 @@
 # Seams (tests/test-flow-callout.sh): ASK_URL · ASK_KEY or DREAMTEAM_ASK_KEY_FILE · ASK_WHO · DREAMTEAM_AGENT_ID ·
 # DREAMTEAM_CONFIG · DREAMTEAM_FLOW_LOG · DREAMTEAM_FLOW_BUDGET · DREAMTEAM_FLOW_MAX_LOGS · curl and tmux from PATH.
 set -uo pipefail
+T0=$(( $(date +%s%N) / 1000000 ))   # ms; the deadline clock starts before ANY external command (xreview #237 r2: the tmux fallback counts)
 ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 CFG="${DREAMTEAM_CONFIG:-$ROOT/config.json}"
 LOG="${DREAMTEAM_FLOW_LOG:-$HOME/.claude/state/dreamteam/flow-callout.log}"
@@ -49,6 +50,8 @@ note() {
 }
 
 # ── (a) stdin: a Stop payload. stop_hook_active = the harness already continued once for a stop hook → never loop.
+BUDGET="${DREAMTEAM_FLOW_BUDGET:-9}"; case "$BUDGET" in ''|*[!0-9]*) BUDGET=9 ;; esac     # seconds, the whole hook
+MAX_LOGS="${DREAMTEAM_FLOW_MAX_LOGS:-8}"; case "$MAX_LOGS" in ''|*[!0-9]*) MAX_LOGS=8 ;; esac
 INPUT="$(cat 2>/dev/null || true)"
 ACTIVE="$(printf '%s' "$INPUT" | jq -r 'if type == "object" then (.stop_hook_active // false | tostring) else error("x") end' 2>/dev/null)" || exit 0
 [ "$ACTIVE" = "true" ] && exit 0
@@ -71,13 +74,13 @@ is_lead() { local l; for l in "${leads[@]}"; do [ "$1" = "$l" ] && return 0; don
 add "${ASK_WHO:-}"
 AID="$(dt_agent_id)"; add "${AID%%@*}"
 if [ "${#names[@]}" -eq 0 ] && [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
-  S="$(timeout 3 tmux display-message -p '#S' 2>/dev/null || true)"
-  # a fallback name equal to the lead's is no identity: it neither exempts nor names a lane
-  if [ -n "$S" ] && ! is_lead "$(printf '%s' "$S" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9_.-')"; then add "$S"; fi
+  tl=$(( BUDGET * 1000 - ($(( $(date +%s%N) / 1000000 )) - T0) )); [ "$tl" -gt 3000 ] && tl=3000   # ms, the same clock as the requests
+  [ "$tl" -ge 200 ] && add "$(timeout "$(( tl / 1000 )).$(printf '%03d' $(( tl % 1000 )))" tmux display-message -p '#S' 2>/dev/null || true)"
 fi
 [ "${#names[@]}" -gt 0 ] || exit 0
 
-# ── (d) the lead is never blocked: only an identity of its own ($ASK_WHO or --agent-id) can say so.
+# ── (d) the lead is never blocked. A tmux fallback equal to a lead name lands here too: such a session is not the
+#        lead, but it is no lane either (nothing of its own to answer for), so the outcome is the same: no check.
 for n in "${names[@]}"; do is_lead "$n" && exit 0; done
 WHO="${names[0]}"
 
@@ -97,29 +100,29 @@ URL="${ASK_URL:-http://127.0.0.1:7810}"; URL="${URL%/}"
 # ── (f) ONE budget for the whole stop (xreview #237 r1): every request's timeout is cut to what is left of it, and
 #        when it is spent the remaining rows are reported as unchecked, never silently skipped. Default 9 s inside the
 #        hook's 12 s; seconds. MAX_LOGS bounds the row logs read, newest rows first, and is reported the same way.
-BUDGET="${DREAMTEAM_FLOW_BUDGET:-9}"; case "$BUDGET" in ''|*[!0-9]*) BUDGET=9 ;; esac
-MAX_LOGS="${DREAMTEAM_FLOW_MAX_LOGS:-8}"; case "$MAX_LOGS" in ''|*[!0-9]*) MAX_LOGS=8 ;; esac
-T0=$(date +%s)
-left() { echo $(( BUDGET - ($(date +%s) - T0) )); }
+left() { echo $(( BUDGET * 1000 - ($(( $(date +%s%N) / 1000000 )) - T0) )); }   # ms left of the budget
+secs() { printf '%d.%03d' $(( $1 / 1000 )) $(( $1 % 1000 )); }                     # ms → "s.mmm" for curl -m / timeout
 # the key reaches curl on stdin (-H @-), never in argv: /proc/<pid>/cmdline is readable by every process of this uid
-get() { # get <url> <max-seconds>
-  local m="$2" l; l=$(left); [ "$l" -ge 1 ] || return 28; [ "$m" -le "$l" ] || m="$l"
-  printf 'X-Ask-Key: %s\n' "$KEY" | curl -fsS -m "$m" -H @- -H "X-Ask-Who: $WHO" -H "Accept: application/json" "$1"
+get() { # get <url> <max-ms>
+  local m="$2" l; l=$(left); [ "$l" -ge 200 ] || return 28; [ "$m" -le "$l" ] || m="$l"
+  printf 'X-Ask-Key: %s\n' "$KEY" | curl -fsS -m "$(secs "$m")" -H @- -H "X-Ask-Who: $WHO" -H "Accept: application/json" "$1"
 }
 
 # ── (g) my open rows. Any failure here is an outage: one line, exit 0.
 MINE="$(IFS=,; echo "${names[*]}")"
-LIST="$(get "$URL/api/flow?open=1&mine=$MINE" 4 2>/dev/null)"; rc=$?
+LIST="$(get "$URL/api/flow?open=1&mine=$MINE" 4000 2>/dev/null)"; rc=$?
 if [ "$rc" -ne 0 ]; then
   note "plan unreachable or refused at $URL (curl rc $rc): open rows of $MINE not checked"
   exit 0
 fi
-# newest first (the ledger lists that way; sorted here so a cap always drops the oldest), the four open states only
-ROWS="$(printf '%s' "$LIST" | jq -c '.rows | sort_by(-(.ordered_at // 0)) | .[] | select(.state as $s | ["ordered","in-progress","blocked","needs-jp"] | index($s)) | {id, state, what}' 2>/dev/null)" || ROWS=""
-if [ -z "$ROWS" ] && ! printf '%s' "$LIST" | jq -e 'type == "object" and (.rows | type == "array")' >/dev/null 2>&1; then
+# the ledger's row list, or nothing: an object whose rows are objects with a string id and state (xreview #237 r2:
+# a malformed list allows with the log line, like a malformed detail)
+if ! printf '%s' "$LIST" | jq -e 'type == "object" and (.rows | type == "array") and all(.rows[]; type == "object" and (.id | type) == "string" and (.state | type) == "string")' >/dev/null 2>&1; then
   note "the ledger at $URL answered something that is not its row list: open rows of $MINE not checked"
   exit 0
 fi
+# newest first (the ledger lists that way; sorted here so a cap always drops the oldest), the four open states only
+ROWS="$(printf '%s' "$LIST" | jq -c '.rows | sort_by(-(.ordered_at // 0)) | .[] | select(.state as $s | ["ordered","in-progress","blocked","needs-jp"] | index($s)) | {id, state, what}' 2>/dev/null)" || ROWS=""
 [ -n "$ROWS" ] || exit 0
 
 # ── (h) which of them are silent. `ordered` = silent by construction. Otherwise the row's log decides: an event by
@@ -147,9 +150,9 @@ while IFS= read -r r; do
   case "$id" in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) continue ;; esac
   if [ "$state" = "ordered" ]; then silent+=("$id	$what"); continue; fi
   if [ "$checked" -ge "$MAX_LOGS" ]; then capped=$((capped + 1)); continue; fi
-  if [ "$(left)" -lt 1 ]; then budgeted=$((budgeted + 1)); continue; fi
+  if [ "$(left)" -lt 200 ]; then budgeted=$((budgeted + 1)); continue; fi
   checked=$((checked + 1))
-  SHOW="$(get "$URL/api/flow/$id" 3 2>/dev/null)" || { unread=$((unread + 1)); continue; }
+  SHOW="$(get "$URL/api/flow/$id" 3000 2>/dev/null)" || { unread=$((unread + 1)); continue; }
   case "$(verdict "$id" "$SHOW")" in
     spoken) ;;
     silent) silent+=("$id	$what") ;;
