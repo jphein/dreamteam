@@ -69,8 +69,8 @@ steps.
 | **F** | **Syncthing for `~/.claude` only**, B for projects. | F1 and F5 for projects | `~/.claude` is itself a git repo, so F1 stays there (tonight's five rounds of aligns were all `~/.claude`), with F2–F4 and F7. | 3–4 days · none | 8–9 GB |
 
 **Read of the candidates.** B is necessary and not sufficient: it cures the code but strands scratch. C alone
-cannot hold code, since git over a network share is slow and its locks are fragile [inferred from the SQLite and
-lock caveat]. D replaces the tool and keeps the model. F keeps Syncthing exactly where it produced tonight's
+cannot hold code, since git over a network share is slow and its locks are fragile there
+[inferred]. D replaces the tool and keeps the model. F keeps Syncthing exactly where it produced tonight's
 aligns.
 
 ## 4. Recommended design (option E)
