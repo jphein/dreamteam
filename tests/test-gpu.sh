@@ -129,6 +129,10 @@ fresh; probe_fixture gpu1 1 0 10240; sed -i 's/^LANE,.*/LANE,OK,1024000/' "$PROB
 claim gpu1:0 --lane drift-gems --until 2h --peak-ram 2878 --peak-vram 3000 >/dev/null
 claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 2878 --peak-vram 3000 >/dev/null
 check "$(rc G drift-gems@team admit --card gpu1:0 --peak-ram 5500)" 75 "admit (#241): a run peak above its claim is refused beside the lane (5500 + 2878 + 1536 = 9914 > 9444; it fit the static 10444)"
+rm -f "$PROBES/gpu1.probe"                                                            # the host fell asleep between claim and admit
+check "$(rc G drift-gems@team admit --card gpu1:0 --peak-ram 3000)" 75 "admit with the host asleep: the footprint is unreadable, REFUSED (no lock on admit, so the footprint check itself carries it)"
+out=$(G drift-gems@team admit --card gpu1:0 --peak-ram 3000 2>&1)
+case "$out" in *"realm wol wake gpu1"*) pass "the admit-while-asleep refusal says how to wake the host" ;; *) fail "admit asleep text: $out" ;; esac
 # the sampler (r1 item 5): the probe's LANE line itself, against a stubbed ps (two claude sessions, a child, a
 # grandchild, an unrelated python3), and against a ps that fails
 mkdir -p "$TMP/psstub"
