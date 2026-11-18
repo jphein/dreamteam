@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # dreamteam — CHECK sync-conflicts: count Syncthing conflict copies in the synced trees (docs/CHECKS.md).
 #
-#   sync-conflicts-check.sh            walk the roots, publish the line, mail the lead when the count changed
+#   sync-conflicts-check.sh            walk the roots, publish the line, mail the lead when the count rose
 #   sync-conflicts-check.sh --list     also print every path found (stdout), after the line
 #
 # A conflict copy (`<name>.sync-conflict-<date>-<time>-<device>.<ext>`) means two hosts wrote one file and one
 # side's bytes were set aside. Nobody is told, so they pile up (2026-11-17: 124 on familiar; one earlier copy held
-# a rotated key). This check makes the count visible and tells the lead once per change, never every day.
+# a rotated key). This check makes the count visible and tells the lead when it rises, never every day.
 #
 # Line:   CHECK sync-conflicts[-<host>] ok   · 0 conflict copies in N roots · daily, owner Sen
 #         CHECK …                       warn · K conflict copies (A in ~/Projects, B in ~/.claude), newest <age> · list: <file>
@@ -16,8 +16,13 @@
 #         is a fail, not a zero: an instrument that cannot see has not measured anything.
 # Walk:   one `find` per root under ionice -c3 nice -n 15 when available (familiar's HDD: heavy walks run idle, one at a
 #         time); `.git`, `node_modules` and `.stversions` are pruned (version-store copies of conflicts are history).
+#         Only regular files count (a directory whose name matches is not a conflict copy).
+# Skips:  directories named in $DREAMTEAM_SYNC_SKIP_DIRS (colon-separated names or globs, no slash; default
+#         `backups:.sync-conflicts-merged:sync-conflicts-archive-*`) hold copies kept on purpose and are not walked.
+#         Set it to the empty string to skip nothing.
 # Mail:   $DREAMTEAM_MAIL_CMD (default `agent-mail send`) to $DREAMTEAM_LEAD_MAIL (default `sen`), only when the count
-#         is non-zero AND differs from the count last mailed. A mail that cannot be sent never changes the line.
+#         RISES above the remembered baseline, and at most once an hour; a fall lowers the baseline and sends
+#         nothing. A mail that cannot be sent never changes the line and is tried again at the next run.
 # State:  ${XDG_STATE_HOME:-~/.local/state}/dreamteam/sync-conflicts.{list,mailed} (0600).
 # Lock:   flock on $STATE/sync-conflicts.lock for the whole run (walk, list, line, mail).
 # Exit:   0 line published (any status) · 1 line could not be published · 22 bad argument · 75 another run holds
@@ -59,6 +64,16 @@ if ! flock -n 9; then
   echo "sync-conflicts-check: another run holds the lock; nothing published" >&2; exit 75
 fi
 
+# Directories whose conflict copies are KEPT on purpose (backups, merged archives) are skipped by NAME, at any depth.
+skip_raw="${DREAMTEAM_SYNC_SKIP_DIRS-backups:.sync-conflicts-merged:sync-conflicts-archive-*}"
+IFS=: read -r -a SKIPS <<< "$skip_raw"
+skipexpr=()
+for sname in "${SKIPS[@]}"; do
+  [ -n "$sname" ] || continue
+  case "$sname" in */*) check_line "$NAME" fail "a skip name holds a slash" "$OWNER"; exit $? ;; esac
+  skipexpr+=(-o -name "$sname")
+done
+
 idle=()
 command -v ionice >/dev/null 2>&1 && idle+=(ionice -c3)
 command -v nice >/dev/null 2>&1 && idle+=(nice -n 15)
@@ -79,8 +94,8 @@ for r in "${ROOTS[@]}"; do
   # -print0 is not used: one path per line is the list file's format, and a newline in a conflict name would only
   # inflate the count (a louder warn), never hide a file.
   # -H: a root that is a symlink is followed (plain find would not descend, and report a clean zero)
-  if ! "${idle[@]}" find -H "$r" \( -name .git -o -name node_modules -o -name .stversions \) -prune -o \
-         -name '*.sync-conflict-*' -print >> "$tmp" 2>/dev/null; then
+  if ! "${idle[@]}" find -H "$r" \( -name .git -o -name node_modules -o -name .stversions "${skipexpr[@]}" \) -prune -o \
+         -type f -name '*.sync-conflict-*' -print >> "$tmp" 2>/dev/null; then
     # find exits non-zero on any unreadable subdirectory; a partial walk is not a measurement of zero
     partial=1
   fi
@@ -111,19 +126,37 @@ fi
 check_line "$NAME" "$status" "$fact" "$next"; rc=$?
 [ "$LIST" = 1 ] && cat -- "$listf"
 
-# Tell the lead once per change. A count of zero clears the memory, so the next non-zero count mails again.
+# Tell the lead only when the count RISES, and at most once an hour (Sen 2026-11-17 22:11). A fall is a line,
+# not a mail. The memory is "<baseline> <epoch of the last mail>": a fall lowers the baseline without mailing, so a
+# later rise is measured from the low point; a rise held back by the hourly limit is still above the baseline at
+# the next run and is mailed then. A partial walk (fail) changes nothing here: its count is not a measurement.
 mailed="$STATE/sync-conflicts.mailed"
-last=$(cat -- "$mailed" 2>/dev/null || true)
-if [ "$status" = warn ] && [ "$last" != "$total" ]; then
-  read -r -a mailcmd <<< "${DREAMTEAM_MAIL_CMD:-agent-mail send}"
-  host="${DREAMTEAM_CHECK_HOST:-$(hostname 2>/dev/null)}"
-  if "${mailcmd[@]}" "${DREAMTEAM_LEAD_MAIL:-sen}" "CHECK $NAME warn: $fact on ${host:-?}; list ${listf/#$HOME/\~}" >/dev/null 2>&1; then
-    mt=$(mktemp "$STATE/.sync-conflicts.mailed.XXXXXX" 2>/dev/null) && printf '%s\n' "$total" > "$mt" \
-      && mv -T -f -- "$mt" "$mailed" || { rm -f -- "${mt:-}"; echo "sync-conflicts-check: mailed count not recorded" >&2; }
-  else
-    echo "sync-conflicts-check: mail to the lead not sent (will retry next run)" >&2
+base=0; last_mail=0
+if [ -f "$mailed" ] && [ ! -L "$mailed" ] && read -r b e _ 2>/dev/null < "$mailed"; then
+  [[ "${b:-}" =~ ^[0-9]+$ ]] && base=$b
+  [[ "${e:-}" =~ ^[0-9]+$ ]] && last_mail=$e
+fi
+now="${DREAMTEAM_NOW:-$(date +%s)}"; [[ "$now" =~ ^[0-9]+$ ]] || now=$(date +%s)
+remember() {   # remember <baseline> <epoch>: one atomic write
+  local mt
+  mt=$(mktemp "$STATE/.sync-conflicts.mailed.XXXXXX" 2>/dev/null) && printf '%s %s\n' "$1" "$2" > "$mt" \
+    && mv -T -f -- "$mt" "$mailed" || { rm -f -- "${mt:-}"; echo "sync-conflicts-check: mail memory not recorded" >&2; }
+}
+if [ "$status" = ok ] || [ "$status" = warn ]; then
+  if [ "$total" -gt "$base" ]; then
+    if [ $(( now - last_mail )) -ge 3600 ]; then
+      read -r -a mailcmd <<< "${DREAMTEAM_MAIL_CMD:-agent-mail send}"
+      host="${DREAMTEAM_CHECK_HOST:-$(hostname 2>/dev/null)}"
+      if "${mailcmd[@]}" "${DREAMTEAM_LEAD_MAIL:-sen}" "CHECK $NAME warn: $fact (was $base) on ${host:-?}; list ${listf/#$HOME/\~}" >/dev/null 2>&1; then
+        remember "$total" "$now"
+      else
+        echo "sync-conflicts-check: mail to the lead not sent (will retry next run)" >&2
+      fi
+    else
+      echo "sync-conflicts-check: count rose to $total; mail held (one an hour at most), sent at a later run" >&2
+    fi
+  elif [ "$total" -lt "$base" ]; then
+    remember "$total" "$last_mail"
   fi
-elif [ "$status" = ok ]; then
-  rm -f -- "$mailed"
 fi
 exit "$rc"
