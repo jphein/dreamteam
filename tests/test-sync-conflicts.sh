@@ -56,7 +56,7 @@ grep -q -e '/\.git/' -e node_modules -e '\.stversions' "$XDG_STATE_HOME/dreamtea
 MEM="$XDG_STATE_HOME/dreamteam/sync-conflicts.mailed"
 at() { DREAMTEAM_NOW=$((T0 + $1)) bash "$S" 2>"$TMP/err"; }
 [ "$(mails)" = 1 ] && ok "first non-zero count mails the lead once" || bad "mail count after first warn: $(mails)"
-grep -q '^send sen CHECK sync-conflicts warn: 3 conflict copies.*(was 0) on ' "$TMP/mail.log" && ok "mail goes to sen, carries the fact and the old count" || bad "mail text: $(cat "$TMP/mail.log")"
+grep -q '^send sen CHECK sync-conflicts warn: 3 conflict copies.*(was 0, peak 3) on ' "$TMP/mail.log" && ok "mail goes to sen, carries the fact and the old count" || bad "mail text: $(cat "$TMP/mail.log")"
 at 7200 >/dev/null
 [ "$(mails)" = 1 ] && ok "same count two hours on: no second mail" || bad "same count mailed again"
 touch "$B/skills/more.sync-conflict-20261117-111111-ABCDEFG.md"
@@ -68,7 +68,7 @@ case "$out" in "CHECK sync-conflicts warn · 5 conflict copies"*) ok "a rise ins
 [ "$(mails)" = 2 ] && grep -q "mail held" "$TMP/err" && ok "a rise inside the hour is NOT mailed (held, said on stderr)" || bad "rise inside the hour mailed: $(mails)"
 at 11400 >/dev/null                                                # exactly one hour after the 7800 mail
 [ "$(mails)" = 3 ] && ok "the held rise is mailed once the hour has passed" || bad "held rise not delivered: $(mails)"
-grep -q '5 conflict copies.*(was 4) on ' "$TMP/mail.log" && ok "the held rise's mail names the baseline it rose from" || bad "held mail text: $(tail -1 "$TMP/mail.log")"
+grep -q '5 conflict copies.*(was 4, peak 5) on ' "$TMP/mail.log" && ok "the held rise's mail names the baseline it rose from" || bad "held mail text: $(tail -1 "$TMP/mail.log")"
 rm -f "$B/skills/more2.sync-conflict-20261117-111112-ABCDEFG.md" "$B/skills/more.sync-conflict-20261117-111111-ABCDEFG.md"
 out=$(at 20000)
 case "$out" in "CHECK sync-conflicts warn · 3 conflict copies"*) ok "a fall is a line" ;; *) bad "fall line: '$out'" ;; esac
@@ -78,13 +78,28 @@ touch "$B/skills/more.sync-conflict-20261117-111111-ABCDEFG.md"
 at 20600 >/dev/null                                                # 10 minutes after the fall, hours after the last MAIL
 [ "$(mails)" = 4 ] && ok "a rise from the lowered baseline mails again (a fall does not restart the hour)" || bad "rise after a fall: $(mails)"
 
+# --- 3b. a rise that came and went inside the hour is still owed a mail (xreview r1) --------------------------
+n=$(mails); touch "$B/skills/blip.sync-conflict-20261117-111113-ABCDEFG.md"
+at 20900 >/dev/null                                                # 5 minutes after the 20600 mail: held
+rm -f "$B/skills/blip.sync-conflict-20261117-111113-ABCDEFG.md"
+at 21500 >/dev/null                                                # back at the baseline, still inside the hour
+[ "$(mails)" = "$n" ] && [ "$(cut -d' ' -f3 "$MEM")" = 5 ] && ok "a held rise that fell back stays owed (pending peak kept)" || bad "held-then-fell: mails=$(mails) mem=$(cat "$MEM")"
+touch "$TMP/mail.broken"; at 24200 >/dev/null; rm -f "$TMP/mail.broken" # the hour is up but the send does not happen
+[ "$(cut -d' ' -f3 "$MEM")" = 5 ] && ok "a delayed send that does not happen keeps the debt" || bad "debt dropped after a send that did not happen: $(cat "$MEM")"
+n=$(mails); at 24260 >/dev/null
+[ "$(mails)" = $((n + 1)) ] && grep -q '4 conflict copies.*(was 4, peak 5) on ' "$TMP/mail.log" && ok "the owed mail goes out, naming the peak" || bad "owed mail: mails=$(mails) $(tail -1 "$TMP/mail.log")"
+[ "$(cut -d' ' -f3 "$MEM")" = 0 ] && ok "the debt is cleared once mailed" || bad "debt not cleared: $(cat "$MEM")"
+n=$(mails); at 30000 >/dev/null
+[ "$(mails)" = "$n" ] && ok "no further mail for the same count" || bad "steady count mailed again"
+
 # --- 4. a mail that cannot be sent changes nothing but is retried ---------------------------------------------
 touch "$A/repo/c.sync-conflict-20261117-121212-ABCDEFG.md" "$TMP/mail.broken"
 before=$(cat "$MEM")
 out=$(at 40000); rc=$?
 case "$out" in "CHECK sync-conflicts warn · 5 conflict copies"*) ok "mail down: the line is still published" ;; *) bad "mail down: '$out'" ;; esac
 [ "$rc" = 0 ] && grep -q "not sent" "$TMP/err" && ok "mail down: rc 0 and a stderr note" || bad "mail down: rc=$rc"
-[ "$(cat "$MEM")" = "$before" ] && ok "mail down: the memory is unchanged" || bad "mail down: memory changed to $(cat "$MEM")"
+[ "$(cut -d' ' -f1,2 "$MEM")" = "$(cut -d' ' -f1,2 <<< "$before")" ] && [ "$(cut -d' ' -f3 "$MEM")" = 5 ] \
+  && ok "mail down: baseline and hour unchanged, the rise recorded as owed" || bad "mail down: memory $(cat "$MEM") (was $before)"
 rm -f "$TMP/mail.broken"; n=$(mails)
 at 40060 >/dev/null
 [ "$(mails)" = $((n + 1)) ] && ok "mail is retried on the next run (no hour's wait after a send that did not happen)" || bad "mail not retried"
@@ -156,20 +171,33 @@ rm -f "$XDG_STATE_HOME/dreamteam/sync-conflicts.lock"; echo keep > "$XDG_STATE_H
 bash "$S" >/dev/null
 [ "$(cat "$XDG_STATE_HOME/dreamteam/sync-conflicts.lock")" = keep ] && ok "an existing lock file is not truncated" || bad "the lock file was truncated"
 
-# --- 11. kept backups are skipped by directory NAME; only files count (Sen 2026-11-17 22:11) ------------------
+# --- 11. kept copies are skipped by directory NAME, visibly; only files count (Sen 22:11; xreview r1) ---------
 find "$A" "$B" -name '*.sync-conflict-*' -not -path '*/.git/*' -not -path '*/node_modules/*' -not -path '*/.stversions/*' -delete 2>/dev/null
-base=$(bash "$S" | sed -E 's/.*(ok|warn) · ([0-9]+) conflict.*/\2/')
-mkdir -p "$A/repo/scratch/hk/backups/dc" "$A/repo/scratch/q/.sync-conflicts-merged" "$A/repo/scratch/sync-conflicts-archive-2026-11-17" \
-         "$A/repo/src/dirname.sync-conflict-20261117-000000-ABCDEFG"
-touch "$A/repo/scratch/hk/backups/dc/HANDOFF.sync-conflict-20261117-000001-ABCDEFG.md" \
+num() { sed -E 's/.*(ok|warn) · ([0-9]+) conflict.*/\2/'; }
+base=$(bash "$S" | num)
+mkdir -p "$A/repo/scratch/hk/backups/dreamteam-state-conflicts" "$A/repo/scratch/q/.sync-conflicts-merged" \
+         "$A/repo/scratch/sync-conflicts-archive-2026-11-17" "$A/repo/src/dirname.sync-conflict-20261117-000000-ABCDEFG"
+touch "$A/repo/scratch/hk/backups/dreamteam-state-conflicts/HANDOFF.sync-conflict-20261117-000001-ABCDEFG.md" \
       "$A/repo/scratch/q/.sync-conflicts-merged/dispatch.sync-conflict-20261117-000002-ABCDEFG.log" \
       "$A/repo/scratch/sync-conflicts-archive-2026-11-17/x.sync-conflict-20261117-000003-ABCDEFG.log"
-now=$(bash "$S" | sed -E 's/.*(ok|warn) · ([0-9]+) conflict.*/\2/')
-[ "$now" = "$base" ] && ok "copies under backups/, .sync-conflicts-merged/ and sync-conflicts-archive-*/ are not counted" || bad "kept backups counted: $base -> $now"
-all=$(DREAMTEAM_SYNC_SKIP_DIRS="" bash "$S" | sed -E 's/.*(ok|warn) · ([0-9]+) conflict.*/\2/')
+out=$(bash "$S"); now=$(num <<< "$out")
+[ "$now" = "$base" ] && ok "copies under the three named kept dirs are not counted" || bad "kept dirs counted: $base -> $now"
+case "$out" in *", 3 kept dirs skipped · "*) ok "the line says how many kept dirs were skipped" ;; *) bad "skip not visible: '$out'" ;; esac
+[ "$(wc -l < "$XDG_STATE_HOME/dreamteam/sync-conflicts.skipped")" = 3 ] && ok "the skipped dirs are listed in a file" || bad "skipped list"
+[ "$(awk -F' · ' '{print NF}' <<< "$out")" = 3 ] && ok "the line is still three segments" || bad "segments with the skip note"
+touch "$A/repo/scratch/hk/backups/real.sync-conflict-20261117-000004-ABCDEFG.md"                 # a generic backups dir
+g=$(bash "$S" | num)
+[ "$g" = $((base + 1)) ] && ok "a copy in a plain 'backups' dir is NOT hidden (no generic default name)" || bad "generic backups hidden: $base -> $g"
+rm -f "$A/repo/scratch/hk/backups/real.sync-conflict-20261117-000004-ABCDEFG.md"
+all=$(DREAMTEAM_SYNC_SKIP_DIRS="" bash "$S" | num)
 [ "$all" = $((base + 3)) ] && ok "an empty skip list counts them (and still not the matching DIRECTORY)" || bad "empty skip list: $base -> $all"
-one=$(DREAMTEAM_SYNC_SKIP_DIRS="backups" bash "$S" | sed -E 's/.*(ok|warn) · ([0-9]+) conflict.*/\2/')
+DREAMTEAM_SYNC_SKIP_DIRS="" bash "$S" | grep -q "kept dirs skipped" && bad "empty skip list still reports skips" || ok "an empty skip list reports no skips"
+one=$(DREAMTEAM_SYNC_SKIP_DIRS=".sync-conflicts-merged" bash "$S" | num)
 [ "$one" = $((base + 2)) ] && ok "the skip list is the operator's: one name skips one kind" || bad "one skip name: $base -> $one"
+touch "$A/repo/src/sync-conflicts-archive-notes.sync-conflict-20261117-000009-ABCDEFG.txt"   # a FILE matching a skip glob
+f=$(bash "$S" | num)
+[ "$f" = $((base + 1)) ] && ok "a regular file whose name matches a skip glob is still counted (skips are directories)" || bad "file matching a skip glob: $base -> $f"
+rm -f "$A/repo/src/sync-conflicts-archive-notes.sync-conflict-20261117-000009-ABCDEFG.txt"
 out=$(DREAMTEAM_SYNC_SKIP_DIRS="scratch/backups" bash "$S")
 case "$out" in "CHECK sync-conflicts fail · a skip name holds a slash · "*) ok "a skip name with a slash is refused" ;; *) bad "slash skip: '$out'" ;; esac
 
