@@ -1,0 +1,11 @@
+[Unit]
+Description=CHECK lead-liveness every 2 min (dreamteam scripts/lead-watchdog.sh)
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=2min
+AccuracySec=20s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
