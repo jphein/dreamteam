@@ -157,6 +157,19 @@ out=$(bash "$TP"); case "$out" in "CHECK transcripts-push fail · cannot take th
 rm -f "$ST/transcripts-push.lock"
 bash "$TP" nope >/dev/null 2>&1; [ $? = 22 ] && ok "unknown argument: exit 22" || bad "argument rc"
 
+# ================= xreview r3 on #262: relative state root; a stopped run publishes fail ======================
+for job in "$CP" "$TP"; do
+  XDG_STATE_HOME="rel/state" bash "$job" >/dev/null 2>&1; [ $? = 22 ] && ok "$(basename "$job"): a relative XDG_STATE_HOME is refused" || bad "$(basename "$job") relative state"
+  XDG_STATE_HOME="-x" bash "$job" >/dev/null 2>&1; [ $? = 22 ] && ok "$(basename "$job"): a dash-led XDG_STATE_HOME is refused" || bad "$(basename "$job") dash state"
+done
+bash "$CP" >/dev/null 2>&1; grep -q "^CHECK config-pull ok" "$LINE" || bash "$CP" >/dev/null 2>&1
+mkdir -p "$TMP/slowbin"; REALGIT3="$(command -v git)"
+printf '#!/bin/sh\ncase " $* " in *" fetch "*) sleep 60 & echo $! > "%s/slow.pid"; wait ;; esac\nexec "%s" "$@"\n' "$TMP" "$REALGIT3" > "$TMP/slowbin/git"; chmod +x "$TMP/slowbin/git"
+PATH="$TMP/slowbin:$PATH" bash "$CP" >/dev/null 2>&1 & pid=$!
+sleep 1.5; kill -TERM "$pid" 2>/dev/null; wait "$pid"; rc=$?
+case "$(cat "$LINE")" in "CHECK config-pull fail · stopped before it finished (timeout or signal) · "*) ok "config-pull stopped by TERM: the earlier ok is replaced by fail" ;; *) bad "TERM left: $(cat "$LINE") rc=$rc" ;; esac
+[ -f "$TMP/slow.pid" ] && kill "$(cat "$TMP/slow.pid")" 2>/dev/null; true
+
 # ================= units =======================================================================================
 if command -v systemd-analyze >/dev/null 2>&1; then
   for u in dreamteam-config-pull dreamteam-transcripts-push; do

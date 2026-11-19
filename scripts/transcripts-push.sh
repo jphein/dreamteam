@@ -33,6 +33,7 @@ ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 CHECK="$(check_name transcripts-push)"
 OWNER="every 10 min, owner Sen"
 SRC="${TRANSCRIPTS_SRC:-$HOME/.claude/projects}"
+case "${XDG_STATE_HOME:-/}" in /*) ;; *) echo "XDG_STATE_HOME must be absolute" >&2; exit 22 ;; esac
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/dreamteam"
 DESTF="$STATE/transcripts-push.dest"; CUT="$STATE/transcripts-push.cut"; LOCK="$STATE/transcripts-push.lock"
 SSH="${TRANSCRIPTS_SSH:-ssh}"
@@ -60,7 +61,7 @@ valid_dest() {   # /abs/dir or host:/abs/dir, plain characters only, no `..`, `.
 }
 plainfile() { [ ! -L "$1" ] && { [ ! -e "$1" ] || [ -f "$1" ]; }; }   # absent or a regular file; never a symlink (even dangling)
 lock() {
-  mkdir -p "$STATE" 2>/dev/null && [ -d "$STATE" ] || return 1
+  mkdir -p -- "$STATE" 2>/dev/null && [ -d "$STATE" ] || return 1
   plainfile "$LOCK" || return 1
   exec 9>> "$LOCK" || return 1
   flock -n 9 || { echo "transcripts-push: another run holds the lock; nothing done" >&2; exit 75; }
@@ -113,6 +114,7 @@ case "$DEST" in
     ;;
 esac
 
+trap 'check_line "$CHECK" fail "stopped before it finished (timeout or signal)" "$OWNER" >/dev/null; exit 143' TERM INT HUP
 list="$(mktemp "$STATE/.transcripts-push.list.XXXXXX")" || { check_line "$CHECK" fail "cannot create a temp file" "$OWNER"; exit $?; }
 trap 'rm -f -- "$list"' EXIT
 # regular files only, changed since the cut; a walk that could not read a directory is not a complete list

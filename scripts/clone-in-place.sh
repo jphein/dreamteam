@@ -26,7 +26,7 @@
 #                        counts apart: paths another mechanism owns
 #   CLONE_STATE          where prepared git dirs, status files and tars live (default ~/.local/state/sync-phase1);
 #                        absolute. The per-directory lock is NOT here: ~/.local/state/dreamteam/clone-locks.
-# <name>.protected in the state dir lists paths that were the owner's untracked files when a sync made them tracked;
+# .git/clone-in-place.protected in the repository lists paths that were the owner's untracked files when a sync made them tracked;
 # freshen never writes them. Delete a line (or the file) by hand once the owner has dealt with the file.
 # Exit: 0 ok · 2 precondition not met · 22 usage.
 set -uo pipefail
@@ -140,8 +140,7 @@ case "$cmd" in
     # After apply: bring ONLY stale files (on-disk bytes equal to an older committed version OF THE SAME PATH) and
     # absent files up to HEAD. Real edits and untracked files are never touched. The stale files go into a tar first.
     # The last line is machine-readable:  RESULT freshened=<n> stale=<s> absent=<a> kept=<k> linked=<l> skipped=<p>
-    # Known limit: a file is re-hashed immediately before the checkout and the run stops if anything changed since
-    # it was judged, but an editor saving in the instant between that re-hash and git's write is not excluded.
+    # The write is a two-way merge (see below): git itself refuses if a candidate changed after it was judged.
     [ -d "$D/.git" ] || { echo "$name: not a clone yet (apply first)"; exit 2; }
     paused || { echo "$name: the Syncthing folder '$FOLDER' is not paused; refusing"; exit 2; }
     dirlock
@@ -149,10 +148,20 @@ case "$cmd" in
     stf=$(mktemp "$S/.$name.status.XXXXXX") && lst=$(mktemp "$S/.$name.paths.XXXXXX") && stl=$(mktemp "$S/.$name.stale.XXXXXX") \
       && sums=$(mktemp "$S/.$name.sums.XXXXXX") && abl=$(mktemp "$S/.$name.absent.XXXXXX") && snap=$(mktemp "$S/.$name.snap.XXXXXX") \
       || { echo "$name: cannot create work files in $S"; exit 2; }
-    trap 'rm -f -- "$stf" "$lst" "$stl" "$sums" "$abl" "$snap"' EXIT
-    # paths that were UNTRACKED files of the owner when a sync made them tracked: never written, whatever their bytes
-    prot="$S/$name.protected"
-    protected() { [ -f "$prot" ] && [ ! -L "$prot" ] && grep -qzxF -- "$1" "$prot"; }
+    trap 'rm -f -- "$stf" "$lst" "$stl" "$sums" "$abl" "$snap" "$snap".*' EXIT
+    # paths that were UNTRACKED files of the owner when a sync made them tracked: never written, whatever their bytes.
+    # The list lives in the repository's own git dir, so every caller (any name, any CLONE_STATE) sees the same one,
+    # and a list that exists but cannot be read stops the run: protection never fails open.
+    prot="$D/.git/clone-in-place.protected"
+    if [ -e "$prot" ] || [ -L "$prot" ]; then
+      [ -f "$prot" ] && [ ! -L "$prot" ] && [ -r "$prot" ] || { echo "$name: $prot is not a readable regular file; nothing changed"; exit 2; }
+    fi
+    protected() {   # 0 protected · 1 not · anything else stops the run
+      [ -e "$prot" ] || return 1
+      grep -qzxF -- "$1" "$prot"; local r=$?
+      [ "$r" -le 1 ] || { echo "$name: cannot read $prot; nothing changed"; exit 2; }
+      return "$r"
+    }
     # the listing is complete or the run stops: a status that did not finish is not "nothing to do"
     git -C "$D" status --porcelain -z --no-renames > "$stf" || { echo "$name: git status did not work; nothing changed"; exit 2; }
     kept=0; linked=0; skipn=0; protn=0
@@ -171,8 +180,10 @@ case "$cmd" in
           # ONE snapshot of the bytes: the same copy is judged against history and gives the checksum the live file
           # must still have right before the write. An edit saved at any moment after the snapshot stops the run.
           if [ -f "$D/$f" ] && [ ! -L "$D/$f" ] && cp -- "$D/$f" "$snap" 2>/dev/null && old_version "$f" "$snap"; then
+            sum=$(sha256sum < "$snap" | cut -d' ' -f1)
+            cp -- "$snap" "$snap.$sum" || { echo "$name: cannot keep the judged bytes of $f"; exit 2; }
             printf '%s\0' "$f" >> "$lst"; printf '%s\0' "$f" >> "$stl"
-            printf '%s  %s\0' "$(sha256sum < "$snap" | cut -d' ' -f1)" "$f" >> "$sums"
+            printf '%s  %s\0' "$sum" "$f" >> "$sums"
           else kept=$((kept + 1)); fi ;;
         "??") ;;
         *) kept=$((kept + 1)) ;;
@@ -192,18 +203,31 @@ case "$cmd" in
       tar -C "$D" --null -T "$stl" -cf "$tarf" || { echo "$name: backup tar did not work; nothing changed"; exit 2; }
       [ "$(tar -tf "$tarf" | wc -l)" = "$ns" ] || { echo "$name: backup tar is incomplete; nothing changed"; exit 2; }
     fi
-    # re-validate immediately before writing: every stale file still has the bytes that were judged and backed up,
-    # every absent path is still absent
+    # The write is git's own two-way merge, from a tree holding EXACTLY the judged state of the candidates to HEAD.
+    # git refuses the whole step if any candidate's file no longer matches what was judged ("not uptodate") or if a
+    # file has appeared where an absent path would go ("would be overwritten"): an edit saved at any moment before
+    # git's own check is kept, and nothing is written. Other paths with real edits are not in the merge: git keeps
+    # them as they are. Done on a private copy of the index, so a refusal leaves the repository's index untouched.
+    idx=$(mktemp "$S/.$name.index.XXXXXX") || { echo "$name: cannot create a work index"; exit 2; }
+    trap 'rm -f -- "$stf" "$lst" "$stl" "$sums" "$abl" "$snap" "$idx"' EXIT
+    cp -- "$D/.git/index" "$idx" || { echo "$name: cannot copy the index"; exit 2; }
+    gi() { GIT_INDEX_FILE="$idx" git --literal-pathspecs -C "$D" "$@"; }
     while IFS= read -r -d '' rec; do
       want="${rec%%  *}"; f="${rec#*  }"
-      [ -f "$D/$f" ] && [ ! -L "$D/$f" ] && [ "$(sha256sum < "$D/$f" | cut -d' ' -f1)" = "$want" ] \
-        || { echo "$name: $f changed while this ran; nothing changed (run again)"; exit 2; }
+      mode=$(gi ls-files -s -- "$f" | head -1 | cut -d' ' -f1); [ -n "$mode" ] || mode=100644
+      blob=$(gi hash-object --no-filters -w -- "$snap.$want" 2>/dev/null) || blob=""
+      [ -n "$blob" ] || { echo "$name: cannot record the judged bytes of $f; nothing changed"; exit 2; }
+      gi update-index --cacheinfo "$mode,$blob,$f" || { echo "$name: cannot stage $f; nothing changed"; exit 2; }
     done < "$sums"
     while IFS= read -r -d '' f; do
-      [ ! -e "$D/$f" ] && [ ! -L "$D/$f" ] || { echo "$name: $f appeared while this ran; nothing changed (run again)"; exit 2; }
+      gi update-index --force-remove -- "$f" || { echo "$name: cannot stage the absence of $f; nothing changed"; exit 2; }
     done < "$abl"
-    # --literal-pathspecs: a tracked name holding * ? [ or :( is a NAME here, never a pattern that could match more
-    git --literal-pathspecs -C "$D" checkout -q HEAD --pathspec-from-file="$lst" --pathspec-file-nul || { echo "$name: checkout did not work"; exit 2; }
+    gi update-index -q --refresh >/dev/null 2>&1
+    from=$(gi write-tree) || { echo "$name: cannot write the judged tree; nothing changed"; exit 2; }
+    if ! out=$(gi read-tree -m -u "$from" HEAD 2>&1); then
+      echo "$name: a file changed or appeared while this ran ($(head -1 <<< "$out" | cut -c1-100)); nothing changed (run again)"; exit 2
+    fi
+    cp -- "$idx" "$D/.git/index" || { echo "$name: files updated but the index could not be stored; run 'git -C $D reset -q'"; exit 2; }
     printf '%s: freshened %d files (%d stale, %d absent); %d differing files left as they are; status lines now %s; backup %s\n' \
       "$name" "$n" "$ns" "$((n - ns))" "$kept" "$(git -C "$D" status --porcelain | wc -l)" "$tarf"
     echo "RESULT freshened=$n stale=$ns absent=$((n - ns)) kept=$kept linked=$linked skipped=$skipn"
@@ -222,7 +246,7 @@ case "$cmd" in
     if [ "$old" != "$new" ]; then
       # A file that is UNTRACKED now and that origin's new head tracks stays the owner's: remember it BEFORE the
       # move, so a later freshen never writes it (even when its bytes equal something this path once held).
-      umask 077; mkdir -p -- "$S"; prot="$S/$name.protected"
+      umask 077; mkdir -p -- "$S"; prot="$D/.git/clone-in-place.protected"
       [ ! -L "$prot" ] || { echo "$name: $prot is a symlink; nothing done"; exit 2; }
       added=$(mktemp "$S/.$name.added.XXXXXX") || { echo "$name: cannot create a work file"; exit 2; }
       git -C "$D" --literal-pathspecs diff --no-renames --name-only -z --diff-filter=A "$old" "$new" > "$added" \

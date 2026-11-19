@@ -113,7 +113,7 @@ mkdir -p "$TMP/tarrace"; REALTAR="$(command -v tar)"
 printf '#!/bin/sh\necho "edited while it ran" > "%s/a.txt"\nexec "%s" "$@"\n' "$P" "$REALTAR" > "$TMP/tarrace/tar"; chmod +x "$TMP/tarrace/tar"
 echo one > "$P/a.txt"
 out=$(PATH="$TMP/tarrace:$PATH" bash "$S" freshen proj 2>&1); rc=$?
-[ "$rc" = 2 ] && [ "$(cat "$P/a.txt")" = "edited while it ran" ] && grep -q "changed while this ran" <<< "$out" && ok "an edit landing after the judgement is kept: exit 2, nothing written" || bad "edit mid-run: rc=$rc a=$(cat "$P/a.txt")"
+[ "$rc" = 2 ] && [ "$(cat "$P/a.txt")" = "edited while it ran" ] && grep -q "changed or appeared while this ran" <<< "$out" && ok "an edit landing after the judgement is kept: exit 2, nothing written" || bad "edit mid-run: rc=$rc a=$(cat "$P/a.txt")"
 git -C "$P" checkout -q HEAD -- a.txt
 
 # --- xreview r2 on #262 -----------------------------------------------------------------------------------------
@@ -125,7 +125,7 @@ echo gone-v1 > "$P/back.txt"                                  # untracked now; s
 echo gone-v2 > "$TMP/w0/back.txt"; q -C "$TMP/w0" add back.txt; q -C "$TMP/w0" commit -m reintroduce; q -C "$TMP/w0" push origin main
 bash "$S" sync proj >/dev/null; out=$(bash "$S" freshen proj)
 [ "$(cat "$P/back.txt")" = gone-v1 ] && grep -q "untracked files before origin started tracking them; left alone" <<< "$out" && ok "an untracked file that origin re-introduces stays the owner's (protected at sync time)" || bad "reintroduced path overwritten: $(cat "$P/back.txt") / $out"
-git -C "$P" checkout -q HEAD -- back.txt; : > "$HOME/.local/state/sync-phase1/proj.protected"
+git -C "$P" checkout -q HEAD -- back.txt; : > "$P/.git/clone-in-place.protected"
 # (2) the bytes judged are the bytes re-validated: an edit saved right after the snapshot stops the run
 mkdir -p "$TMP/cprace"; REALCP="$(command -v cp)"
 printf '#!/bin/sh\n"%s" "$@"; rc=$?\ncase "$*" in *"/a.txt "*) echo "saved after the snapshot" > "%s/a.txt" ;; esac\nexit $rc\n' "$REALCP" "$P" > "$TMP/cprace/cp"; chmod +x "$TMP/cprace/cp"
@@ -135,6 +135,32 @@ out=$(PATH="$TMP/cprace:$PATH" bash "$S" freshen proj 2>&1); rc=$?
 git -C "$P" checkout -q HEAD -- a.txt
 # (3) a relative state root is refused
 CLONE_STATE="-rel" bash "$S" freshen proj >/dev/null 2>&1; [ $? = 22 ] && ok "a CLONE_STATE that is not absolute (here: starting with a dash) is refused" || bad "relative CLONE_STATE"
+
+# --- xreview r3 on #262 -----------------------------------------------------------------------------------------
+# (1) the protection list belongs to the repository: another name and another state root still see it
+printf '%s\0' a.txt > "$P/.git/clone-in-place.protected"; echo one > "$P/a.txt"
+out=$(CLONE_DIR="$P" CLONE_STATE="$TMP/state3" bash "$S" freshen othername)
+[ "$(cat "$P/a.txt")" = one ] && grep -q "untracked files before origin started tracking them" <<< "$out" && ok "a protected path stays protected under another name and another state root" || bad "protection bypassed: '$out'"
+# (3) an unusable protection list stops the run (never fails open)
+rm -f "$P/.git/clone-in-place.protected"; ln -s "$TMP/nowhere" "$P/.git/clone-in-place.protected"
+out=$(bash "$S" freshen proj 2>&1); rc=$?
+[ "$rc" = 2 ] && [ "$(cat "$P/a.txt")" = one ] && ok "a symlinked protection list: exit 2, nothing written" || bad "symlinked protection: rc=$rc"
+rm -f "$P/.git/clone-in-place.protected"; mkdir "$P/.git/clone-in-place.protected"
+bash "$S" freshen proj >/dev/null 2>&1; [ $? = 2 ] && [ "$(cat "$P/a.txt")" = one ] && ok "a protection list that is a directory: exit 2, nothing written" || bad "directory protection"
+rmdir "$P/.git/clone-in-place.protected"
+# (2) an edit saved at the very last moment, right before git's own write, is kept: git refuses the merge
+mkdir -p "$TMP/rtrace"; REALGIT2="$(command -v git)"
+printf '#!/bin/sh\ncase " $* " in *" read-tree "*) echo "saved at the last moment" > "%s/a.txt" ;; esac\nexec "%s" "$@"\n' "$P" "$REALGIT2" > "$TMP/rtrace/git"; chmod +x "$TMP/rtrace/git"
+echo one > "$P/a.txt"; rm -f "$P/.gitignore"
+out=$(PATH="$TMP/rtrace:$PATH" bash "$S" freshen proj 2>&1); rc=$?
+[ "$rc" = 2 ] && [ "$(cat "$P/a.txt")" = "saved at the last moment" ] && [ ! -e "$P/.gitignore" ] && ok "an edit saved just before git writes: git refuses, the edit is kept, nothing else is written" || bad "last-moment edit: rc=$rc a=$(cat "$P/a.txt")"
+git -C "$P" diff --cached --quiet && ok "a refused merge leaves the repository's index as it was" || bad "index changed by a refused merge"
+# an untracked file appearing where an absent path goes is never overwritten
+printf '#!/bin/sh\ncase " $* " in *" read-tree "*) echo "owner made it" > "%s/.gitignore" ;; esac\nexec "%s" "$@"\n' "$P" "$REALGIT2" > "$TMP/rtrace/git"
+git -C "$P" checkout -q HEAD -- a.txt; echo one > "$P/a.txt"
+out=$(PATH="$TMP/rtrace:$PATH" bash "$S" freshen proj 2>&1); rc=$?
+[ "$rc" = 2 ] && [ "$(cat "$P/.gitignore")" = "owner made it" ] && [ "$(cat "$P/a.txt")" = one ] && ok "a file appearing at an absent path just before git writes: kept, nothing written" || bad "appearing file: rc=$rc"
+git -C "$P" checkout -q HEAD -- a.txt .gitignore
 
 # --- sync: after an API commit, the branch moves to origin's head and no file is written -----------------------
 git -C "$P" remote set-url origin "$TMP/origin.git"

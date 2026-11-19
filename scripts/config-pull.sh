@@ -26,6 +26,7 @@ NAME="${CONFIG_PULL_NAME:-claude}"
 SKIP="${CONFIG_PULL_SKIP-projects/}"
 CHECK="$(check_name config-pull)"
 OWNER="every 10 min, owner Sen"
+case "${XDG_STATE_HOME:-/}" in /*) ;; *) echo "XDG_STATE_HOME must be absolute" >&2; exit 22 ;; esac
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/dreamteam"
 TOOL="$ROOT/scripts/clone-in-place.sh"
 case "$NAME" in *[!A-Za-z0-9._-]*|""|.*) check_line "$CHECK" fail "bad CONFIG_PULL_NAME" "$OWNER"; exit $? ;; esac
@@ -33,12 +34,14 @@ case "$DIR" in /*) ;; *) check_line "$CHECK" fail "CONFIG_PULL_DIR is not absolu
 [ -d "$DIR/.git" ] || { check_line "$CHECK" fail "${DIR/#$HOME/\~} is not a git clone" "$OWNER"; exit $?; }
 
 umask 077
-mkdir -p "$STATE" 2>/dev/null && [ -d "$STATE" ] || { check_line "$CHECK" fail "no state dir $STATE" "$OWNER"; exit $?; }
+mkdir -p -- "$STATE" 2>/dev/null && [ -d "$STATE" ] || { check_line "$CHECK" fail "no state dir $STATE" "$OWNER"; exit $?; }
 LOCK="$STATE/config-pull.$NAME.lock"
 if [ -L "$LOCK" ] || { [ -e "$LOCK" ] && [ ! -f "$LOCK" ]; }; then check_line "$CHECK" fail "lock file is a symlink or not a regular file" "$OWNER"; exit $?; fi
 exec 9>> "$LOCK" || { check_line "$CHECK" fail "cannot open the lock" "$OWNER"; exit $?; }
 flock -n 9 || { echo "config-pull: another run holds the lock; nothing done" >&2; exit 75; }
 
+# a run that is stopped (the unit's timeout, a shutdown) publishes fail: an earlier ok line must not stand for it
+trap 'check_line "$CHECK" fail "stopped before it finished (timeout or signal)" "$OWNER" >/dev/null; exit 143' TERM INT HUP
 run() { CLONE_DIR="$DIR" CLONE_SYNC_FOLDER=none CLONE_SKIP_PREFIXES="$SKIP" bash "$TOOL" "$@" 9>&-; }
 
 out=$(run sync "$NAME" 2>&1); rc=$?
