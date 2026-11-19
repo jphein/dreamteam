@@ -6,7 +6,7 @@ Claude Code plugin for memory-gated parallel agent orchestration. Spawns named d
 
 - `plugin.json` — manifest (name, version, description)
 - `config.json` — tunables (perAgentMB, balloonReserveMB, hostReserveMB, maxAgents)
-- `hooks/hooks.json` — PreToolUse gates (reuse → mem-gate chain; `Bash|Monitor` → no-poll-guard, then gpu-guard), PostToolUse accounting, TeammateIdle/SubagentStop roster injection + `idle-assign.sh` (the freed agent's held context — recorded from its spawn prompt / last SendMessage by PostToolUse[Agent|SendMessage] — and the best-fit open item from `scratch/dreamteam/backlog.md` or `~/.claude/state/dreamteam-backlog.md`; `idle-assign.sh backlog add|list|done`), Pre/PostCompact HANDOFF guard, sync WorktreeCreate provision adapter (returns the worktree path, #26) + async Task*/WorktreeRemove event log, SessionStart/End lifecycle
+- `hooks/hooks.json` — PreToolUse gates (reuse → mem-gate chain; `Bash|Monitor` → no-poll-guard, then gpu-guard), PostToolUse accounting, TeammateIdle/SubagentStop roster injection + `idle-assign.sh` (the freed agent's held context — recorded from its spawn prompt / last SendMessage by PostToolUse[Agent|SendMessage] — and the best-fit open item from `scratch/dreamteam/backlog.md` or `~/.claude/state/dreamteam-backlog.md`; `idle-assign.sh backlog add|list|done`), Pre/PostCompact HANDOFF guard, sync WorktreeCreate provision adapter (returns the worktree path, #26) + async Task*/WorktreeRemove event log, SessionStart/End lifecycle, Stop → `flow-callout.sh` (a lane cannot end a turn holding an open Flow row it has not spoken on since its last order; reads the plan's `/api/flow` over `ASK_URL`, fails open with one logged line on an outage; MANAGEMENT.md practice 3)
 - `scripts/` — gate scripts, budget calculator, scope-attach (automatic cgroup containment), dashboard data generator, statusline (wired via user settings `statusLine`), local-model lane seam (optional ollama, `local-model.sh`), shared lib (`lib.sh`; `lib/pane-resolve.sh` = the canonical agent→pane resolver poke/pane-peek/fleet source, #53; `lib/agent-id.sh` = the canonical "which teammate am I?" /proc walk, shared by worktree-guard + no-poll-guard; `lib/nopoll_text.py` = the no-poll guard's heredoc-data reader, #191), PR tooling (`pr-gate.sh` / `pr-merge.sh` / `cascade.sh` — REST-only, no polling)
 - **GPU fleet** (spec `docs/superpowers/specs/2026-09-29-gpu-fleet-design.md`):
   - `gpu/fleet.json`: every host and card with measured sizes, capabilities and the host's admission rules.
@@ -65,6 +65,18 @@ bash tests/run.sh          # runs every suite, exits non-zero on any failure
   read/`$( )`/variables into eval or `bash -c`, `source <( )`, an unquoted body's `$( )`, a group piped to
   bash, `done <<EOF`, a python body using os.system, `gh alias set --shell`, and python3 failing (the
   block stays). Each rule has a red perturbation (listed in PR #215's body).
+- `tests/test-flow-callout.sh` — the Stop hook (`flow-callout.sh`, MANAGEMENT.md practice 3) against a stubbed `curl`
+  and `tmux`: an `ordered` row blocks (id and the three verbs named); the lane's own checkpoint, block or needs-jp
+  after the order allows, as does a lead note prefixed `<lane>:` and another session of the same lane; a lead note
+  without the prefix, or a word from before the order, still blocks; every silent row is named and closed rows are
+  not; fail-open controls each with ONE logged line (server unreachable, HTTP error, non-JSON, an unreadable row
+  log, no key) and silent exits (stop_hook_active, the kill switch, the lead, no identity, malformed stdin); a
+  missing config still enforces; identity from ASK_WHO, the tmux session, or a teammate id; the hooks.json Stop
+  entry and its seconds-not-ms timeout; the file reads are bounded by min(1 s, the remaining budget) and a FIFO at the
+  key, config or log path fails open. Known limit (#237 r6, lead ruling): stat-class calls and the logger run outside
+  any timeout, so the hook's paths must stay on local disk, never a network mount; the harness's 12 s Stop-hook
+  timeout is the outer bound. `tests/perturb-flow-callout.sh` (by hand, not under run.sh) applies one
+  mutation per rule to a COPY of the hook and requires each to turn the suite red: the evidence block for a review.
 - `tests/test-pr-tools.sh` — `pr-gate.sh` / `pr-merge.sh` / `cascade.sh` against a stubbed `gh`
   (fixture JSON piped through the real `jq` with the caller's real `--jq` filter, mutating calls
   logged so the tests assert what the tools DID). Pins the two traps: **a blank conclusion is a
