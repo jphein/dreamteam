@@ -1,0 +1,8 @@
+[Unit]
+Description=dreamteam: bring ~/.claude to the config repo's head (git, no hand align); CHECK config-pull
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash %h/Projects/dreamteam/scripts/config-pull.sh
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=5min

@@ -1,0 +1,8 @@
+[Unit]
+Description=dreamteam: transcripts-push every 10 minutes
+[Timer]
+OnCalendar=*:5/10
+RandomizedDelaySec=45
+Persistent=true
+[Install]
+WantedBy=timers.target
