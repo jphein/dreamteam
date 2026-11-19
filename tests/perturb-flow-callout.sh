@@ -27,7 +27,7 @@ MUTATIONS=(
   'log-append-unguarded|s/if \[ ! -e "\$LOG" \] || { \[ -f "\$LOG" \]/if true || { [ -f "$LOG" ]/'
   'outage-unlogged|s/note "plan unreachable or refused/true "plan unreachable or refused/'
   'budget-never-stops|s/\[ "\$(left)" -lt 200 \]/[ "$(left)" -lt -999999 ]/'
-  'clock-starts-after-tmux|s/^left() {/T0=$(( $(date +%s%N) \/ 1000000 )); left() {/'
+  'clock-starts-after-tmux|s/^KEY="\${ASK_KEY:-}"$/T0=$(( $(date +%s%N) \/ 1000000 )); KEY="${ASK_KEY:-}"/'
   'tmux-despite-identity|s/if \[ "\${#names\[@\]}" -eq 0 \] \&\& \[ -n "\${TMUX:-}" \]/if [ -n "${TMUX:-}" ]/'
   'tmux-outside-tmux|s/\[ -n "\${TMUX:-}" \] \&\& command -v tmux/command -v tmux/'
   'key-in-argv|s/printf '"'"'X-Ask-Key: %s\\n'"'"' "\$KEY" | curl -fsS -m "\$(secs "\$m")" --max-filesize 1048576 -H @-/curl -fsS -m "$(secs "$m")" --max-filesize 1048576 -H "X-Ask-Key: $KEY"/'
