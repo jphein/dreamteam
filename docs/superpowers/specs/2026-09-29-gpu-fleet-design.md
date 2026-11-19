@@ -124,7 +124,12 @@ Every job prints its measured peak, and the claim is updated from it.
   `realm wol wake`, then claim), an older probe without the line is an update to make, and a sampler failure is not
   a measured zero. The claim holds the host lock (`~/.local/state/dreamteam/host.lock`, `flock -w 5` over ssh) from
   its probe to its record, and `mem-gate.sh` takes the same lock around its measurement, so a lane start and a claim
-  never race; a lock not taken in time refuses (fail closed). Pinned by test-gpu.sh §2b and test-gates.sh 1b.
+  never race; a lock not taken in time refuses (fail closed). The gate's lock ends when the gate exits, before the
+  lane is a process, so an admitted spawn leaves a RESERVATION (`scripts/reservation.sh`: `perAgentMB`, 90 s, token =
+  session id + subagent type) that the gate itself subtracts from its next budget and the probe's `RESV,OK,<mb>` line
+  adds to the footprint; the lane's SubagentStart marks it started under the lock and it counts until it expires
+  (over-counting the handoff for at most 90 s, never under). `RESV,ERR`, like `LANE,ERR`, refuses. `admit` holds the
+  lock like `claim`. Pinned by test-gpu.sh §2b and test-gates.sh 1b–2d.
 - STAGE3's measured full-run VmHWM: 26 bands 3.2 GiB, 32 bands 3.43, 34 bands 3.53, 46 bands 4.22. The 46-band pair
   is 2 × 4.22 + 1.5 = 9.94, so it fits.
 - The evidence: a 26-band pair on gpu1 was kernel-OOM-killed at 19:29:47 on 09-28 at 5.23 GiB each. The
