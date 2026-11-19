@@ -192,6 +192,15 @@ rm -f "$PROBES/gpu1.probe"                                                      
 check "$(rc G drift-gems@team admit --card gpu1:0 --peak-ram 3000)" 75 "admit with the host asleep: the footprint is unreadable, REFUSED (no lock on admit, so the footprint check itself carries it)"
 out=$(G drift-gems@team admit --card gpu1:0 --peak-ram 3000 2>&1)
 case "$out" in *"realm wol wake gpu1"*) pass "the admit-while-asleep refusal says how to wake the host" ;; *) fail "admit asleep text: $out" ;; esac
+# claim and admit both meet an asleep host at the LOCK step (r3 item 6), so the footprint's own reachable check is
+# pinned directly: a caller that forgot the lock still fails closed with the wake text
+out=$(cd "$ROOT" && python3 -c 'import json, sys; sys.path.insert(0, "scripts/lib"); import gpu_fleet as g
+f = json.load(open("gpu/fleet.json"))
+try:
+    g.lane_footprint(f, "gpu1"); print("ADMITTED")
+except g.Refused as e:
+    print("REFUSED", e)' 2>&1)
+case "$out" in *"REFUSED"*"realm wol wake gpu1"*) pass "lane_footprint on its own refuses an asleep host with the wake text (no lock needed to fail closed)" ;; *) fail "direct footprint asleep: $out" ;; esac
 # the sampler (r1 item 5): the probe's LANE line itself, against a stubbed ps (two claude sessions, a child, a
 # grandchild, an unrelated python3), and against a ps that fails
 mkdir -p "$TMP/psstub"
