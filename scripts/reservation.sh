@@ -42,6 +42,10 @@ MAX_MB=1000000; TOMB_TTL=86400
 now=$(date +%s)
 LOCKED=0; args=(); for a in "$@"; do if [ "$a" = "--locked" ]; then LOCKED=1; else args+=("$a"); fi; done; set -- "${args[@]}"
 valid() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac; [ "${#1}" -le 12 ]; }
+# the token fields as written and as matched (security review on 445fbf1e): [A-Za-z0-9._:-] only, at most 128, other
+# bytes become _, empty becomes -; applied at add, start and stop alike so a raw hook value still matches its record,
+# and a scan never meets a record this script wrote that it cannot parse (one unparsable file is a fail-closed block)
+san() { local s; s=$(printf '%s' "${1:-}" | tr -c 'A-Za-z0-9._:-' '_' | cut -c1-128); printf '%s' "${s:--}"; }
 take_lock() {   # the host lock, unless the caller holds it (--locked); exit 4 = not taken, nothing changed
   [ "$LOCKED" = 1 ] && return 0
   mkdir -p "$(dirname "$LOCK")" 2>/dev/null
@@ -70,7 +74,7 @@ scan() {
 write_atomic() { printf '%s\n' "$2" > "$1.tmp" && mv -f -- "$1.tmp" "$1"; }
 case "${1:-}" in
   add)
-    mb="${2:-}"; ttl="${3:-90}"; ses="${4:--}"; typ="${5:--}"
+    mb="${2:-}"; ttl="${3:-90}"; ses=$(san "${4:-}"); typ=$(san "${5:-}")
     valid "$mb" && valid "$ttl" && [ "$mb" -le "$MAX_MB" ] || { echo "reservation: mb and ttl are bounded integers" >&2; exit 2; }
     take_lock; mkdir -p "$DIR" || exit 2
     f="$DIR/$$-$now-$RANDOM"; write_atomic "$f" "$mb $((now + ttl)) $ses $typ 0" || exit 2; echo "$f" ;;
@@ -82,7 +86,7 @@ case "${1:-}" in
     elif [ "$st" = 1 ]; then exit 1; fi
     if [ "$1" = live ]; then echo "$sum"; else echo "$sum $n"; fi ;;
   start)
-    ses="${2:?session}"; typ="${3:?type}"; take_lock; mkdir -p "$DIR" 2>/dev/null
+    ses=$(san "${2:?session}"); typ=$(san "${3:?type}"); take_lock; mkdir -p "$DIR" 2>/dev/null
     oldest=""
     pick() { if [ "$3" = "$ses" ] && [ "$4" = "$typ" ] && [ "$5" = 0 ]; then if [ -z "$oldest" ] || [ "$1" -ot "$oldest" ]; then oldest="$1"; fi; fi; }
     scan pick || exit 1
@@ -100,7 +104,7 @@ case "${1:-}" in
     done
     echo "reservation: no unstarted reservation for $ses $typ" >&2; exit 3 ;;
   stop)
-    ses="${2:?session}"; typ="${3:?type}"; take_lock
+    ses=$(san "${2:?session}"); typ=$(san "${3:?type}"); take_lock
     oldest=""
     pick() { if [ "$3" = "$ses" ] && [ "$4" = "$typ" ] && [ "$5" != 0 ]; then if [ -z "$oldest" ] || [ "$1" -ot "$oldest" ]; then oldest="$1"; fi; fi; }
     dir_ok >/dev/null 2>&1 && { scan pick || exit 1; }

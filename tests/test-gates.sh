@@ -249,6 +249,15 @@ flock "$HL" sleep 30 & HOLDER=$!; sleep 0.3
 r=$(R4 live >/dev/null 2>&1; echo $?); [ "$r" -eq 4 ] && pass "r4 item 7: live under a held host lock is exit 4 (every read is serialized)" || fail "live with lock held: rc=$r"
 out=$(R4 live --locked 2>&1); r=$?; [ "$r" -eq 0 ] && [ "$out" = 300 ] && pass "r4 item 7: live --locked (the caller holds the lock, as the gate does) reads without taking it again" || fail "live --locked: rc=$r out=[$out]"
 pkill -P "$HOLDER" 2>/dev/null; kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null
+# 2f) security review on 445fbf1e: a token field with a space (an Agent call's name as the type) would write a record
+#     no scan can parse, and under item 1 that one file blocks the gate until an operator moves it. The token fields
+#     are sanitised at add, start and stop alike ([A-Za-z0-9._:-], at most 128, else _), so the hook-side raw values
+#     still match and a scan never meets a self-inflicted malformed record. Mutant: san returns its input (red here).
+rm -rf "$RESV"; f=$(R4 add 300 90 "s a/b" "my type!" 2>/dev/null)
+out=$(R4 outstanding 2>&1); r=$?
+[ "$r" -eq 0 ] && [ "$out" = "300 1" ] && grep -q "s_a_b my_type_ 0$" "$f" && pass "a token with spaces and punctuation is sanitised at add: the record parses (300 1)" || fail "sanitised add: rc=$r out=[$out] rec=[$(cat "$f" 2>/dev/null)]"
+r=$(R4 start "s a/b" "my type!" >/dev/null 2>&1; echo $?); [ "$r" -eq 0 ] && pass "start with the same raw token matches the sanitised record" || fail "sanitised start: rc=$r"
+r=$(R4 stop "s a/b" "my type!" >/dev/null 2>&1; echo $?); [ "$r" -eq 0 ] && [ "$(R4 live)" = 0 ] && pass "stop with the same raw token releases it" || fail "sanitised stop: rc=$r live=$(R4 live)"
 
 # 3) Non-Agent tools pass through untouched (gate only guards Agent|Task).
 FAKE_AVAIL=2000 \
