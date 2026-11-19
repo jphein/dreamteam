@@ -16,11 +16,10 @@
 # the head stopped tracking is not removed. Nothing under `projects/` is read or written (transcripts and memory
 # belong to other mechanisms). Every replaced file's previous bytes are first kept in a dated backup directory.
 #
-# How a file is replaced: the new bytes are written to a temp file beside it; the live file is hard-linked into the
-# backup dir and THAT link is judged; then the temp file is renamed over the live name; then the link is judged again.
-# An editor that wrote into the old file meanwhile is caught by the second look and its bytes are put back. What is
-# not excluded: an editor that replaces the file by rename in the instant between the link and our rename. The
-# window is two system calls; the job says so here and does not claim more.
+# How a file is replaced: see scripts/lib/config_deploy.py (pinned directory descriptors, a no-replace link for an
+# absent file, a hard-link witness judged before and after the rename, no copy fallback, unique recovery names).
+# What is not excluded: an editor that replaces the file by rename in the instant between the witness link and our
+# rename. The window is two system calls; the job says so and does not claim more.
 #
 # Line (docs/CHECKS.md):
 #   CHECK config-pull[-<host>] ok   · main at <sha>, N files updated, all T current · every 10 min, owner Sen
@@ -81,66 +80,15 @@ r fetch -q origin 2>/dev/null || say_fail "fetch did not work"
 head=$(r rev-parse --verify -q "refs/remotes/origin/$br^{commit}") || say_fail "origin has no branch $br"
 sha=$(r rev-parse --short "$head") || say_fail "cannot read the head"
 
-work=$(mktemp -d "$ST/.work.XXXXXX") || say_fail "cannot create a work dir"
-trap 'rm -rf -- "$work"' EXIT
-r ls-tree -r -z --full-tree "$head" > "$work/tree" || say_fail "cannot list the head's files"
-
-# lossless <path> <file>: 0 when <file>'s bytes are a version of <path> recorded by a commit on the branch
-lossless() {
-  local h
-  h=$(r hash-object --no-filters -- "$2" 2>/dev/null) && [ -n "$h" ] || return 1
-  r --literal-pathspecs log -m --format= --raw --no-abbrev --no-renames "$head" -- "$1" 2>/dev/null | awk '{print $3; print $4}' | grep -qx -- "$h"
-}
-behind_link() {   # 0 when a parent directory of <path> is a symlink (or not a directory) in the live tree
-  local par; par=$(dirname -- "$1")
-  while [ "$par" != . ] && [ "$par" != / ]; do
-    if [ -L "$DIR/$par" ] || { [ -e "$DIR/$par" ] && [ ! -d "$DIR/$par" ]; }; then return 0; fi
-    par=$(dirname -- "$par")
-  done
-  return 1
-}
-
-total=0; updated=0; edits=0; skipped=0; bdir=""
-while IFS= read -r -d '' rec; do
-  meta="${rec%%$'\t'*}"; path="${rec#*$'\t'}"
-  mode="${meta%% *}"; rest="${meta#* }"; type="${rest%% *}"; blob="${rest#* }"
-  case "$path" in "$SKIP"*) continue ;; esac
-  [ "$type" = blob ] || { skipped=$((skipped + 1)); continue; }                    # a submodule entry: not ours to write
-  case "$mode" in 100644|100755) ;; *) skipped=$((skipped + 1)); continue ;; esac  # a tracked symlink: never written
-  total=$((total + 1))
-  live="$DIR/$path"
-  if behind_link "$path" || [ -L "$live" ] || { [ -e "$live" ] && [ ! -f "$live" ]; }; then edits=$((edits + 1)); continue; fi
-  if [ -f "$live" ]; then
-    cur=$(r hash-object --no-filters -- "$live" 2>/dev/null) || { edits=$((edits + 1)); continue; }
-    if [ "$cur" = "$blob" ]; then
-      # same bytes; keep the executable bit as the repo has it
-      if [ "$mode" = 100755 ] && [ ! -x "$live" ]; then chmod u+x,go+x -- "$live" 2>/dev/null || true; fi
-      continue
-    fi
-  fi
-  # the new bytes, beside the live file (same filesystem: the rename is atomic)
-  mkdir -p -- "$(dirname -- "$live")" 2>/dev/null || { edits=$((edits + 1)); continue; }
-  tmpf=$(mktemp "$(dirname -- "$live")/.config-pull.XXXXXX") || { edits=$((edits + 1)); continue; }
-  if ! r cat-file blob "$blob" > "$tmpf" 2>/dev/null; then rm -f -- "$tmpf"; say_fail "cannot read $path from the clone"; fi
-  if [ "$mode" = 100755 ]; then chmod 755 -- "$tmpf"; else chmod 644 -- "$tmpf"; fi
-  if [ ! -e "$live" ] && [ ! -L "$live" ]; then
-    # absent: publish without replacing anything that appears meanwhile
-    if ln -T -- "$tmpf" "$live" 2>/dev/null; then updated=$((updated + 1)); else edits=$((edits + 1)); fi
-    rm -f -- "$tmpf"; continue
-  fi
-  [ -n "$bdir" ] || { bdir="$ST/backup/$(date +%Y%m%d-%H%M%S)-$$"; mkdir -p -- "$bdir" || { rm -f -- "$tmpf"; say_fail "cannot create the backup dir"; }; }
-  bak="$bdir/$path"; mkdir -p -- "$(dirname -- "$bak")"
-  # keep the live file's CURRENT inode in the backup dir and judge that
-  if ! ln -T -- "$live" "$bak" 2>/dev/null && ! cp -p -- "$live" "$bak" 2>/dev/null; then rm -f -- "$tmpf"; edits=$((edits + 1)); continue; fi
-  if ! lossless "$path" "$bak"; then rm -f -- "$tmpf" "$bak"; edits=$((edits + 1)); continue; fi
-  mv -T -f -- "$tmpf" "$live" || { rm -f -- "$tmpf" "$bak"; edits=$((edits + 1)); continue; }
-  # second look at what we displaced: if an editor wrote into it after it was judged, its bytes go back
-  if ! lossless "$path" "$bak"; then
-    cp -p -- "$bak" "$live.config-pull-edit" && mv -T -f -- "$live.config-pull-edit" "$live"
-    edits=$((edits + 1)); continue
-  fi
-  updated=$((updated + 1))
-done < "$work/tree"
+# The pass itself is scripts/lib/config_deploy.py: it pins each directory by descriptor and does every stat, read,
+# link and rename relative to it, which a shell cannot do. Its one RESULT line is the evidence; without it, fail.
+bdir="$ST/backup/$(date +%Y%m%d-%H%M%S)-$$"
+out=$(python3 -I "$ROOT/scripts/lib/config_deploy.py" "$REPO" "$head" "$DIR" "$bdir" "$SKIP" 9>&- 2>/dev/null) \
+  || say_fail "the deploy pass could not measure (git or the live directory unreadable)"
+[[ "$(tail -1 <<< "$out")" =~ ^RESULT\ total=([0-9]+)\ updated=([0-9]+)\ edits=([0-9]+)\ skipped=[0-9]+$ ]] \
+  || say_fail "the deploy pass gave no result line"
+total="${BASH_REMATCH[1]}"; updated="${BASH_REMATCH[2]}"; edits="${BASH_REMATCH[3]}"
+rmdir -- "$bdir" 2>/dev/null || true          # empty when nothing was replaced
 
 [ "$total" -gt 0 ] || say_fail "the head tracks no file outside $SKIP"
 if [ "$edits" -gt 0 ]; then
