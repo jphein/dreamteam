@@ -37,6 +37,15 @@ STATE="${XDG_STATE_HOME:-$HOME/.local/state}/dreamteam"
 DESTF="$STATE/transcripts-push.dest"; CUT="$STATE/transcripts-push.cut"; LOCK="$STATE/transcripts-push.lock"
 SSH="${TRANSCRIPTS_SSH:-ssh}"
 umask 077
+# These two reach rsync, which reads `host:path` as a REMOTE source and re-parses its -e string on spaces: so the
+# source is an absolute plain path (never something rsync could read as remote or as an option), and the ssh command
+# is the word `ssh` or an absolute plain path (no spaces, nothing a second parser could split).
+envcheck() {
+  case "$SRC" in /*) ;; *) return 1 ;; esac
+  case "$SRC" in *[!A-Za-z0-9._/@+-]*) return 1 ;; esac
+  case "$SSH" in ssh) ;; /*) case "$SSH" in *[!A-Za-z0-9._/+-]*) return 1 ;; esac ;; *) return 1 ;; esac
+  return 0
+}
 
 valid_dest() {   # /abs/dir or host:/abs/dir, plain characters only, no `..`, `.` or empty components
   case "$1" in *[!A-Za-z0-9._:/@-]*|"") return 1 ;; esac
@@ -63,19 +72,22 @@ publish_new() {   # publish_new <text> <path>: create <path> with <text>, never 
 }
 
 if [ "${1:-}" = --init ]; then
+  envcheck || { echo "transcripts-push: TRANSCRIPTS_SRC must be an absolute plain path and TRANSCRIPTS_SSH 'ssh' or an absolute plain path" >&2; exit 22; }
   [ "$#" -eq 2 ] && valid_dest "$2" || { echo "usage: transcripts-push.sh --init </abs/dir on the share | host:/abs/dir>" >&2; exit 22; }
   lock || { echo "transcripts-push: cannot take the lock in $STATE" >&2; exit 1; }
   if [ -e "$CUT" ] || [ -L "$CUT" ] || [ -e "$DESTF" ] || [ -L "$DESTF" ]; then
     echo "transcripts-push: already initialised, or a state path is in the way ($CUT, $DESTF); remove them by hand to start over" >&2; exit 22
   fi
   publish_new "$2"$'\n' "$DESTF" || { echo "transcripts-push: could not create $DESTF (something appeared there); nothing changed" >&2; exit 1; }
-  # from here the dest file is OURS: if the cut cannot be created, take our own file back out
-  publish_new "" "$CUT" || { rm -f -- "$DESTF"; echo "transcripts-push: could not create $CUT; nothing left behind" >&2; exit 1; }
+  # If the cut cannot be created, NOTHING is removed (the dest file may have been replaced by someone else since):
+  # a destination without a cut is "not initialised" to every later pass, and the operator clears it by hand.
+  publish_new "" "$CUT" || { echo "transcripts-push: could not create $CUT; $DESTF is left in place: remove both paths by hand, then run --init again" >&2; exit 1; }
   echo "transcripts-push: destination $2; cut set at $(date -r "$CUT" '+%F %T %Z'): only transcripts changed after it are sent"
   exit 0
 fi
 [ "$#" -eq 0 ] || { echo "usage: transcripts-push.sh [--init <dest>]" >&2; exit 22; }
 
+envcheck || { check_line "$CHECK" fail "TRANSCRIPTS_SRC or TRANSCRIPTS_SSH is not an absolute plain path" "$OWNER"; exit $?; }
 lock || { check_line "$CHECK" fail "cannot take the lock (state dir or lock file not usable)" "$OWNER"; exit $?; }
 [ -f "$CUT" ] && [ ! -L "$CUT" ] && [ -f "$DESTF" ] && [ ! -L "$DESTF" ] || { check_line "$CHECK" fail "not initialised (run --init <dest> once)" "$OWNER"; exit $?; }
 IFS= read -r DEST < "$DESTF" || DEST=""

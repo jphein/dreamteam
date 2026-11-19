@@ -100,9 +100,11 @@ out=$(PATH="$TMP/gitfail:$PATH" bash "$S" freshen proj 2>&1); rc=$?
 [ "$rc" = 2 ] && ! grep -q "^RESULT" <<< "$out" && [ "$(cat "$P/a.txt")" = one ] && ok "git status exiting non-zero mid-list: exit 2, no RESULT, nothing written" || bad "partial status: rc=$rc '$out'"
 bash "$S" freshen proj >/dev/null
 # (5) one run at a time per directory; work files and tars never collide
-( key=$(printf '%s' "$(cd "$P" && pwd -P)" | sha256sum | cut -c1-16); exec 7>> "$HOME/.local/state/sync-phase1/lock.$key"; flock -n 7 || exit 9
-  echo one > "$P/a.txt"; bash "$S" freshen proj 7>&- >"$TMP/locked.out" 2>&1; echo $? > "$TMP/locked.rc" )
+( key=$(printf '%s' "$(cd "$P" && pwd -P)" | sha256sum | cut -c1-16); mkdir -p "$HOME/.local/state/dreamteam/clone-locks"; exec 7>> "$HOME/.local/state/dreamteam/clone-locks/lock.$key"; flock -n 7 || exit 9
+  echo one > "$P/a.txt"; bash "$S" freshen proj 7>&- >"$TMP/locked.out" 2>&1; echo $? > "$TMP/locked.rc"
+  CLONE_DIR="$P" CLONE_STATE="$TMP/otherstate" bash "$S" freshen othername 7>&- >"$TMP/locked2.out" 2>&1; echo $? > "$TMP/locked2.rc" )
 [ "$(cat "$TMP/locked.rc")" = 2 ] && grep -q "holds this directory's lock" "$TMP/locked.out" && [ "$(cat "$P/a.txt")" = one ] && ok "a second run on the same directory is refused while one holds its lock" || bad "dir lock: rc=$(cat "$TMP/locked.rc")"
+[ "$(cat "$TMP/locked2.rc")" = 2 ] && grep -q "holds this directory's lock" "$TMP/locked2.out" && ok "the lock is per directory, not per state root (a different CLONE_STATE is refused too)" || bad "lock with another state root: rc=$(cat "$TMP/locked2.rc")"
 bash "$S" freshen proj >/dev/null; echo one > "$P/a.txt"; bash "$S" freshen proj >/dev/null
 [ "$(ls "$HOME/.local/state/sync-phase1"/proj.pre-freshen-*.tar | sort -u | wc -l)" -ge 3 ] && ok "every run's backup tar has its own name (same-second runs do not overwrite)" || bad "tar names: $(ls "$HOME/.local/state/sync-phase1" | grep -c pre-freshen)"
 [ -z "$(ls -A "$HOME/.local/state/sync-phase1" | grep -E '^\.proj\.(status|paths|stale|sums|absent)\.')" ] && ok "no work file is left behind" || bad "work files left"
@@ -113,6 +115,26 @@ echo one > "$P/a.txt"
 out=$(PATH="$TMP/tarrace:$PATH" bash "$S" freshen proj 2>&1); rc=$?
 [ "$rc" = 2 ] && [ "$(cat "$P/a.txt")" = "edited while it ran" ] && grep -q "changed while this ran" <<< "$out" && ok "an edit landing after the judgement is kept: exit 2, nothing written" || bad "edit mid-run: rc=$rc a=$(cat "$P/a.txt")"
 git -C "$P" checkout -q HEAD -- a.txt
+
+# --- xreview r2 on #262 -----------------------------------------------------------------------------------------
+# (1) the owner's UNTRACKED file that origin starts tracking again is never written, even with "historical" bytes
+q -C "$TMP/w0" pull origin main; echo gone-v1 > "$TMP/w0/back.txt"; q -C "$TMP/w0" add back.txt; q -C "$TMP/w0" commit -m addback
+q -C "$TMP/w0" rm -q back.txt; q -C "$TMP/w0" commit -m delback; q -C "$TMP/w0" push origin main
+bash "$S" sync proj >/dev/null; bash "$S" freshen proj >/dev/null
+echo gone-v1 > "$P/back.txt"                                  # untracked now; same bytes as the path once held
+echo gone-v2 > "$TMP/w0/back.txt"; q -C "$TMP/w0" add back.txt; q -C "$TMP/w0" commit -m reintroduce; q -C "$TMP/w0" push origin main
+bash "$S" sync proj >/dev/null; out=$(bash "$S" freshen proj)
+[ "$(cat "$P/back.txt")" = gone-v1 ] && grep -q "untracked files before origin started tracking them; left alone" <<< "$out" && ok "an untracked file that origin re-introduces stays the owner's (protected at sync time)" || bad "reintroduced path overwritten: $(cat "$P/back.txt") / $out"
+git -C "$P" checkout -q HEAD -- back.txt; : > "$HOME/.local/state/sync-phase1/proj.protected"
+# (2) the bytes judged are the bytes re-validated: an edit saved right after the snapshot stops the run
+mkdir -p "$TMP/cprace"; REALCP="$(command -v cp)"
+printf '#!/bin/sh\n"%s" "$@"; rc=$?\ncase "$*" in *"/a.txt "*) echo "saved after the snapshot" > "%s/a.txt" ;; esac\nexit $rc\n' "$REALCP" "$P" > "$TMP/cprace/cp"; chmod +x "$TMP/cprace/cp"
+echo one > "$P/a.txt"
+out=$(PATH="$TMP/cprace:$PATH" bash "$S" freshen proj 2>&1); rc=$?
+[ "$rc" = 2 ] && [ "$(cat "$P/a.txt")" = "saved after the snapshot" ] && ok "an edit saved between the snapshot and its checksum is kept: the run stops" || bad "edit after snapshot: rc=$rc a=$(cat "$P/a.txt")"
+git -C "$P" checkout -q HEAD -- a.txt
+# (3) a relative state root is refused
+CLONE_STATE="-rel" bash "$S" freshen proj >/dev/null 2>&1; [ $? = 22 ] && ok "a CLONE_STATE that is not absolute (here: starting with a dash) is refused" || bad "relative CLONE_STATE"
 
 # --- sync: after an API commit, the branch moves to origin's head and no file is written -----------------------
 git -C "$P" remote set-url origin "$TMP/origin.git"

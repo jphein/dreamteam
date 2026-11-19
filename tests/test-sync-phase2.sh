@@ -91,6 +91,19 @@ printf '#!/bin/sh\ncase "$*" in *transcripts-push.new*) [ -e "%s/transcripts-pus
 PATH="$TMP/racebin:$PATH" bash "$TP" --init "$DEST" >/dev/null 2>&1; rc=$?
 [ "$rc" = 1 ] && [ "$(cat "$ST/transcripts-push.dest")" = foreign ] && [ ! -e "$ST/transcripts-push.cut" ] && ok "a dest file appearing mid-init survives untouched; no cut is set" || bad "mid-init file: rc=$rc dest=$(cat "$ST/transcripts-push.dest" 2>&1)"
 rm -f "$ST/transcripts-push.dest"
+# a cut that cannot be created: the dest file (possibly someone else's by now) is NOT removed
+printf '#!/bin/sh\ncase "$*" in *transcripts-push.new*) if [ -e "%s/transcripts-push.dest" ]; then echo "replaced by another" > "%s/transcripts-push.dest"; mkdir -p "%s/transcripts-push.cut"; fi ;; esac\nexec "%s" "$@"\n' "$ST" "$ST" "$ST" "$REALMKTEMP" > "$TMP/racebin/mktemp"
+PATH="$TMP/racebin:$PATH" bash "$TP" --init "$DEST" >/dev/null 2>&1; rc=$?
+[ "$rc" = 1 ] && [ "$(cat "$ST/transcripts-push.dest")" = "replaced by another" ] && [ -d "$ST/transcripts-push.cut" ] && ok "cut blocked after the dest was published and replaced: both foreign paths survive" || bad "rollback: rc=$rc dest=$(cat "$ST/transcripts-push.dest" 2>&1)"
+out=$(bash "$TP"); case "$out" in "CHECK transcripts-push fail · not initialised"*) ok "a destination without a cut is 'not initialised' to a pass" ;; *) bad "partial init: '$out'" ;; esac
+rm -f "$ST/transcripts-push.dest"; rmdir "$ST/transcripts-push.cut"
+# the two settings that reach rsync are absolute plain paths
+mkdir -p "$TMP/host:"; ( cd "$TMP" && TRANSCRIPTS_SRC="host:/data" bash "$TP" --init "$DEST" >/dev/null 2>&1 ); [ $? = 22 ] && ok "a relative source that rsync would read as remote (host:/data) is refused" || bad "colon source"
+out=$(TRANSCRIPTS_SRC="relative/src" bash "$TP"); case "$out" in "CHECK transcripts-push fail · TRANSCRIPTS_SRC or TRANSCRIPTS_SSH is not an absolute plain path · "*) ok "a relative source: fail on a pass" ;; *) bad "relative source: '$out'" ;; esac
+mkdir -p "$TMP/bin with space"; printf '#!/bin/sh\nexit 0\n' > "$TMP/bin with space/ssh"; chmod +x "$TMP/bin with space/ssh"
+out=$(TRANSCRIPTS_SSH="$TMP/bin with space/ssh" bash "$TP"); case "$out" in "CHECK transcripts-push fail · TRANSCRIPTS_SRC or TRANSCRIPTS_SSH is not an absolute plain path · "*) ok "an ssh path with a space (rsync would split it) is refused" ;; *) bad "spaced ssh: '$out'" ;; esac
+TRANSCRIPTS_SSH="ssh -oProxyCommand=x" bash "$TP" --init "$DEST" >/dev/null 2>&1; [ $? = 22 ] && ok "an ssh setting carrying options is refused" || bad "ssh with options"
+
 bash "$TP" --init "$DEST" >/dev/null; rc=$?
 [ "$rc" = 0 ] && [ "$(cat "$ST/transcripts-push.dest")" = "$DEST" ] && [ -f "$ST/transcripts-push.cut" ] && ok "--init records the destination and sets the cut" || bad "--init rc=$rc"
 bash "$TP" --init "$DEST" >/dev/null 2>&1; [ $? = 22 ] && ok "a second --init is refused (the cut is not moved by accident)" || bad "second init"

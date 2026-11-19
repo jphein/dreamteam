@@ -24,7 +24,10 @@
 #                        `none` skips that check, for a tree that keeps syncing only paths git does not track
 #   CLONE_SKIP_PREFIXES  colon-separated path prefixes (e.g. `projects/`) that freshen never checks out and classify
 #                        counts apart: paths another mechanism owns
-#   CLONE_STATE          where prepared git dirs, status files and tars live (default ~/.local/state/sync-phase1)
+#   CLONE_STATE          where prepared git dirs, status files and tars live (default ~/.local/state/sync-phase1);
+#                        absolute. The per-directory lock is NOT here: ~/.local/state/dreamteam/clone-locks.
+# <name>.protected in the state dir lists paths that were the owner's untracked files when a sync made them tracked;
+# freshen never writes them. Delete a line (or the file) by hand once the owner has dealt with the file.
 # Exit: 0 ok · 2 precondition not met · 22 usage.
 set -uo pipefail
 cmd="${1:-}"; name="${2:-}"
@@ -32,6 +35,10 @@ case "$name" in ""|*/*|.*) echo "usage: clone-in-place.sh check|apply|undo <name
 D="${CLONE_DIR:-$HOME/Projects/$name}"
 case "$D" in /*) ;; *) echo "clone-in-place: CLONE_DIR must be absolute" >&2; exit 22 ;; esac
 S="${CLONE_STATE:-$HOME/.local/state/sync-phase1}"
+case "$S" in /*) ;; *) echo "clone-in-place: CLONE_STATE must be absolute" >&2; exit 22 ;; esac
+# the per-directory lock lives OUTSIDE the configurable state root, so two callers with different CLONE_STATE values
+# still exclude each other on one directory
+LOCKS="$HOME/.local/state/dreamteam/clone-locks"
 FOLDER="${CLONE_SYNC_FOLDER:-projects}"
 case "$FOLDER" in *[!A-Za-z0-9._-]*|"") echo "clone-in-place: CLONE_SYNC_FOLDER must be a folder id or none" >&2; exit 22 ;; esac
 IFS=: read -r -a SKIPS <<< "${CLONE_SKIP_PREFIXES:-}"
@@ -50,18 +57,18 @@ paused() {   # 0 when the Syncthing folder that carries this tree is paused (or 
 # old_version <path> : 0 when the file's ON-DISK bytes (no clean filter) equal a blob that a commit reachable from
 # HEAD recorded AT THIS SAME PATH. An object that merely exists in the store is not enough: `git add` of a local edit
 # creates one, and another file's content may match. Uses the array GITC (set by the caller) to reach the repo.
-old_version() {
-  local f="$1" h
-  h=$("${GITC[@]}" hash-object --no-filters -- "$D/$f" 2>/dev/null) || return 1
+old_version() {   # old_version <path> [<file holding the bytes to judge>]   (default: the live file)
+  local f="$1" src="${2:-$D/$1}" h
+  h=$("${GITC[@]}" hash-object --no-filters -- "$src" 2>/dev/null) || return 1
   [ -n "$h" ] || return 1
   "${GITC[@]}" --literal-pathspecs log -m --format= --raw --no-abbrev --no-renames HEAD -- "$f" 2>/dev/null \
     | awk '{print $3; print $4}' | grep -qx -- "$h"
 }
 dirlock() {  # one mutating run at a time per DIRECTORY, whatever <name> the callers use
   local key lf
-  umask 077; mkdir -p "$S" || { echo "$name: no state dir $S"; exit 2; }
+  umask 077; mkdir -p -- "$S" "$LOCKS" || { echo "$name: no state dir"; exit 2; }
   key=$(printf '%s' "$(cd "$D" && pwd -P)" | sha256sum | cut -c1-16)
-  lf="$S/lock.$key"
+  lf="$LOCKS/lock.$key"
   if [ -L "$lf" ] || { [ -e "$lf" ] && [ ! -f "$lf" ]; }; then echo "$name: $lf is a symlink or not a regular file"; exit 2; fi
   exec 7>> "$lf" || { echo "$name: cannot open the lock"; exit 2; }
   flock -n 7 || { echo "$name: another clone-in-place run holds this directory's lock; nothing done"; exit 2; }
@@ -76,7 +83,7 @@ case "$cmd" in
     [ -n "$url" ] && [ -n "$br" ] || { echo "usage: clone-in-place.sh check <name> <url> <branch> [bundle]" >&2; exit 22; }
     [ ! -e "$D/.git" ] || { echo "$name: already has a .git; nothing to do"; exit 2; }
     umask 077; mkdir -p "$S/gitdirs"; rm -rf -- "${G:?}"
-    git init -q --bare "$G" || exit 2
+    git init -q --bare -- "$G" || exit 2
     git --git-dir="$G" remote add origin "$url"
     src=origin; [ -n "$bundle" ] && src="$bundle"
     git --git-dir="$G" fetch -q --no-tags "$src" "refs/heads/$br:refs/remotes/origin/$br" || { echo "$name: fetch of $br did not work"; exit 2; }
@@ -140,11 +147,15 @@ case "$cmd" in
     dirlock
     GITC=(git -C "$D")
     stf=$(mktemp "$S/.$name.status.XXXXXX") && lst=$(mktemp "$S/.$name.paths.XXXXXX") && stl=$(mktemp "$S/.$name.stale.XXXXXX") \
-      && sums=$(mktemp "$S/.$name.sums.XXXXXX") && abl=$(mktemp "$S/.$name.absent.XXXXXX") || { echo "$name: cannot create work files in $S"; exit 2; }
-    trap 'rm -f -- "$stf" "$lst" "$stl" "$sums" "$abl"' EXIT
+      && sums=$(mktemp "$S/.$name.sums.XXXXXX") && abl=$(mktemp "$S/.$name.absent.XXXXXX") && snap=$(mktemp "$S/.$name.snap.XXXXXX") \
+      || { echo "$name: cannot create work files in $S"; exit 2; }
+    trap 'rm -f -- "$stf" "$lst" "$stl" "$sums" "$abl" "$snap"' EXIT
+    # paths that were UNTRACKED files of the owner when a sync made them tracked: never written, whatever their bytes
+    prot="$S/$name.protected"
+    protected() { [ -f "$prot" ] && [ ! -L "$prot" ] && grep -qzxF -- "$1" "$prot"; }
     # the listing is complete or the run stops: a status that did not finish is not "nothing to do"
     git -C "$D" status --porcelain -z --no-renames > "$stf" || { echo "$name: git status did not work; nothing changed"; exit 2; }
-    kept=0; linked=0; skipn=0
+    kept=0; linked=0; skipn=0; protn=0
     while IFS= read -r -d '' rec; do
       xy="${rec:0:2}"; f="${rec:3}"
       # A tracked path that lies BEHIND a symlinked directory (scratch/ linked to the fleet share) is never
@@ -153,12 +164,15 @@ case "$cmd" in
       while [ "$par" != . ] && [ "$par" != / ]; do [ -L "$D/$par" ] && behind=1; par="$(dirname -- "$par")"; done
       if [ "$behind" = 1 ]; then linked=$((linked + 1)); continue; fi
       if [ "$xy" != "??" ] && skipped "$f"; then skipn=$((skipn + 1)); continue; fi
+      if [ "$xy" != "??" ] && protected "$f"; then kept=$((kept + 1)); protn=$((protn + 1)); continue; fi
       case "$xy" in
         " D") if [ ! -e "$D/$f" ] && [ ! -L "$D/$f" ]; then printf '%s\0' "$f" >> "$lst"; printf '%s\0' "$f" >> "$abl"; else kept=$((kept + 1)); fi ;;
         " M")
-          if [ -f "$D/$f" ] && [ ! -L "$D/$f" ] && old_version "$f"; then
+          # ONE snapshot of the bytes: the same copy is judged against history and gives the checksum the live file
+          # must still have right before the write. An edit saved at any moment after the snapshot stops the run.
+          if [ -f "$D/$f" ] && [ ! -L "$D/$f" ] && cp -- "$D/$f" "$snap" 2>/dev/null && old_version "$f" "$snap"; then
             printf '%s\0' "$f" >> "$lst"; printf '%s\0' "$f" >> "$stl"
-            printf '%s  %s\0' "$(sha256sum < "$D/$f" | cut -d' ' -f1)" "$f" >> "$sums"
+            printf '%s  %s\0' "$(sha256sum < "$snap" | cut -d' ' -f1)" "$f" >> "$sums"
           else kept=$((kept + 1)); fi ;;
         "??") ;;
         *) kept=$((kept + 1)) ;;
@@ -167,6 +181,7 @@ case "$cmd" in
     n=$(tr -cd '\0' < "$lst" | wc -c); ns=$(tr -cd '\0' < "$stl" | wc -c)
     [ "$linked" = 0 ] || echo "$name: $linked tracked paths lie behind a linked directory; left alone"
     [ "$skipn" = 0 ] || echo "$name: $skipn differing paths under the skip prefixes; left alone"
+    [ "$protn" = 0 ] || echo "$name: $protn paths were the owner's untracked files before origin started tracking them; left alone"
     if [ "$n" = 0 ]; then
       echo "$name: nothing stale or absent; $kept differing files left as they are"
       echo "RESULT freshened=0 stale=0 absent=0 kept=$kept linked=$linked skipped=$skipn"; exit 0
@@ -205,6 +220,17 @@ case "$cmd" in
     [ "$ahead" = 0 ] || { echo "$name: $ahead local commits are not on origin; nothing done"; exit 2; }
     old=$(git -C "$D" rev-parse "$br"); new=$(git -C "$D" rev-parse "origin/$br")
     if [ "$old" != "$new" ]; then
+      # A file that is UNTRACKED now and that origin's new head tracks stays the owner's: remember it BEFORE the
+      # move, so a later freshen never writes it (even when its bytes equal something this path once held).
+      umask 077; mkdir -p -- "$S"; prot="$S/$name.protected"
+      [ ! -L "$prot" ] || { echo "$name: $prot is a symlink; nothing done"; exit 2; }
+      added=$(mktemp "$S/.$name.added.XXXXXX") || { echo "$name: cannot create a work file"; exit 2; }
+      git -C "$D" --literal-pathspecs diff --no-renames --name-only -z --diff-filter=A "$old" "$new" > "$added" \
+        || { rm -f -- "$added"; echo "$name: cannot list what the move adds; nothing done"; exit 2; }
+      while IFS= read -r -d '' f; do
+        if [ -e "$D/$f" ] || [ -L "$D/$f" ]; then printf '%s\0' "$f" >> "$prot" || { rm -f -- "$added"; echo "$name: cannot record a protected path; nothing done"; exit 2; }; fi
+      done < "$added"
+      rm -f -- "$added"
       git -C "$D" update-ref "refs/heads/$br" "$new" "$old" && git -C "$D" reset -q || { echo "$name: could not move $br"; exit 2; }
     fi
     printf '%s: %s at %s (was %s); %s lines of status\n' "$name" "$br" "$(git -C "$D" rev-parse --short "$br")" "${old:0:7}" "$(git -C "$D" status --porcelain | wc -l)"
