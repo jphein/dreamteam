@@ -267,11 +267,15 @@ def lane_footprint(fleet: dict, host: str) -> tuple:
     if p.get("lane_err"):
         raise Refused(f"{host} lane footprint: ps failed on the host (LANE,ERR), and a failure is not a measured "
                       f"zero; check the host, then claim")
-    if "lane_mb" not in p:
-        raise Refused(f"{host} lane footprint: the probe has no LANE line (an older dreamteam on {host}?); update it, "
-                      f"then claim")
-    return p["lane_mb"], (f"{host} lane footprint: {p['lane_mb']} MB live (claude sessions and their children), "
-                          f"subtracted from the pair limit (#241)")
+    if "lane_mb" not in p or "resv_mb" not in p:
+        raise Refused(f"{host} lane footprint: the probe has no {'LANE' if 'lane_mb' not in p else 'RESV'} line (an "
+                      f"older dreamteam on {host}?); update it, then claim")
+    # + the reservations: lanes mem-gate admitted under the host lock whose process is not yet visible (#256 r2);
+    # the lane's SessionStart consumes its reservation, so a running lane is never counted twice
+    total = p["lane_mb"] + p["resv_mb"]
+    return total, (f"{host} lane footprint: {total} MB = {p['lane_mb']} MB live (claude sessions and their children) "
+                   f"+ reserved {p['resv_mb']} MB (lanes admitted, not yet running), subtracted from the pair limit "
+                   f"(#241, #256)")
 
 def host_budget(fleet: dict, host: str, claims: list, add: dict | None = None, lane: tuple | None = None) -> list:
     """The host-level arithmetic over claims that overlap in time, as lines. Raises Refused when it fails."""
@@ -553,6 +557,7 @@ nvidia-smi --query-gpu=index,pci.bus_id,memory.used,memory.total,utilization.gpu
 nvidia-smi --query-compute-apps=gpu_bus_id,pid,used_memory,process_name --format=csv,noheader,nounits 2>/dev/null | sed 's/^/APP,/'
 awk '/MemAvailable/{a=$2}/SwapTotal/{t=$2}/SwapFree/{f=$2}END{print "MEM,"a","t","f}' /proc/meminfo
 if lane=$(ps -eo pid=,ppid=,rss=,comm= 2>/dev/null) && [ -n "$lane" ]; then printf '%s\n' "$lane" | awk '{pp[$1]=$2; rss[$1]=$3; c[$1]=$4; n++; id[n]=$1} END{for(i=1;i<=n;i++){q=id[i]; while(q>1 && (q in pp)){if(c[q]=="claude"){s+=rss[id[i]]; break}; q=pp[q]}}; print "LANE,OK," s+0}'; else echo LANE,ERR; fi
+r=0; now=$(date +%s); for f in "${DREAMTEAM_RESERVATIONS:-$HOME/.local/state/dreamteam/reservations}"/*; do [ -f "$f" ] || continue; read -r mb exp < "$f" 2>/dev/null || continue; case "$mb$exp" in ''|*[!0-9]*) continue ;; esac; if [ "$exp" -gt "$now" ]; then r=$((r + mb)); else rm -f -- "$f"; fi; done; echo "RESV,$r"
 for p in __PATHS__; do printf 'DISK,%s,%s\n' "$p" "$(df -BG --output=avail "$p" 2>/dev/null | tail -1 | tr -dc 0-9)"; done
 if [ -n "__PAUSE__" ] && [ -e "__PAUSE__" ]; then echo PAUSE,1; else echo PAUSE,0; fi
 """
@@ -659,6 +664,8 @@ def probe(fleet: dict, host: str) -> dict:
             out["lane_mb"] = int(parts[2]) // 1024
         elif parts[0] == "LANE":                                       # LANE,ERR: ps failed on the host (#256 r1 item 2)
             out["lane_err"] = True
+        elif parts[0] == "RESV" and len(parts) >= 2 and parts[1].isdigit():   # MB reserved for lanes admitted, not yet running
+            out["resv_mb"] = int(parts[1])
         elif parts[0] == "DISK" and len(parts) >= 3:
             out["disk"][parts[1]] = int(parts[2]) if parts[2].isdigit() else None
         elif parts[0] == "PAUSE":

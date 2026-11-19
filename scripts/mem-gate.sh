@@ -112,4 +112,8 @@ if command -v count_agents >/dev/null 2>&1; then NAGENTS=$(count_agents); else
   NAGENTS=$(pgrep -fc 'claude/versions' 2>/dev/null || true); NAGENTS=${NAGENTS:-0}; fi
 [ "$NAGENTS" -ge "$MAX_AGENTS" ] && block "${NAGENTS} agents already running (cap ${MAX_AGENTS})." "$NAGENTS"
 
+# --- the reservation (dreamteam #256 r2): admitted, and still under the host lock, so a GPU claim that locks next
+#     sees this lane's budget before its process exists; the lane's SessionStart consumes it (hooks.json), else it
+#     expires in 90 s. Cannot write it → BLOCK: an unreserved start is the race this closes.
+bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/reservation.sh" add "$PER_AGENT" 90 >/dev/null || invalid "cannot write the lane reservation (scripts/reservation.sh beside this gate)"
 exit 0

@@ -131,6 +131,28 @@ else
   fail "mem-gate should allow with plenty of RAM — got exit $GRC; stderr: $(head -1 "$TMP/err")"
 fi
 
+# 2b) the RESERVATION (dreamteam #256 r2): the gate's lock is released when it exits, BEFORE the caller starts the
+#     lane, so an ADMITTED spawn, still under the lock, writes $DREAMTEAM_RESERVATIONS/<gate pid>-<ts> holding
+#     "<perAgentMB> <now+90>" for the GPU sampler; the lane's SessionStart consumes it. A blocked spawn writes none.
+RESV="$TMP/resv"; rm -rf "$RESV"
+FAKE_AVAIL=60000 FAKE_SWAP_USED=0 FAKE_PGREP_COUNT=1 DREAMTEAM_RESERVATIONS="$RESV" \
+  run_gate "$MEM_GATE" '{"tool_name":"Agent","tool_input":{"prompt":"x"}}'
+rf=$(ls "$RESV" 2>/dev/null | head -1); nowg=$(date +%s); rmb=""; rexp=0
+[ -n "$rf" ] && read -r rmb rexp < "$RESV/$rf"
+if [ "$GRC" -eq 0 ] && [ -n "$rf" ] && [ "${rmb:-0}" -gt 0 ] && [ "$rexp" -ge $((nowg + 85)) ] && [ "$rexp" -le $((nowg + 95)) ]; then
+  pass "an admitted spawn leaves a reservation (${rmb} MB, expires in ~90 s) for the GPU sampler"
+else
+  fail "reservation after admit: rc=$GRC file=[$rf] content=[$(cat "$RESV/$rf" 2>/dev/null)]"
+fi
+rm -rf "$RESV"
+FAKE_AVAIL=2000 FAKE_SWAP_USED=500 DREAMTEAM_RESERVATIONS="$RESV" \
+  run_gate "$MEM_GATE" '{"tool_name":"Agent","tool_input":{"prompt":"x"}}'
+if [ "$GRC" -eq 2 ] && [ -z "$(ls "$RESV" 2>/dev/null)" ]; then
+  pass "a blocked spawn reserves nothing"
+else
+  fail "reservation after block: rc=$GRC files=[$(ls "$RESV" 2>/dev/null | tr '\n' ' ')]"
+fi
+
 # 3) Non-Agent tools pass through untouched (gate only guards Agent|Task).
 FAKE_AVAIL=2000 \
   run_gate "$MEM_GATE" '{"tool_name":"Bash","tool_input":{"command":"ls"}}'

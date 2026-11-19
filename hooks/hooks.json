@@ -212,6 +212,11 @@
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/crash-audit.sh\"",
             "timeout": 8
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/reservation.sh\" consume >/dev/null 2>&1 || true",
+            "timeout": 5
           }
         ]
       }
