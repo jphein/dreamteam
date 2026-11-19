@@ -59,24 +59,46 @@ rm -f "$XDG_STATE_HOME/dreamteam/config-pull.claude.lock"
 bash "$CP" extra >/dev/null 2>&1; [ $? = 22 ] && ok "an argument: exit 22" || bad "argument rc"
 out=$(DREAMTEAM_CHECK_HOST=Katana bash "$CP"); case "$out" in "CHECK config-pull-katana ok · "*) ok "off familiar the name carries the host" ;; *) bad "host suffix: '$out'" ;; esac
 
+# a freshen that prints no RESULT line is not "0 files updated"
+mkdir -p "$TMP/fakeroot/scripts/lib"; cp "$ROOT/scripts/lib/check-line.sh" "$TMP/fakeroot/scripts/lib/"; cp "$CP" "$TMP/fakeroot/scripts/"
+printf '#!/bin/sh\ncase "$1" in sync) echo "claude: main at abc (was abc); 0 lines of status" ;; freshen) echo "claude: nothing stale or absent" ;; esac\n' > "$TMP/fakeroot/scripts/clone-in-place.sh"
+out=$(CLAUDE_PLUGIN_ROOT="$TMP/fakeroot" bash "$TMP/fakeroot/scripts/config-pull.sh")
+case "$out" in "CHECK config-pull fail · the update step gave no result line · "*) ok "no RESULT line from the update step: fail, never '0 files updated'" ;; *) bad "missing RESULT: '$out'" ;; esac
+
 # ================= transcripts-push ============================================================================
-SRC="$TMP/src"; DEST="$TMP/share/transcripts/hostA"; mkdir -p "$SRC/projA/sess1/subagents" "$SRC/projA/memory" "$SRC/projB" "$TMP/share"
-export TRANSCRIPTS_SRC="$SRC" TRANSCRIPTS_MOUNT=""
+SRC="$TMP/src"; SHARE="$TMP/share"; DEST="$SHARE/transcripts/hostA"; mkdir -p "$SRC/projA/sess1/subagents" "$SRC/projA/memory" "$SRC/projB" "$SHARE"
+printf '#!/bin/sh\n[ -e "%s/unmounted" ] && exit 1\nexit 0\n' "$TMP" > "$TMP/mp"; chmod +x "$TMP/mp"
+export TRANSCRIPTS_SRC="$SRC" TRANSCRIPTS_MOUNT="$SHARE" TRANSCRIPTS_MOUNTPOINT_CMD="$TMP/mp"
+ST="$XDG_STATE_HOME/dreamteam"
 echo old > "$SRC/projA/old.jsonl"; touch -d '2 hours ago' "$SRC/projA/old.jsonl"
-TL="$TMP/checks/transcripts-push.line"
 out=$(bash "$TP"); case "$out" in "CHECK transcripts-push fail · not initialised (run --init <dest> once) · "*) ok "before --init: fail, nothing sent" ;; *) bad "uninitialised: '$out'" ;; esac
-bash "$TP" --init "relative/dir" >/dev/null 2>&1; [ $? = 22 ] && ok "--init refuses a relative destination" || bad "relative dest"
-bash "$TP" --init "/a b" >/dev/null 2>&1; [ $? = 22 ] && ok "--init refuses a destination with a space" || bad "space dest"
-bash "$TP" --init "-x:/abs" >/dev/null 2>&1; [ $? = 22 ] && ok "--init refuses a host part that starts like an option" || bad "option-like host"
-bash "$TP" --init "host:relative" >/dev/null 2>&1; [ $? = 22 ] && ok "--init refuses a remote path that is not absolute" || bad "relative remote path"
+for bad_dest in "relative/dir" "/a b" "-x:/abs" "host:relative" "/srv/../etc" "host:/a/../b" "/a//b" "/a/./b"; do
+  bash "$TP" --init "$bad_dest" >/dev/null 2>&1; [ $? = 22 ] && ok "--init refuses '$bad_dest'" || bad "--init accepted '$bad_dest'"
+done
+# state paths are never followed or replaced
+ln -s "$TMP/cut-target" "$ST/transcripts-push.cut"
+bash "$TP" --init "$DEST" >/dev/null 2>&1; rc=$?
+[ "$rc" = 22 ] && [ ! -e "$TMP/cut-target" ] && [ ! -e "$ST/transcripts-push.dest" ] && ok "a dangling symlink at the cut path: --init refuses, creates neither its target nor the dest file" || bad "cut symlink: rc=$rc"
+rm -f "$ST/transcripts-push.cut"; echo sentinel > "$TMP/dest-target"; ln -s "$TMP/dest-target" "$ST/transcripts-push.dest"
+bash "$TP" --init "$DEST" >/dev/null 2>&1; rc=$?
+[ "$rc" = 22 ] && [ "$(cat "$TMP/dest-target")" = sentinel ] && ok "a symlink at the dest path: --init refuses and its target is untouched" || bad "dest symlink: rc=$rc"
+rm -f "$ST/transcripts-push.dest"
+( exec 9>> "$ST/transcripts-push.lock"; flock -n 9 || exit 9; bash "$TP" --init "$DEST" 9>&- >/dev/null 2>&1; echo $? > "$TMP/rc" )
+[ "$(cat "$TMP/rc")" = 75 ] && [ ! -e "$ST/transcripts-push.cut" ] && ok "--init takes the same lock as a pass (held elsewhere: exit 75, nothing written)" || bad "init lock rc=$(cat "$TMP/rc")"
+# a file that APPEARS at the dest path after the check is neither replaced nor removed
+mkdir -p "$TMP/racebin"; REALMKTEMP="$(command -v mktemp)"
+printf '#!/bin/sh\ncase "$*" in *transcripts-push.new*) [ -e "%s/transcripts-push.dest" ] || echo foreign > "%s/transcripts-push.dest" ;; esac\nexec "%s" "$@"\n' "$ST" "$ST" "$REALMKTEMP" > "$TMP/racebin/mktemp"; chmod +x "$TMP/racebin/mktemp"
+PATH="$TMP/racebin:$PATH" bash "$TP" --init "$DEST" >/dev/null 2>&1; rc=$?
+[ "$rc" = 1 ] && [ "$(cat "$ST/transcripts-push.dest")" = foreign ] && [ ! -e "$ST/transcripts-push.cut" ] && ok "a dest file appearing mid-init survives untouched; no cut is set" || bad "mid-init file: rc=$rc dest=$(cat "$ST/transcripts-push.dest" 2>&1)"
+rm -f "$ST/transcripts-push.dest"
 bash "$TP" --init "$DEST" >/dev/null; rc=$?
-[ "$rc" = 0 ] && [ "$(cat "$XDG_STATE_HOME/dreamteam/transcripts-push.dest")" = "$DEST" ] && ok "--init records the destination and sets the cut" || bad "--init rc=$rc"
+[ "$rc" = 0 ] && [ "$(cat "$ST/transcripts-push.dest")" = "$DEST" ] && [ -f "$ST/transcripts-push.cut" ] && ok "--init records the destination and sets the cut" || bad "--init rc=$rc"
 bash "$TP" --init "$DEST" >/dev/null 2>&1; [ $? = 22 ] && ok "a second --init is refused (the cut is not moved by accident)" || bad "second init"
 sleep 1.1
 echo new1 > "$SRC/projA/s1.jsonl"; echo sub > "$SRC/projA/sess1/subagents/agent.jsonl"; echo new2 > "$SRC/projB/s2.jsonl"
 echo memory > "$SRC/projA/memory/MEMORY.md"; echo notes > "$SRC/projB/notes.txt"
 out=$(bash "$TP"); rc=$?
-[ "$rc" = 0 ] && [ "$out" = "CHECK transcripts-push ok · 3 transcripts current at $DEST · every 10 min, owner Sen" ] && ok "3 new transcripts sent: ok line, exact shape" || bad "first pass: rc=$rc '$out'"
+[ "$rc" = 0 ] && [ "$out" = "CHECK transcripts-push ok · 3 transcripts changed since the cut, all sent to $DEST · every 10 min, owner Sen" ] && ok "3 new transcripts sent: ok line, exact shape" || bad "first pass: rc=$rc '$out'"
 [ "$(cat "$DEST/projA/s1.jsonl")" = new1 ] && [ "$(cat "$DEST/projA/sess1/subagents/agent.jsonl")" = sub ] && [ "$(cat "$DEST/projB/s2.jsonl")" = new2 ] && ok "paths below the source are kept (a subagent file too)" || bad "copied files"
 [ ! -e "$DEST/projA/old.jsonl" ] && ok "a transcript older than the cut is not sent" || bad "old transcript sent"
 [ ! -e "$DEST/projA/memory" ] && [ ! -e "$DEST/projB/notes.txt" ] && ok "memory and non-jsonl files are not sent" || bad "non-transcript sent"
@@ -84,22 +106,42 @@ echo more >> "$SRC/projA/s1.jsonl"; bash "$TP" >/dev/null
 [ "$(cat "$DEST/projA/s1.jsonl")" = "$(printf 'new1\nmore')" ] && ok "a transcript that grew is updated on the next pass" || bad "growth not copied"
 echo extra > "$DEST/projB/only-at-dest.jsonl"; rm "$SRC/projB/s2.jsonl"; bash "$TP" >/dev/null
 [ -f "$DEST/projB/only-at-dest.jsonl" ] && [ -f "$DEST/projB/s2.jsonl" ] && ok "nothing is ever removed at the destination" || bad "a destination file was removed"
-mv "$DEST" "$TMP/hostA.away"; chmod 555 "$TMP/share/transcripts"
+# the share must really be the share
+touch "$TMP/unmounted"
+out=$(bash "$TP"); case "$out" in "CHECK transcripts-push fail · $SHARE is not mounted · "*) ok "share not mounted: fail (files never land in a plain local dir)" ;; *) bad "unmounted share: '$out'" ;; esac
+rm -f "$TMP/unmounted"
+out=$(TRANSCRIPTS_MOUNT="$SHARE/" bash "$TP"); case "$out" in "CHECK transcripts-push ok · "*) ok "a trailing slash on the mount setting is the same mount" ;; *) bad "trailing-slash mount: '$out'" ;; esac
+out=$(TRANSCRIPTS_MOUNT="" bash "$TP"); case "$out" in "CHECK transcripts-push fail · no share mount point configured for a local destination · "*) ok "no mount configured: a local destination is refused, not trusted" ;; *) bad "empty mount: '$out'" ;; esac
+mkdir -p "$TMP/elsewhere"; printf '%s\n' "$TMP/elsewhere/t" > "$ST/transcripts-push.dest"
+out=$(bash "$TP"); case "$out" in "CHECK transcripts-push fail · destination $TMP/elsewhere/t is not under the share $SHARE · "*) [ ! -e "$TMP/elsewhere/t" ] && ok "a local destination outside the share: fail, nothing created there" || bad "outside dir created" ;; *) bad "outside share: '$out'" ;; esac
+ln -s "$TMP/elsewhere" "$SHARE/escape"; printf '%s\n' "$SHARE/escape/t" > "$ST/transcripts-push.dest"
+out=$(bash "$TP"); case "$out" in "CHECK transcripts-push fail · destination $SHARE/escape/t is not under the share $SHARE · "*) [ ! -e "$TMP/elsewhere/t" ] && ok "a symlink inside the share that leads out of it: fail" || bad "escape dir created" ;; *) bad "symlink escape: '$out'" ;; esac
+rm -f "$SHARE/escape"; printf '%s\n' "$DEST" > "$ST/transcripts-push.dest"
+mv "$DEST" "$TMP/hostA.away"; chmod 555 "$SHARE/transcripts"
 out=$(bash "$TP"); case "$out" in "CHECK transcripts-push fail · destination $DEST unreachable or not writable · "*) ok "destination unreachable: fail, not ok" ;; *) [ "$(id -u)" = 0 ] && ok "unreachable destination: skipped as root" || bad "unreachable: '$out'" ;; esac
-chmod 755 "$TMP/share/transcripts"; mv "$TMP/hostA.away" "$DEST"
-out=$(TRANSCRIPTS_MOUNT="$TMP/share" bash "$TP"); case "$out" in "CHECK transcripts-push fail · $TMP/share is not mounted · "*) ok "the share's mount point not mounted: fail (files never land in a plain local dir)" ;; *) bad "unmounted share: '$out'" ;; esac
-printf '#!/bin/sh\nexit 0\n' > "$TMP/mp"; chmod +x "$TMP/mp"
-out=$(TRANSCRIPTS_MOUNT="$TMP/share" TRANSCRIPTS_MOUNTPOINT_CMD="$TMP/mp" bash "$TP"); case "$out" in "CHECK transcripts-push ok · "*) ok "mounted share: ok" ;; *) bad "mounted share: '$out'" ;; esac
+chmod 755 "$SHARE/transcripts"; mv "$TMP/hostA.away" "$DEST"
 out=$(TRANSCRIPTS_SRC="$TMP/absent" bash "$TP"); case "$out" in "CHECK transcripts-push fail · source "*" unreadable or absent · "*) ok "source absent: fail" ;; *) bad "absent source: '$out'" ;; esac
 mkdir -p "$TMP/bin"; printf '#!/bin/sh\nexit 12\n' > "$TMP/bin/rsync"; chmod +x "$TMP/bin/rsync"; echo z > "$SRC/projA/z.jsonl"
 out=$(PATH="$TMP/bin:$PATH" bash "$TP"); case "$out" in "CHECK transcripts-push fail · rsync exit 12 to $DEST ("*) ok "an rsync that does not work: fail with its exit code" ;; *) bad "rsync failure: '$out'" ;; esac
 printf '#!/bin/sh\nexit 24\n' > "$TMP/bin/rsync"
-out=$(PATH="$TMP/bin:$PATH" bash "$TP"); case "$out" in "CHECK transcripts-push ok · "*) ok "rsync 24 (a file vanished mid-pass) is not a failure" ;; *) bad "rsync 24: '$out'" ;; esac
-printf 'bad dest\n' > "$XDG_STATE_HOME/dreamteam/transcripts-push.dest"
+out=$(PATH="$TMP/bin:$PATH" bash "$TP"); case "$out" in "CHECK transcripts-push warn · "*" listed for $DEST, some vanished mid-pass (next pass retries) · "*) ok "rsync 24 (a file vanished mid-pass) is a warn that says so, never 'all sent'" ;; *) bad "rsync 24: '$out'" ;; esac
+printf 'bad dest\n' > "$ST/transcripts-push.dest"
 out=$(bash "$TP"); case "$out" in "CHECK transcripts-push fail · the recorded destination is not valid · "*) ok "a tampered destination file: fail" ;; *) bad "bad recorded dest: '$out'" ;; esac
-printf '%s\n' "$DEST" > "$XDG_STATE_HOME/dreamteam/transcripts-push.dest"
-( exec 9>> "$XDG_STATE_HOME/dreamteam/transcripts-push.lock"; flock -n 9 || exit 9; bash "$TP" 9>&- >/dev/null 2>&1; echo $? > "$TMP/rc" )
+# a remote destination is probed on every pass, also with nothing to send
+printf 'far:/data/t\n' > "$ST/transcripts-push.dest"
+printf '#!/bin/sh\necho "$*" >> "%s/ssh.log"\n[ -e "%s/remote.down" ] && exit 255\nexit 0\n' "$TMP" "$TMP" > "$TMP/bin/fakessh"; chmod +x "$TMP/bin/fakessh"
+find "$SRC" -name '*.jsonl' -exec touch -d '3 hours ago' {} +                 # nothing newer than the cut now
+touch "$TMP/remote.down"
+out=$(TRANSCRIPTS_SSH="$TMP/bin/fakessh" bash "$TP"); case "$out" in "CHECK transcripts-push fail · destination far:/data/t unreachable or not a writable directory · "*) ok "remote down with nothing to send: fail, not 'all sent'" ;; *) bad "remote down, empty list: '$out'" ;; esac
+rm -f "$TMP/remote.down"
+out=$(TRANSCRIPTS_SSH="$TMP/bin/fakessh" bash "$TP"); case "$out" in "CHECK transcripts-push ok · 0 transcripts changed since the cut, all sent to far:/data/t · "*) ok "remote up with nothing to send: ok after a real probe" ;; *) bad "remote up, empty list: '$out'" ;; esac
+grep -q -- "-- far test -d /data/t -a -w /data/t" "$TMP/ssh.log" && ok "the probe asks the remote for a writable directory" || bad "probe args: $(tail -1 "$TMP/ssh.log")"
+printf '%s\n' "$DEST" > "$ST/transcripts-push.dest"
+( exec 9>> "$ST/transcripts-push.lock"; flock -n 9 || exit 9; bash "$TP" 9>&- >/dev/null 2>&1; echo $? > "$TMP/rc" )
 [ "$(cat "$TMP/rc")" = 75 ] && ok "lock held elsewhere: exit 75" || bad "transcripts lock rc=$(cat "$TMP/rc")"
+rm -f "$ST/transcripts-push.lock"; ln -s "$TMP/tlock-target" "$ST/transcripts-push.lock"
+out=$(bash "$TP"); case "$out" in "CHECK transcripts-push fail · cannot take the lock"*) [ ! -e "$TMP/tlock-target" ] && ok "a symlinked lock is refused and its target never created" || bad "lock target created" ;; *) bad "symlink lock: '$out'" ;; esac
+rm -f "$ST/transcripts-push.lock"
 bash "$TP" nope >/dev/null 2>&1; [ $? = 22 ] && ok "unknown argument: exit 22" || bad "argument rc"
 
 # ================= units =======================================================================================

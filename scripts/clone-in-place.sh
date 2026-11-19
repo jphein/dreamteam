@@ -47,6 +47,25 @@ paused() {   # 0 when the Syncthing folder that carries this tree is paused (or 
   [ "$FOLDER" = none ] && return 0
   syncthing cli config folders "$FOLDER" dump-json 2>/dev/null | python3 -c "import json,sys; sys.exit(0 if json.load(sys.stdin).get('paused') else 1)"
 }
+# old_version <path> : 0 when the file's ON-DISK bytes (no clean filter) equal a blob that a commit reachable from
+# HEAD recorded AT THIS SAME PATH. An object that merely exists in the store is not enough: `git add` of a local edit
+# creates one, and another file's content may match. Uses the array GITC (set by the caller) to reach the repo.
+old_version() {
+  local f="$1" h
+  h=$("${GITC[@]}" hash-object --no-filters -- "$D/$f" 2>/dev/null) || return 1
+  [ -n "$h" ] || return 1
+  "${GITC[@]}" --literal-pathspecs log -m --format= --raw --no-abbrev --no-renames HEAD -- "$f" 2>/dev/null \
+    | awk '{print $3; print $4}' | grep -qx -- "$h"
+}
+dirlock() {  # one mutating run at a time per DIRECTORY, whatever <name> the callers use
+  local key lf
+  umask 077; mkdir -p "$S" || { echo "$name: no state dir $S"; exit 2; }
+  key=$(printf '%s' "$(cd "$D" && pwd -P)" | sha256sum | cut -c1-16)
+  lf="$S/lock.$key"
+  if [ -L "$lf" ] || { [ -e "$lf" ] && [ ! -f "$lf" ]; }; then echo "$name: $lf is a symlink or not a regular file"; exit 2; fi
+  exec 7>> "$lf" || { echo "$name: cannot open the lock"; exit 2; }
+  flock -n 7 || { echo "$name: another clone-in-place run holds this directory's lock; nothing done"; exit 2; }
+}
 summary() {  # counts from one porcelain listing on stdin
   awk '{c=substr($0,1,2)} c=="??"{u++} c!="??"{m++} END{printf "%d differing tracked, %d untracked", m+0, u+0}'
 }
@@ -74,6 +93,7 @@ case "$cmd" in
     # For each tracked file that differs from origin's head: is its content an OLDER committed version (the synced
     # tree lags origin: "stale"), or bytes git has never seen (a real uncommitted edit: "edit")? Read-only.
     [ -d "$G" ] && [ -f "$S/$name.status" ] || { echo "$name: run check first"; exit 2; }
+    GITC=(git --git-dir="$G" -c core.bare=false --work-tree="$D")
     stale=0; edit=0; absent=0; other=0; skip=0; : > "$S/$name.edits"
     while IFS= read -r line; do
       xy="${line:0:2}"; f="${line:3}"
@@ -82,7 +102,7 @@ case "$cmd" in
         "??") continue ;;
         " D"|"D ") absent=$((absent + 1)); continue ;;
         " M"|"M "|"MM")
-          if [ -f "$D/$f" ] && h=$(g hash-object -- "$D/$f" 2>/dev/null) && git --git-dir="$G" cat-file -e "$h^{blob}" 2>/dev/null; then
+          if [ -f "$D/$f" ] && [ ! -L "$D/$f" ] && old_version "$f"; then
             stale=$((stale + 1))
           else
             edit=$((edit + 1)); printf '%s\n' "$f" >> "$S/$name.edits"
@@ -99,6 +119,7 @@ case "$cmd" in
     [ -d "$G" ] || { echo "$name: no prepared git dir (run check first)"; exit 2; }
     [ ! -e "$D/.git" ] || { echo "$name: already has a .git"; exit 2; }
     paused || { echo "$name: the Syncthing folder '$FOLDER' is not paused; refusing"; exit 2; }
+    dirlock
     g status --porcelain > "$S/$name.status.apply" || exit 2
     cmp -s "$S/$name.status" "$S/$name.status.apply" || { echo "$name: the tree changed since the check; run check again"; exit 2; }
     mv -T -- "$G" "$D/.git" || exit 2
@@ -109,12 +130,20 @@ case "$cmd" in
       "$([ "$n" = "$(wc -l < "$S/$name.status")" ] && echo yes || echo NO)"
     ;;
   freshen)
-    # After apply: bring ONLY stale files (bytes equal to an older committed version) and absent files up to HEAD.
-    # Real edits and untracked files are never touched. The stale files are saved in a tar first.
+    # After apply: bring ONLY stale files (on-disk bytes equal to an older committed version OF THE SAME PATH) and
+    # absent files up to HEAD. Real edits and untracked files are never touched. The stale files go into a tar first.
+    # The last line is machine-readable:  RESULT freshened=<n> stale=<s> absent=<a> kept=<k> linked=<l> skipped=<p>
+    # Known limit: a file is re-hashed immediately before the checkout and the run stops if anything changed since
+    # it was judged, but an editor saving in the instant between that re-hash and git's write is not excluded.
     [ -d "$D/.git" ] || { echo "$name: not a clone yet (apply first)"; exit 2; }
     paused || { echo "$name: the Syncthing folder '$FOLDER' is not paused; refusing"; exit 2; }
-    umask 077; mkdir -p "$S"
-    ts=$(date +%Y%m%d-%H%M%S); lst="$S/$name.freshen-$ts.paths"; stl="$S/$name.freshen-$ts.stale"; : > "$lst"; : > "$stl"
+    dirlock
+    GITC=(git -C "$D")
+    stf=$(mktemp "$S/.$name.status.XXXXXX") && lst=$(mktemp "$S/.$name.paths.XXXXXX") && stl=$(mktemp "$S/.$name.stale.XXXXXX") \
+      && sums=$(mktemp "$S/.$name.sums.XXXXXX") && abl=$(mktemp "$S/.$name.absent.XXXXXX") || { echo "$name: cannot create work files in $S"; exit 2; }
+    trap 'rm -f -- "$stf" "$lst" "$stl" "$sums" "$abl"' EXIT
+    # the listing is complete or the run stops: a status that did not finish is not "nothing to do"
+    git -C "$D" status --porcelain -z --no-renames > "$stf" || { echo "$name: git status did not work; nothing changed"; exit 2; }
     kept=0; linked=0; skipn=0
     while IFS= read -r -d '' rec; do
       xy="${rec:0:2}"; f="${rec:3}"
@@ -125,33 +154,51 @@ case "$cmd" in
       if [ "$behind" = 1 ]; then linked=$((linked + 1)); continue; fi
       if [ "$xy" != "??" ] && skipped "$f"; then skipn=$((skipn + 1)); continue; fi
       case "$xy" in
-        " D") printf '%s\0' "$f" >> "$lst" ;;
+        " D") if [ ! -e "$D/$f" ] && [ ! -L "$D/$f" ]; then printf '%s\0' "$f" >> "$lst"; printf '%s\0' "$f" >> "$abl"; else kept=$((kept + 1)); fi ;;
         " M")
-          if [ -f "$D/$f" ] && [ ! -L "$D/$f" ] && h=$(git -C "$D" hash-object -- "$f" 2>/dev/null) && git -C "$D" cat-file -e "$h^{blob}" 2>/dev/null; then
+          if [ -f "$D/$f" ] && [ ! -L "$D/$f" ] && old_version "$f"; then
             printf '%s\0' "$f" >> "$lst"; printf '%s\0' "$f" >> "$stl"
+            printf '%s  %s\0' "$(sha256sum < "$D/$f" | cut -d' ' -f1)" "$f" >> "$sums"
           else kept=$((kept + 1)); fi ;;
         "??") ;;
         *) kept=$((kept + 1)) ;;
       esac
-    done < <(git -C "$D" status --porcelain -z --no-renames)
+    done < "$stf"
     n=$(tr -cd '\0' < "$lst" | wc -c); ns=$(tr -cd '\0' < "$stl" | wc -c)
     [ "$linked" = 0 ] || echo "$name: $linked tracked paths lie behind a linked directory; left alone"
     [ "$skipn" = 0 ] || echo "$name: $skipn differing paths under the skip prefixes; left alone"
-    [ "$n" -gt 0 ] || { echo "$name: nothing stale or absent; $kept differing files left as they are"; exit 0; }
-    tarf="$S/$name.pre-freshen-$ts.tar"
+    if [ "$n" = 0 ]; then
+      echo "$name: nothing stale or absent; $kept differing files left as they are"
+      echo "RESULT freshened=0 stale=0 absent=0 kept=$kept linked=$linked skipped=$skipn"; exit 0
+    fi
+    tarf=none
     if [ "$ns" -gt 0 ]; then
+      tarf=$(mktemp "$S/$name.pre-freshen-$(date +%Y%m%d-%H%M%S).XXXXXX.tar") || { echo "$name: cannot name a backup tar; nothing changed"; exit 2; }
       tar -C "$D" --null -T "$stl" -cf "$tarf" || { echo "$name: backup tar did not work; nothing changed"; exit 2; }
       [ "$(tar -tf "$tarf" | wc -l)" = "$ns" ] || { echo "$name: backup tar is incomplete; nothing changed"; exit 2; }
     fi
-    git -C "$D" checkout -q HEAD --pathspec-from-file="$lst" --pathspec-file-nul || { echo "$name: checkout did not work"; exit 2; }
+    # re-validate immediately before writing: every stale file still has the bytes that were judged and backed up,
+    # every absent path is still absent
+    while IFS= read -r -d '' rec; do
+      want="${rec%%  *}"; f="${rec#*  }"
+      [ -f "$D/$f" ] && [ ! -L "$D/$f" ] && [ "$(sha256sum < "$D/$f" | cut -d' ' -f1)" = "$want" ] \
+        || { echo "$name: $f changed while this ran; nothing changed (run again)"; exit 2; }
+    done < "$sums"
+    while IFS= read -r -d '' f; do
+      [ ! -e "$D/$f" ] && [ ! -L "$D/$f" ] || { echo "$name: $f appeared while this ran; nothing changed (run again)"; exit 2; }
+    done < "$abl"
+    # --literal-pathspecs: a tracked name holding * ? [ or :( is a NAME here, never a pattern that could match more
+    git --literal-pathspecs -C "$D" checkout -q HEAD --pathspec-from-file="$lst" --pathspec-file-nul || { echo "$name: checkout did not work"; exit 2; }
     printf '%s: freshened %d files (%d stale, %d absent); %d differing files left as they are; status lines now %s; backup %s\n' \
-      "$name" "$n" "$ns" "$((n - ns))" "$kept" "$(git -C "$D" status --porcelain | wc -l)" "$( [ "$ns" -gt 0 ] && echo "$tarf" || echo none)"
+      "$name" "$n" "$ns" "$((n - ns))" "$kept" "$(git -C "$D" status --porcelain | wc -l)" "$tarf"
+    echo "RESULT freshened=$n stale=$ns absent=$((n - ns)) kept=$kept linked=$linked skipped=$skipn"
     ;;
   sync)
     # After a commit made through the GitHub API (the fleet's way): fetch, then move the local branch to origin's
     # head and reset the INDEX only. No file is written, so a file the lane already holds in its new form simply
     # stops showing as modified. Refuses when the branch has commits origin lacks (nothing is thrown away).
     [ -d "$D/.git" ] || { echo "$name: not a clone"; exit 2; }
+    dirlock
     br=$(git -C "$D" symbolic-ref -q --short HEAD) || { echo "$name: detached HEAD; nothing done"; exit 2; }
     git -C "$D" fetch -q origin "$br" || { echo "$name: fetch did not work"; exit 2; }
     ahead=$(git -C "$D" rev-list --count "origin/$br..$br")
@@ -164,6 +211,7 @@ case "$cmd" in
     ;;
   undo)
     [ -d "$D/.git" ] || { echo "$name: no .git to move out"; exit 2; }
+    dirlock
     [ ! -e "$G" ] || { echo "$name: $G is in the way"; exit 2; }
     mkdir -p "$S/gitdirs" && mv -T -- "$D/.git" "$G" && git --git-dir="$G" config core.bare true && echo "$name: .git moved back out to $G; the tree is untouched"
     ;;

@@ -59,10 +59,11 @@ out=$(bash "$S" freshen proj); rc=$?
 case "$out" in "proj: freshened 2 files (1 stale, 1 absent); 1 differing files left as they are; status lines now 2; backup "*) ok "freshen: 1 stale + 1 absent updated, the edit counted and left" ;; *) bad "freshen: rc=$rc '$out'" ;; esac
 [ "$(cat "$P/a.txt")" = "$(printf 'one\ntwo')" ] && [ -f "$P/.gitignore" ] && ok "the stale file is at HEAD and the absent one is back" || bad "freshen result"
 [ "$(cat "$P/sub/s.txt")" = edited ] && [ "$(cat "$P/notes.md")" = new ] && [ "$(cat "$P/scratch/report.md")" = r ] && ok "the real edit, the untracked file and scratch are untouched" || bad "freshen touched an edit or untracked file"
-tarf=$(sed -E 's/.*backup //' <<< "$out")
+tarf=$(grep ": freshened [0-9]" <<< "$out" | sed -E 's/.*backup //')
 [ "$(tar -xOf "$tarf" a.txt)" = one ] && [ "$(tar -tf "$tarf" | wc -l)" = 1 ] && ok "the tar holds the stale file's old bytes, and only that" || bad "pre-freshen tar"
 out=$(bash "$S" freshen proj)
-case "$out" in "proj: nothing stale or absent; 1 differing files left as they are") ok "a second freshen has nothing to do" ;; *) bad "second freshen: '$out'" ;; esac
+[ "$(head -1 <<< "$out")" = "proj: nothing stale or absent; 1 differing files left as they are" ] && [ "$(tail -1 <<< "$out")" = "RESULT freshened=0 stale=0 absent=0 kept=1 linked=0 skipped=0" ] \
+  && ok "a second freshen has nothing to do, and says so in its RESULT line" || bad "second freshen: '$out'"
 
 # --- freshen never checks out a tracked path that lies behind a linked directory (serialhub memorypalace, 11-18) --
 mkdir -p "$TMP/sharedsub"; cp "$P/sub/s.txt" "$TMP/sharedsub/s.txt"; mv "$P/sub" "$P/sub.local"; ln -s "$TMP/sharedsub" "$P/sub"
@@ -71,6 +72,47 @@ out=$(bash "$S" freshen proj)
 [ -L "$P/sub" ] && ok "the linked directory is still a link after freshen" || bad "freshen replaced the linked directory"
 grep -q "1 tracked paths lie behind a linked directory; left alone" <<< "$out" && [ -f "$P/a.txt" ] && ok "it says so, and still restores the ordinary absent file" || bad "freshen behind a link: '$out'"
 rm "$P/sub"; mv "$P/sub.local" "$P/sub"
+
+# --- xreview r1 on #262: what counts as "an older version", and what a checkout may touch ----------------------
+# (1) a local edit that was `git add`ed has a blob in the store; it is NOT an older committed version
+echo "staged local edit" > "$P/a.txt"; q -C "$P" add a.txt; q -C "$P" reset -q
+out=$(bash "$S" freshen proj)
+[ "$(cat "$P/a.txt")" = "staged local edit" ] && ok "an edit that was git-added (a dangling blob) is a real edit, never overwritten" || bad "a staged edit was overwritten"
+# (2) bytes copied from ANOTHER tracked file are not an older version of THIS path
+cp "$P/.gitignore" "$P/a.txt"
+bash "$S" freshen proj >/dev/null
+cmp -s "$P/a.txt" "$P/.gitignore" && ok "content equal to another path's blob is a real edit, never overwritten" || bad "a cross-path match was overwritten"
+git -C "$P" checkout -q HEAD -- a.txt
+# (3) a tracked name with a wildcard is a NAME: its checkout cannot reach other files
+q -C "$TMP/w0" 2>/dev/null; q clone "$TMP/origin.git" "$TMP/w0"; echo star1 > "$TMP/w0/x*.txt"; echo plain1 > "$TMP/w0/xa.txt"
+q -C "$TMP/w0" add .; q -C "$TMP/w0" commit -m star1; echo star2 > "$TMP/w0/x*.txt"; echo plain2 > "$TMP/w0/xa.txt"; q -C "$TMP/w0" commit -am star2; q -C "$TMP/w0" push origin main
+git -C "$P" remote set-url origin "$TMP/origin.git"; bash "$S" sync proj >/dev/null
+echo star1 > "$P/x*.txt"                      # stale: the older committed version of the starred name
+echo "my local edit" > "$P/xa.txt"            # a real edit in a file the pattern x*.txt would match
+out=$(bash "$S" freshen proj)
+[ "$(cat "$P/x*.txt")" = star2 ] && [ "$(cat "$P/xa.txt")" = "my local edit" ] && ok "a stale file named x*.txt is updated; the edit in xa.txt (which the pattern matches) is untouched" || bad "wildcard name: x*=$(cat "$P/x*.txt") xa=$(cat "$P/xa.txt")"
+git -C "$P" checkout -q HEAD -- xa.txt
+# (4) a status that does not finish is not "nothing to do"
+mkdir -p "$TMP/gitfail"; REALGIT="$(command -v git)"
+printf '#!/bin/sh\ncase " $* " in *" status "*) printf " M a.txt\\000"; exit 128 ;; esac\nexec "%s" "$@"\n' "$REALGIT" > "$TMP/gitfail/git"; chmod +x "$TMP/gitfail/git"
+echo one > "$P/a.txt"
+out=$(PATH="$TMP/gitfail:$PATH" bash "$S" freshen proj 2>&1); rc=$?
+[ "$rc" = 2 ] && ! grep -q "^RESULT" <<< "$out" && [ "$(cat "$P/a.txt")" = one ] && ok "git status exiting non-zero mid-list: exit 2, no RESULT, nothing written" || bad "partial status: rc=$rc '$out'"
+bash "$S" freshen proj >/dev/null
+# (5) one run at a time per directory; work files and tars never collide
+( key=$(printf '%s' "$(cd "$P" && pwd -P)" | sha256sum | cut -c1-16); exec 7>> "$HOME/.local/state/sync-phase1/lock.$key"; flock -n 7 || exit 9
+  echo one > "$P/a.txt"; bash "$S" freshen proj 7>&- >"$TMP/locked.out" 2>&1; echo $? > "$TMP/locked.rc" )
+[ "$(cat "$TMP/locked.rc")" = 2 ] && grep -q "holds this directory's lock" "$TMP/locked.out" && [ "$(cat "$P/a.txt")" = one ] && ok "a second run on the same directory is refused while one holds its lock" || bad "dir lock: rc=$(cat "$TMP/locked.rc")"
+bash "$S" freshen proj >/dev/null; echo one > "$P/a.txt"; bash "$S" freshen proj >/dev/null
+[ "$(ls "$HOME/.local/state/sync-phase1"/proj.pre-freshen-*.tar | sort -u | wc -l)" -ge 3 ] && ok "every run's backup tar has its own name (same-second runs do not overwrite)" || bad "tar names: $(ls "$HOME/.local/state/sync-phase1" | grep -c pre-freshen)"
+[ -z "$(ls -A "$HOME/.local/state/sync-phase1" | grep -E '^\.proj\.(status|paths|stale|sums|absent)\.')" ] && ok "no work file is left behind" || bad "work files left"
+# (6) a file that changes between the judgement and the write stops the run
+mkdir -p "$TMP/tarrace"; REALTAR="$(command -v tar)"
+printf '#!/bin/sh\necho "edited while it ran" > "%s/a.txt"\nexec "%s" "$@"\n' "$P" "$REALTAR" > "$TMP/tarrace/tar"; chmod +x "$TMP/tarrace/tar"
+echo one > "$P/a.txt"
+out=$(PATH="$TMP/tarrace:$PATH" bash "$S" freshen proj 2>&1); rc=$?
+[ "$rc" = 2 ] && [ "$(cat "$P/a.txt")" = "edited while it ran" ] && grep -q "changed while this ran" <<< "$out" && ok "an edit landing after the judgement is kept: exit 2, nothing written" || bad "edit mid-run: rc=$rc a=$(cat "$P/a.txt")"
+git -C "$P" checkout -q HEAD -- a.txt
 
 # --- sync: after an API commit, the branch moves to origin's head and no file is written -----------------------
 git -C "$P" remote set-url origin "$TMP/origin.git"

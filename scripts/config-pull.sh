@@ -51,8 +51,11 @@ if [ "$rc" != 0 ]; then
   why=$(tail -1 <<< "$out"); why=${why#"$NAME: "}
   check_line "$CHECK" fail "update did not work: ${why:0:120}" "$OWNER"; exit $?
 fi
-updated=0
-if [[ "$out" =~ freshened\ ([0-9]+)\ files ]]; then updated="${BASH_REMATCH[1]}"; fi
+# the update step's own machine-readable last line is the evidence; without it nothing is claimed
+res=$(tail -1 <<< "$out")
+[[ "$res" =~ ^RESULT\ freshened=([0-9]+)\ stale=[0-9]+\ absent=[0-9]+\ kept=[0-9]+\ linked=[0-9]+\ skipped=[0-9]+$ ]] \
+  || { check_line "$CHECK" fail "the update step gave no result line" "$OWNER"; exit $?; }
+updated="${BASH_REMATCH[1]}"
 
 br=$(git -C "$DIR" symbolic-ref -q --short HEAD) && sha=$(git -C "$DIR" rev-parse --short HEAD) \
   || { check_line "$CHECK" fail "cannot read HEAD after the update" "$OWNER"; exit $?; }
