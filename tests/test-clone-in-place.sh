@@ -162,6 +162,27 @@ out=$(PATH="$TMP/rtrace:$PATH" bash "$S" freshen proj 2>&1); rc=$?
 [ "$rc" = 2 ] && [ "$(cat "$P/.gitignore")" = "owner made it" ] && [ "$(cat "$P/a.txt")" = one ] && ok "a file appearing at an absent path just before git writes: kept, nothing written" || bad "appearing file: rc=$rc"
 git -C "$P" checkout -q HEAD -- a.txt .gitignore
 
+# --- xreview r4 on #262 -----------------------------------------------------------------------------------------
+SD="$HOME/.local/state/sync-phase1"
+# (1) a staged edit elsewhere is neither restored nor unstaged by a freshen of another path
+echo "staged real edit" > "$P/sub/s.txt"; git -C "$P" add -- sub/s.txt
+echo one > "$P/a.txt"
+out=$(bash "$S" freshen proj)
+[ "$(cat "$P/sub/s.txt")" = "staged real edit" ] && [ "$(git -C "$P" show :sub/s.txt)" = "staged real edit" ] && ok "a staged edit outside the candidates keeps its file and its index entry" || bad "staged edit touched: file=$(cat "$P/sub/s.txt") index=$(git -C "$P" show :sub/s.txt)"
+[ "$(cat "$P/a.txt")" != one ] && ok "while the stale candidate itself is updated" || bad "candidate not updated: '$out'"
+git -C "$P" reset -q -- sub/s.txt; echo edited > "$P/sub/s.txt"
+# (2) a path with a conversion attribute is never a candidate; autocrlf is off inside the guarded write
+echo 'a.txt text eol=crlf' > "$P/.git/info/attributes"; echo one > "$P/a.txt"
+out=$(bash "$S" freshen proj)
+[ "$(cat "$P/a.txt")" = one ] && ok "a path with a text/eol attribute is left alone (git would not compare raw bytes)" || bad "attributed path written: '$out'"
+rm -f "$P/.git/info/attributes"
+git -C "$P" config core.autocrlf true
+echo one > "$P/a.txt"; bash "$S" freshen proj >/dev/null
+[ "$(cat "$P/a.txt")" = one ] && ok "a repository with core.autocrlf set: no path is a candidate" || bad "autocrlf repo: a stale file was written"
+git -C "$P" config --unset core.autocrlf; git -C "$P" checkout -q HEAD -- a.txt
+# (4) no snapshot copy or work index is left behind, after a success or a refusal
+[ -z "$(ls -A "$SD" | grep -E '^\.proj\.(snap|index)')" ] && ok "no snapshot copy or work index is left in the state dir" || bad "leftovers: $(ls -A "$SD" | grep -E '^\.proj\.' | head -3)"
+
 # --- sync: after an API commit, the branch moves to origin's head and no file is written -----------------------
 git -C "$P" remote set-url origin "$TMP/origin.git"
 q clone "$TMP/origin.git" "$TMP/w"; echo edited > "$TMP/w/sub/s.txt"; echo up > "$TMP/w/up.txt"

@@ -90,6 +90,8 @@ fi
 
 envcheck || { check_line "$CHECK" fail "TRANSCRIPTS_SRC or TRANSCRIPTS_SSH is not an absolute plain path" "$OWNER"; exit $?; }
 lock || { check_line "$CHECK" fail "cannot take the lock (state dir or lock file not usable)" "$OWNER"; exit $?; }
+# from here on a run that is stopped (timeout, shutdown) publishes fail: also while it waits on the share or on ssh
+trap 'check_line "$CHECK" fail "stopped before it finished (timeout or signal)" "$OWNER" >/dev/null; exit 143' TERM INT HUP
 [ -f "$CUT" ] && [ ! -L "$CUT" ] && [ -f "$DESTF" ] && [ ! -L "$DESTF" ] || { check_line "$CHECK" fail "not initialised (run --init <dest> once)" "$OWNER"; exit $?; }
 IFS= read -r DEST < "$DESTF" || DEST=""
 valid_dest "$DEST" || { check_line "$CHECK" fail "the recorded destination is not valid" "$OWNER"; exit $?; }
@@ -114,7 +116,6 @@ case "$DEST" in
     ;;
 esac
 
-trap 'check_line "$CHECK" fail "stopped before it finished (timeout or signal)" "$OWNER" >/dev/null; exit 143' TERM INT HUP
 list="$(mktemp "$STATE/.transcripts-push.list.XXXXXX")" || { check_line "$CHECK" fail "cannot create a temp file" "$OWNER"; exit $?; }
 trap 'rm -f -- "$list"' EXIT
 # regular files only, changed since the cut; a walk that could not read a directory is not a complete list

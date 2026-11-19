@@ -149,6 +149,14 @@ out=$(TRANSCRIPTS_SSH="$TMP/bin/fakessh" bash "$TP"); case "$out" in "CHECK tran
 rm -f "$TMP/remote.down"
 out=$(TRANSCRIPTS_SSH="$TMP/bin/fakessh" bash "$TP"); case "$out" in "CHECK transcripts-push ok · 0 transcripts changed since the cut, all sent to far:/data/t · "*) ok "remote up with nothing to send: ok after a real probe" ;; *) bad "remote up, empty list: '$out'" ;; esac
 grep -q -- "-- far test -d /data/t -a -w /data/t" "$TMP/ssh.log" && ok "the probe asks the remote for a writable directory" || bad "probe args: $(tail -1 "$TMP/ssh.log")"
+# a pass stopped while the ssh probe hangs replaces the earlier ok with fail (the trap is set before any probe)
+grep -q "^CHECK transcripts-push ok" "$TMP/checks/transcripts-push.line" || bad "precondition: an earlier ok line"
+printf '#!/bin/sh\nsleep 60 & echo $! > "%s/probe.pid"; wait\n' "$TMP" > "$TMP/bin/hangssh"; chmod +x "$TMP/bin/hangssh"
+TRANSCRIPTS_SSH="$TMP/bin/hangssh" bash "$TP" >/dev/null 2>&1 & tpid=$!
+for i in 1 2 3 4 5 6 7 8 9 10; do [ -f "$TMP/probe.pid" ] && break; sleep 0.3; done
+kill -TERM "$tpid" 2>/dev/null; wait "$tpid"
+case "$(cat "$TMP/checks/transcripts-push.line")" in "CHECK transcripts-push fail · stopped before it finished (timeout or signal) · "*) ok "a pass stopped during a hanging ssh probe: the earlier ok is replaced by fail" ;; *) bad "TERM during probe: $(cat "$TMP/checks/transcripts-push.line")" ;; esac
+[ -f "$TMP/probe.pid" ] && kill "$(cat "$TMP/probe.pid")" 2>/dev/null
 printf '%s\n' "$DEST" > "$ST/transcripts-push.dest"
 ( exec 9>> "$ST/transcripts-push.lock"; flock -n 9 || exit 9; bash "$TP" 9>&- >/dev/null 2>&1; echo $? > "$TMP/rc" )
 [ "$(cat "$TMP/rc")" = 75 ] && ok "lock held elsewhere: exit 75" || bad "transcripts lock rc=$(cat "$TMP/rc")"

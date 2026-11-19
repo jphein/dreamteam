@@ -64,6 +64,20 @@ old_version() {   # old_version <path> [<file holding the bytes to judge>]   (de
   "${GITC[@]}" --literal-pathspecs log -m --format= --raw --no-abbrev --no-renames HEAD -- "$f" 2>/dev/null \
     | awk '{print $3; print $4}' | grep -qx -- "$h"
 }
+# raw_path <path>: 0 when git compares this path's working file with a blob BYTE FOR BYTE: no filter, text/eol
+# conversion, ident or encoding attribute applies (the guarded write below runs with autocrlf and safecrlf off too).
+# A path with any of them is never a freshen candidate: it is counted as kept.
+raw_path() {
+  local vals ac
+  # a repository that converts line endings by configuration compares no file byte for byte: nothing is a candidate
+  ac=$(git -C "$D" config --get core.autocrlf 2>/dev/null || true)
+  case "$ac" in ""|false) ;; *) return 1 ;; esac
+  # -z output is path NUL attr NUL value NUL ...; every third field is a value. A pipe keeps the NULs.
+  vals=$(set -o pipefail; git -C "$D" check-attr -z filter text eol ident working-tree-encoding -- "$1" 2>/dev/null \
+         | tr '\0' '\n' | awk 'NR%3==0') || return 1
+  [ "$(wc -l <<< "$vals")" = 5 ] || return 1
+  ! grep -qvx unspecified <<< "$vals"
+}
 dirlock() {  # one mutating run at a time per DIRECTORY, whatever <name> the callers use
   local key lf
   umask 077; mkdir -p -- "$S" "$LOCKS" || { echo "$name: no state dir"; exit 2; }
@@ -148,7 +162,9 @@ case "$cmd" in
     stf=$(mktemp "$S/.$name.status.XXXXXX") && lst=$(mktemp "$S/.$name.paths.XXXXXX") && stl=$(mktemp "$S/.$name.stale.XXXXXX") \
       && sums=$(mktemp "$S/.$name.sums.XXXXXX") && abl=$(mktemp "$S/.$name.absent.XXXXXX") && snap=$(mktemp "$S/.$name.snap.XXXXXX") \
       || { echo "$name: cannot create work files in $S"; exit 2; }
-    trap 'rm -f -- "$stf" "$lst" "$stl" "$sums" "$abl" "$snap" "$snap".*' EXIT
+    idx=""
+    cleanup() { rm -f -- "$stf" "$lst" "$stl" "$sums" "$abl" "$snap" "$snap".* ${idx:+"$idx" "$idx.lock"}; }
+    trap cleanup EXIT
     # paths that were UNTRACKED files of the owner when a sync made them tracked: never written, whatever their bytes.
     # The list lives in the repository's own git dir, so every caller (any name, any CLONE_STATE) sees the same one,
     # and a list that exists but cannot be read stops the run: protection never fails open.
@@ -179,7 +195,7 @@ case "$cmd" in
         " M")
           # ONE snapshot of the bytes: the same copy is judged against history and gives the checksum the live file
           # must still have right before the write. An edit saved at any moment after the snapshot stops the run.
-          if [ -f "$D/$f" ] && [ ! -L "$D/$f" ] && cp -- "$D/$f" "$snap" 2>/dev/null && old_version "$f" "$snap"; then
+          if [ -f "$D/$f" ] && [ ! -L "$D/$f" ] && raw_path "$f" && cp -- "$D/$f" "$snap" 2>/dev/null && old_version "$f" "$snap"; then
             sum=$(sha256sum < "$snap" | cut -d' ' -f1)
             cp -- "$snap" "$snap.$sum" || { echo "$name: cannot keep the judged bytes of $f"; exit 2; }
             printf '%s\0' "$f" >> "$lst"; printf '%s\0' "$f" >> "$stl"
@@ -209,9 +225,11 @@ case "$cmd" in
     # git's own check is kept, and nothing is written. Other paths with real edits are not in the merge: git keeps
     # them as they are. Done on a private copy of the index, so a refusal leaves the repository's index untouched.
     idx=$(mktemp "$S/.$name.index.XXXXXX") || { echo "$name: cannot create a work index"; exit 2; }
-    trap 'rm -f -- "$stf" "$lst" "$stl" "$sums" "$abl" "$snap" "$idx"' EXIT
-    cp -- "$D/.git/index" "$idx" || { echo "$name: cannot copy the index"; exit 2; }
-    gi() { GIT_INDEX_FILE="$idx" git --literal-pathspecs -C "$D" "$@"; }
+    rm -f -- "$idx"
+    gi() { GIT_INDEX_FILE="$idx" git -c core.autocrlf=false -c core.safecrlf=false --literal-pathspecs -C "$D" "$@"; }
+    # Built from HEAD, not from the repository's index: every non-candidate path is identical in both merge trees, so
+    # the merge cannot touch it (a staged edit elsewhere is neither restored nor unstaged).
+    gi read-tree HEAD || { echo "$name: cannot build a work index from HEAD"; exit 2; }
     while IFS= read -r -d '' rec; do
       want="${rec%%  *}"; f="${rec#*  }"
       mode=$(gi ls-files -s -- "$f" | head -1 | cut -d' ' -f1); [ -n "$mode" ] || mode=100644
@@ -227,7 +245,9 @@ case "$cmd" in
     if ! out=$(gi read-tree -m -u "$from" HEAD 2>&1); then
       echo "$name: a file changed or appeared while this ran ($(head -1 <<< "$out" | cut -c1-100)); nothing changed (run again)"; exit 2
     fi
-    cp -- "$idx" "$D/.git/index" || { echo "$name: files updated but the index could not be stored; run 'git -C $D reset -q'"; exit 2; }
+    # the repository's own index changes ONLY at the candidate paths (now equal to HEAD); other entries stay staged
+    git --literal-pathspecs -C "$D" reset -q --pathspec-from-file="$lst" --pathspec-file-nul -- \
+      || { echo "$name: files updated; the index entries of those paths could not be reset (run: git -C $D status)"; exit 2; }
     printf '%s: freshened %d files (%d stale, %d absent); %d differing files left as they are; status lines now %s; backup %s\n' \
       "$name" "$n" "$ns" "$((n - ns))" "$kept" "$(git -C "$D" status --porcelain | wc -l)" "$tarf"
     echo "RESULT freshened=$n stale=$ns absent=$((n - ns)) kept=$kept linked=$linked skipped=$skipn"
