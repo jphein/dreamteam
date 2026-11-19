@@ -14,56 +14,97 @@ export HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" DREAMTEAM_CHECKS_DIR="$TMP/c
 mkdir -p "$HOME"
 q() { git -c init.defaultBranch=main "$@" >/dev/null 2>&1; }
 
-# ================= config-pull =================================================================================
+# ================= config-pull (deploy from a pristine clone) ===================================================
 q init "$TMP/w"; mkdir -p "$TMP/w/hooks" "$TMP/w/projects/p/memory"
-echo v1 > "$TMP/w/hooks/a.sh"; echo keep > "$TMP/w/settings.json"; echo mem1 > "$TMP/w/projects/p/memory/m.md"
-q -C "$TMP/w" add .; q -C "$TMP/w" commit -m one
+echo v1 > "$TMP/w/hooks/a.sh"; chmod +x "$TMP/w/hooks/a.sh"; echo keep > "$TMP/w/settings.json"; echo mem1 > "$TMP/w/projects/p/memory/m.md"
+q -C "$TMP/w" add hooks/a.sh settings.json projects/p/memory/m.md; q -C "$TMP/w" commit -m one
 q clone --bare "$TMP/w" "$TMP/origin.git"; q -C "$TMP/w" remote add origin "$TMP/origin.git"
-C="$HOME/.claude"; q clone "$TMP/origin.git" "$C"
+C="$HOME/.claude"; mkdir -p "$C/hooks" "$C/projects/p/memory"            # a live dir that is NOT a clone
+echo v1 > "$C/hooks/a.sh"; echo keep > "$C/settings.json"
+echo "live memory" > "$C/projects/p/memory/m.md"; echo t > "$C/projects/p/sess.jsonl"; echo mine > "$C/untracked.txt"
 LINE="$TMP/checks/config-pull.line"
+psum() { (cd "$C" && find projects untracked.txt -type f -exec sha256sum {} + | sort | sha256sum); }
+before=$(psum)
+
+out=$(bash "$CP"); case "$out" in "CHECK config-pull fail · not initialised (run config-pull.sh --init <url> once) · "*) ok "before --init: fail" ;; *) bad "no init: '$out'" ;; esac
+bash "$CP" --init "$TMP/nowhere.git" >/dev/null 2>&1; [ $? = 2 ] && ok "--init with an unreachable url: exit 2" || bad "init bad url"
+bash "$CP" --init "-x" >/dev/null 2>&1; [ $? = 22 ] && ok "--init refuses a url that starts like an option" || bad "init option url"
+bash "$CP" --init "$TMP/origin.git" "bad;branch" >/dev/null 2>&1; [ $? = 22 ] && ok "--init refuses an odd branch name" || bad "init odd branch"
+out=$(bash "$CP" --init "$TMP/origin.git"); rc=$?
+[ "$rc" = 0 ] && grep -q "nothing was written into" <<< "$out" && [ ! -e "$C/.git" ] && ok "--init makes the pristine clone outside the live dir (no .git in it)" || bad "init: rc=$rc '$out'"
+bash "$CP" --init "$TMP/origin.git" >/dev/null 2>&1; [ $? = 2 ] && ok "a second --init is refused" || bad "second init"
 
 out=$(bash "$CP"); rc=$?
-[ "$rc" = 0 ] && [[ "$out" =~ ^CHECK\ config-pull\ ok\ ·\ main\ at\ [0-9a-f]+,\ 0\ files\ updated\ ·\ every\ 10\ min,\ owner\ Sen$ ]] && ok "nothing new: ok line, exact shape" || bad "nothing new: rc=$rc '$out'"
+[ "$rc" = 0 ] && [[ "$out" =~ ^CHECK\ config-pull\ ok\ ·\ main\ at\ [0-9a-f]+,\ 0\ files\ updated,\ all\ 2\ current\ ·\ every\ 10\ min,\ owner\ Sen$ ]] && ok "nothing to do: ok line, exact shape (2 files tracked outside projects/)" || bad "nothing new: rc=$rc '$out'"
 [ "$(cat "$LINE")" = "$out" ] && ok "line published" || bad "line not published"
+[ -x "$C/hooks/a.sh" ] && ok "the executable bit follows the repo" || bad "exec bit"
 
-# origin moves: a hook changes, a new file appears, a tracked memory file changes
+# origin moves
 echo v2 > "$TMP/w/hooks/a.sh"; echo new > "$TMP/w/hooks/b.sh"; echo mem2 > "$TMP/w/projects/p/memory/m.md"
-q -C "$TMP/w" commit -am two; q -C "$TMP/w" add .; q -C "$TMP/w" commit -m three; q -C "$TMP/w" push origin main
-echo local-note > "$C/untracked.txt"; echo "my edit" > "$C/settings.json"          # a real local edit and an untracked file
+q -C "$TMP/w" add hooks/a.sh hooks/b.sh projects/p/memory/m.md; q -C "$TMP/w" commit -m two; q -C "$TMP/w" push origin main
 out=$(bash "$CP")
-case "$out" in "CHECK config-pull warn · main at "*", 2 files updated, 1 local edits left alone · "*) ok "origin moved: 2 files updated, the local edit counted and left" ;; *) bad "origin moved: '$out'" ;; esac
-[ "$(cat "$C/hooks/a.sh")" = v2 ] && [ "$(cat "$C/hooks/b.sh")" = new ] && ok "the changed hook and the new hook are live" || bad "hooks not updated"
-[ "$(cat "$C/settings.json")" = "my edit" ] && [ "$(cat "$C/untracked.txt")" = local-note ] && ok "the local edit and the untracked file are untouched" || bad "a local file was changed"
-[ "$(cat "$C/projects/p/memory/m.md")" = mem1 ] && ok "nothing under projects/ is written (another mechanism's)" || bad "a file under projects/ was written"
-[ "$(git -C "$C" rev-parse HEAD)" = "$(git -C "$TMP/w" rev-parse HEAD)" ] && ok "the branch is at origin's head" || bad "branch not moved"
-ls "$TMP/clonestate"/claude.pre-freshen-*.tar >/dev/null 2>&1 && [ "$(tar -xOf "$(ls "$TMP/clonestate"/claude.pre-freshen-*.tar | head -1)" hooks/a.sh)" = v1 ] && ok "the replaced file's old bytes are in a tar" || bad "no pre-update tar"
+case "$out" in "CHECK config-pull ok · main at "*", 2 files updated, all 3 current · "*) ok "origin moved: a changed file and a new file are deployed" ;; *) bad "origin moved: '$out'" ;; esac
+[ "$(cat "$C/hooks/a.sh")" = v2 ] && [ "$(cat "$C/hooks/b.sh")" = new ] && ok "both hooks are live" || bad "hooks not updated"
+[ "$(psum)" = "$before" ] && ok "nothing under projects/ and no untracked file was touched" || bad "projects/ or an untracked file changed"
+bk=$(find "$XDG_STATE_HOME/dreamteam/config-pull" -path '*/backup/*' -name a.sh | head -1)
+[ -n "$bk" ] && [ "$(cat "$bk")" = v1 ] && ok "the replaced file's previous bytes are in the backup dir" || bad "no backup of the replaced file"
 [ "$(awk -F' · ' '{print NF}' <<< "$out")" = 3 ] && ok "the line is three segments" || bad "segments"
-out=$(bash "$CP"); case "$out" in "CHECK config-pull warn · main at "*", 0 files updated, 1 local edits left alone · "*) ok "a second pass updates nothing and still names the edit" ;; *) bad "second pass: '$out'" ;; esac
-git -C "$C" checkout -q HEAD -- settings.json
-out=$(bash "$CP"); case "$out" in "CHECK config-pull ok · "*) ok "edit gone: back to ok" ;; *) bad "after the edit is gone: '$out'" ;; esac
+
+# a real local edit is never replaced; other files still deploy
+echo "my edit" > "$C/hooks/a.sh"
+echo v3 > "$TMP/w/hooks/a.sh"; echo new3 > "$TMP/w/hooks/b.sh"; q -C "$TMP/w" commit -am three; q -C "$TMP/w" push origin main
+out=$(bash "$CP")
+case "$out" in "CHECK config-pull warn · main at "*", 1 files updated, 1 local edits left alone · "*) ok "a local edit: warn; the other changed file still deploys" ;; *) bad "local edit: '$out'" ;; esac
+[ "$(cat "$C/hooks/a.sh")" = "my edit" ] && [ "$(cat "$C/hooks/b.sh")" = new3 ] && ok "the edit is kept byte for byte" || bad "edit overwritten"
+out=$(bash "$CP"); case "$out" in "CHECK config-pull warn · "*", 0 files updated, 1 local edits left alone · "*) ok "it stays a warn on every pass until someone deals with it" ;; *) bad "second pass: '$out'" ;; esac
+# bytes equal to ANOTHER path's version are not "an older version of this path"
+cp "$C/settings.json" "$C/hooks/a.sh"
+bash "$CP" >/dev/null; [ "$(cat "$C/hooks/a.sh")" = keep ] && ok "content matching another path's blob is a local edit, never replaced" || bad "cross-path bytes replaced"
+# an OLDER committed version of the same path is replaced (nothing can be lost: git has it)
+echo v1 > "$C/hooks/a.sh"
+out=$(bash "$CP"); [ "$(cat "$C/hooks/a.sh")" = v3 ] && case "$out" in "CHECK config-pull ok · "*) true ;; *) false ;; esac && ok "a stale file (an older committed version of that path) is brought to the head" || bad "stale file: '$out'"
+# an owner's file where the repo starts tracking a path: kept unless its bytes are a committed version of that path
+echo "owner's own" > "$C/hooks/c.sh"; echo upstream-c > "$TMP/w/hooks/c.sh"; q -C "$TMP/w" add hooks/c.sh; q -C "$TMP/w" commit -m four; q -C "$TMP/w" push origin main
+out=$(bash "$CP")
+[ "$(cat "$C/hooks/c.sh")" = "owner's own" ] && case "$out" in "CHECK config-pull warn · "*"1 local edits left alone"*) true ;; *) false ;; esac && ok "an existing file at a newly tracked path is kept" || bad "owner file at a new path: '$out' $(cat "$C/hooks/c.sh")"
+rm -f "$C/hooks/c.sh"; bash "$CP" >/dev/null; [ "$(cat "$C/hooks/c.sh")" = upstream-c ] && ok "an absent tracked file is created" || bad "absent file not created"
+# symlinks and odd types are never written through
+rm -f "$C/hooks/b.sh"; echo target > "$TMP/elsewhere.txt"; ln -s "$TMP/elsewhere.txt" "$C/hooks/b.sh"
+out=$(bash "$CP"); [ "$(cat "$TMP/elsewhere.txt")" = target ] && [ -L "$C/hooks/b.sh" ] && case "$out" in *"1 local edits left alone"*) true ;; *) false ;; esac && ok "a symlink at a tracked path is left alone and not written through" || bad "symlink path: '$out'"
+rm -f "$C/hooks/b.sh"; mv "$C/hooks" "$C/hooks.real"; mkdir -p "$TMP/linkedhooks"; ln -s "$TMP/linkedhooks" "$C/hooks"
+out=$(bash "$CP"); [ -z "$(ls -A "$TMP/linkedhooks")" ] && case "$out" in *"3 local edits left alone"*) true ;; *) false ;; esac && ok "nothing is written behind a symlinked directory" || bad "linked dir: '$out' $(ls -A "$TMP/linkedhooks")"
+rm -f "$C/hooks"; mv "$C/hooks.real" "$C/hooks"; bash "$CP" >/dev/null
+# an editor writing INTO the file while it is being replaced gets its bytes back
+mkdir -p "$TMP/mvrace"; REALMV="$(command -v mv)"
+printf '#!/bin/sh\ncase "$*" in *"/.config-pull."*"/hooks/a.sh") echo "written in place mid-replace" > "%s/hooks/a.sh" ;; esac\nexec "%s" "$@"\n' "$C" "$REALMV" > "$TMP/mvrace/mv"; chmod +x "$TMP/mvrace/mv"
+echo v1 > "$C/hooks/a.sh"
+out=$(PATH="$TMP/mvrace:$PATH" bash "$CP")
+[ "$(cat "$C/hooks/a.sh")" = "written in place mid-replace" ] && case "$out" in *"1 local edits left alone"*) true ;; *) false ;; esac && ok "an in-place write landing during the replace is detected and put back" || bad "in-place race: '$(cat "$C/hooks/a.sh")' / $out"
+echo v1 > "$C/hooks/a.sh"; bash "$CP" >/dev/null
+# a file that appears where an absent one is being created is not replaced
+rm -f "$C/hooks/c.sh"; mkdir -p "$TMP/lnrace"; REALLN="$(command -v ln)"
+printf '#!/bin/sh\ncase "$*" in *"/hooks/c.sh") [ -e "%s/hooks/c.sh" ] || echo "appeared just now" > "%s/hooks/c.sh" ;; esac\nexec "%s" "$@"\n' "$C" "$C" "$REALLN" > "$TMP/lnrace/ln"; chmod +x "$TMP/lnrace/ln"
+out=$(PATH="$TMP/lnrace:$PATH" bash "$CP"); [ "$(cat "$C/hooks/c.sh")" = "appeared just now" ] && ok "a file appearing at an absent path during the pass is kept (no-replace publish)" || bad "appearing file replaced"
+[ -z "$(find "$C" -name '.config-pull.*')" ] && ok "no temp file is left in the live dir" || bad "temp files left: $(find "$C" -name '.config-pull.*' | head -2)"
+rm -f "$C/hooks/c.sh"; bash "$CP" >/dev/null
 
 # unknown is never ok
-git -C "$C" remote set-url origin "$TMP/nowhere.git"
-out=$(bash "$CP"); case "$out" in "CHECK config-pull fail · sync did not work: fetch did not work · "*) ok "origin unreachable: fail" ;; *) bad "unreachable origin: '$out'" ;; esac
-git -C "$C" remote set-url origin "$TMP/origin.git"
-echo x > "$C/local.txt"; q -C "$C" add local.txt; q -C "$C" commit -m local
-out=$(bash "$CP"); case "$out" in "CHECK config-pull fail · sync did not work: 1 local commits are not on origin; nothing done · "*) ok "a local commit origin lacks: fail, branch not moved" ;; *) bad "local commit: '$out'" ;; esac
-q -C "$C" reset --hard origin/main
-out=$(CONFIG_PULL_DIR="$TMP/notaclone" bash "$CP"); case "$out" in "CHECK config-pull fail · "*"is not a git clone · "*) ok "not a clone: fail" ;; *) bad "not a clone: '$out'" ;; esac
+stdir=$(dirname "$(find "$XDG_STATE_HOME/dreamteam/config-pull" -maxdepth 2 -name repo.git)")
+git --git-dir="$stdir/repo.git" remote set-url origin "$TMP/nowhere.git"
+out=$(bash "$CP"); case "$out" in "CHECK config-pull fail · fetch did not work · "*) ok "origin unreachable: fail" ;; *) bad "unreachable origin: '$out'" ;; esac
+git --git-dir="$stdir/repo.git" remote set-url origin "$TMP/origin.git"
+printf 'no;such\n' > "$stdir/branch"
+out=$(bash "$CP"); case "$out" in "CHECK config-pull fail · the recorded branch name is not valid · "*) ok "a tampered branch file: fail" ;; *) bad "bad branch file: '$out'" ;; esac
+printf 'main\n' > "$stdir/branch"
+out=$(CONFIG_PULL_DIR="$TMP/absentdir" bash "$CP"); case "$out" in "CHECK config-pull fail · "*"is not a directory · "*) ok "live dir absent: fail" ;; *) bad "absent live dir: '$out'" ;; esac
 out=$(CONFIG_PULL_DIR="relative" bash "$CP"); case "$out" in "CHECK config-pull fail · CONFIG_PULL_DIR is not absolute · "*) ok "relative dir: fail" ;; *) bad "relative dir: '$out'" ;; esac
-( exec 9>> "$XDG_STATE_HOME/dreamteam/config-pull.claude.lock"; flock -n 9 || exit 9; cp "$LINE" "$TMP/l.before"; bash "$CP" 9>&- >/dev/null 2>&1; echo $? > "$TMP/rc" )
+( exec 9>> "$stdir/lock"; flock -n 9 || exit 9; cp "$LINE" "$TMP/l.before"; bash "$CP" 9>&- >/dev/null 2>&1; echo $? > "$TMP/rc" )
 [ "$(cat "$TMP/rc")" = 75 ] && cmp -s "$LINE" "$TMP/l.before" && ok "lock held elsewhere: exit 75, line untouched" || bad "lock: rc=$(cat "$TMP/rc")"
-rm -f "$XDG_STATE_HOME/dreamteam/config-pull.claude.lock"; ln -s "$TMP/locktarget" "$XDG_STATE_HOME/dreamteam/config-pull.claude.lock"
+rm -f "$stdir/lock"; ln -s "$TMP/locktarget" "$stdir/lock"
 out=$(bash "$CP"); case "$out" in "CHECK config-pull fail · lock file is a symlink"*) [ ! -e "$TMP/locktarget" ] && ok "a symlinked lock is refused and its target never created" || bad "lock target created" ;; *) bad "symlink lock: '$out'" ;; esac
-rm -f "$XDG_STATE_HOME/dreamteam/config-pull.claude.lock"
-bash "$CP" extra >/dev/null 2>&1; [ $? = 22 ] && ok "an argument: exit 22" || bad "argument rc"
+rm -f "$stdir/lock"
+bash "$CP" extra >/dev/null 2>&1; [ $? = 22 ] && ok "an unknown argument: exit 22" || bad "argument rc"
 out=$(DREAMTEAM_CHECK_HOST=Katana bash "$CP"); case "$out" in "CHECK config-pull-katana ok · "*) ok "off familiar the name carries the host" ;; *) bad "host suffix: '$out'" ;; esac
-
-# a freshen that prints no RESULT line is not "0 files updated"
-mkdir -p "$TMP/fakeroot/scripts/lib"; cp "$ROOT/scripts/lib/check-line.sh" "$TMP/fakeroot/scripts/lib/"; cp "$CP" "$TMP/fakeroot/scripts/"
-printf '#!/bin/sh\ncase "$1" in sync) echo "claude: main at abc (was abc); 0 lines of status" ;; freshen) echo "claude: nothing stale or absent" ;; esac\n' > "$TMP/fakeroot/scripts/clone-in-place.sh"
-out=$(CLAUDE_PLUGIN_ROOT="$TMP/fakeroot" bash "$TMP/fakeroot/scripts/config-pull.sh")
-case "$out" in "CHECK config-pull fail · the update step gave no result line · "*) ok "no RESULT line from the update step: fail, never '0 files updated'" ;; *) bad "missing RESULT: '$out'" ;; esac
 
 # ================= transcripts-push ============================================================================
 SRC="$TMP/src"; SHARE="$TMP/share"; DEST="$SHARE/transcripts/hostA"; mkdir -p "$SRC/projA/sess1/subagents" "$SRC/projA/memory" "$SRC/projB" "$SHARE"
