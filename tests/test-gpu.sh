@@ -52,13 +52,13 @@ esac
 [ -f "$PROBES/$host.probe" ] || exit 255
 echo "PROBE" >> "$PROBES/$host.seq"
 if [ -n "${RESV_DIR:-}" ]; then   # the reservations the host would count: the real helper over the test's directory (#256 r2)
-  sed "s|^RESV,.*|RESV,$(DREAMTEAM_RESERVATIONS="$RESV_DIR" bash "$ROOT/scripts/reservation.sh" live)|" "$PROBES/$host.probe"
+  sed "s|^RESV,.*|RESV,OK,$(DREAMTEAM_RESERVATIONS="$RESV_DIR" bash "$ROOT/scripts/reservation.sh" live)|" "$PROBES/$host.probe"
 else cat "$PROBES/$host.probe"; fi
 STUB
 chmod +x "$TMP/sshstub/ssh"; export PROBES DREAMTEAM_GPU_SSH="$TMP/sshstub/ssh"
 probe_fixture() {  # probe_fixture <host> <idx> <used_mib> <total_mib> [app-name app-mib]
   { echo "GPU,$2,00000000:0$2:00.0,$3,$4,10"; [ -n "${5:-}" ] && echo "APP,00000000:0$2:00.0,4242,$6,$5"
-    echo "MEM,9000000,0,0"; echo "LANE,OK,0"; echo "RESV,0"; echo "DISK,/,50"; echo "PAUSE,0"; } > "$PROBES/$1.probe"
+    echo "MEM,9000000,0,0"; echo "LANE,OK,0"; echo "RESV,OK,0"; echo "DISK,/,50"; echo "PAUSE,0"; } > "$PROBES/$1.probe"
 }
 probe_fixture katana 0 500 11264; probe_fixture familiar 0 3409 10240; probe_fixture gpu1 1 0 10240
 fresh() { rm -rf "$TMP/state"; export DREAMTEAM_GPU_STATE="$TMP/state"; }
@@ -131,7 +131,7 @@ case "$seq" in "LOCK PROBE UNLOCK recorded=1 ") pass "a dry run takes the lock a
 # the live RSS until the lane's SessionStart consumes one or it expires (90 s). The stub serves RESV from the real
 # helper over $RESV_DIR.
 export ROOT RESV_DIR="$TMP/resv"; R="$ROOT/scripts/reservation.sh"
-fresh; probe_fixture gpu1 1 0 10240; rm -rf "$RESV_DIR"; DREAMTEAM_RESERVATIONS="$RESV_DIR" bash "$R" add 1000 90 >/dev/null
+fresh; probe_fixture gpu1 1 0 10240; rm -rf "$RESV_DIR"; DREAMTEAM_RESERVATIONS="$RESV_DIR" bash "$R" add 1000 90 s-a morpheus >/dev/null
 check "$(claim gpu1:0 --lane drift-gems --until 2h --peak-ram 4322 --peak-vram 3000)" 0 "reservation 1000 MB: one 46-band run still fits"
 check "$(claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 4322 --peak-vram 3000)" 75 "reservation 1000 MB (a lane admitted, not yet a process): the 46-band pair is REFUSED like a live lane"
 out=$(G "$ORCH" claim gpu1:0 --lane drift-gems --until 2h --peak-ram 4322 --peak-vram 3000 --dry-run 2>&1)
@@ -140,29 +140,54 @@ rm -rf "$RESV_DIR"; mkdir -p "$RESV_DIR"; printf '1000 %s\n' "$(( $(date +%s) - 
 check "$(claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 4322 --peak-vram 3000)" 0 "an expired reservation is ignored: the pair fits"
 [ ! -e "$RESV_DIR/1-1" ] && pass "the expired reservation file is pruned by the sampler" || fail "expired reservation not pruned"
 # the real gap, end to end: the gate has exited with its reservation written; a claim runs; then the lane appears
-fresh; probe_fixture gpu1 1 0 10240; rm -rf "$RESV_DIR"; DREAMTEAM_RESERVATIONS="$RESV_DIR" bash "$R" add 1000 90 >/dev/null
+fresh; probe_fixture gpu1 1 0 10240; rm -rf "$RESV_DIR"; DREAMTEAM_RESERVATIONS="$RESV_DIR" bash "$R" add 1000 90 s-a morpheus >/dev/null
 claim gpu1:0 --lane drift-gems --until 2h --peak-ram 4322 --peak-vram 3000 >/dev/null
 check "$(claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 4322 --peak-vram 3000)" 75 "the gap: gate exited, lane not yet a process: the claim is refused on the reservation"
-c=$(DREAMTEAM_RESERVATIONS="$RESV_DIR" bash "$R" consume); [ -n "$c" ] && pass "the lane's SessionStart consumes the reservation" || fail "consume returned nothing"
+r=$(DREAMTEAM_RESERVATIONS="$RESV_DIR" DREAMTEAM_HOST_LOCK="$TMP/host.lock" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$R" start s-a morpheus >/dev/null 2>&1; echo $?)
+[ "$r" -eq 0 ] && pass "the lane's SubagentStart marks its token started (r3 item 3)" || fail "start returned $r"
 sed -i 's/^LANE,.*/LANE,OK,1024000/' "$PROBES/gpu1.probe"
-check "$(claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 4322 --peak-vram 3000)" 75 "the lane is live now: refused on its RSS (10180 > 9444)"
-check "$(claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 2878 --peak-vram 3000)" 0 "the consumed reservation is not double-counted: a 2.81 GiB run fits beside the live lane (8736 <= 9444)"
-c=$(DREAMTEAM_RESERVATIONS="$RESV_DIR" bash "$R" consume); [ -z "$c" ] && pass "a second consume finds nothing" || fail "consume found $c"
+check "$(claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 4322 --peak-vram 3000)" 75 "the lane is live now: refused on its RSS plus the still-counting reservation (r3 item 2: no undercount window)"
+check "$(claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 2878 --peak-vram 3000)" 75 "until the reservation expires a 2.81 GiB run is refused too (4322 + 2878 + 1536 = 8736 > 10444 - 2000): the handoff over-counts for at most 90 s, never under"
+printf '1000 %s s-a morpheus 1\n' "$(( $(date +%s) - 1 ))" > "$RESV_DIR/$(basename "$(ls "$RESV_DIR" | head -1)")"
+check "$(claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 2878 --peak-vram 3000)" 0 "once the started reservation expires only the live RSS counts: the 2.81 GiB run fits (8736 <= 9444)"
 fresh; probe_fixture gpu1 1 0 10240; sed -i '/^RESV,/d' "$PROBES/gpu1.probe"; unset RESV_DIR   # an older probe with no RESV line
 check "$(claim gpu1:0 --lane drift-gems --until 2h --peak-ram 4322 --peak-vram 3000)" 75 "no RESV line (an older probe): REFUSED, not a silent zero"
 export RESV_DIR="$TMP/resv"
 # the sampler's own RESV line: unexpired summed, expired and malformed ignored, under a fake HOME; the helper agrees
 h="$TMP/h"; rd="$h/.local/state/dreamteam/reservations"; mkdir -p "$rd"; nowe=$(date +%s)
-printf '700 %s\n' "$((nowe + 60))" > "$rd/10-1"; printf '500 %s\n' "$((nowe - 1))" > "$rd/11-2"; echo garbage > "$rd/12-3"; printf '300 %s\n' "$((nowe + 30))" > "$rd/13-4"
+printf '700 %s s-a morpheus 0\n' "$((nowe + 60))" > "$rd/10-1"; printf '500 %s s-a morpheus 0\n' "$((nowe - 1))" > "$rd/11-2"; printf '300 %s s-b luna 0\n' "$((nowe + 30))" > "$rd/13-4"
 resv=$(python3 "$LIB" probe-script gpu1 | HOME="$h" DREAMTEAM_RESERVATIONS= PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^RESV,')
-check "$resv" "RESV,1000" "sampler: unexpired reservations summed (700 + 300), the expired and the malformed ignored"
+check "$resv" "RESV,OK,1000" "sampler: unexpired reservations summed (700 + 300), the expired one ignored"
 check "$(DREAMTEAM_RESERVATIONS="$rd" bash "$R" live)" "1000" "the helper's live sum agrees with the probe's"
-unset RESV_DIR
+# r3 item 5: a printed RESV line is evidence of a successful read, or it is RESV,ERR: a malformed file, a value past
+# the bound (1000000 MB), or a directory that cannot be listed; each refuses a claim
+echo garbage > "$rd/12-3"
+resv=$(python3 "$LIB" probe-script gpu1 | HOME="$h" DREAMTEAM_RESERVATIONS= PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^RESV,')
+check "$resv" "RESV,ERR" "sampler: a malformed reservation file is RESV,ERR, not skipped"
+rm -f "$rd/12-3"; printf '99999999999 %s s-a morpheus 0\n' "$((nowe + 60))" > "$rd/14-5"
+resv=$(python3 "$LIB" probe-script gpu1 | HOME="$h" DREAMTEAM_RESERVATIONS= PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^RESV,')
+check "$resv" "RESV,ERR" "sampler: a value past the bound is RESV,ERR (no shell integer wrap into a plausible sum)"
+rm -f "$rd/14-5"; chmod 000 "$rd"
+resv=$(python3 "$LIB" probe-script gpu1 | HOME="$h" DREAMTEAM_RESERVATIONS= PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^RESV,')
+chmod 700 "$rd"
+check "$resv" "RESV,ERR" "sampler: a reservations directory that cannot be listed is RESV,ERR, not zero"
+fresh; probe_fixture gpu1 1 0 10240; sed -i 's/^RESV,.*/RESV,ERR/' "$PROBES/gpu1.probe"; unset RESV_DIR
+check "$(claim gpu1:0 --lane drift-gems --until 2h --peak-ram 4322 --peak-vram 3000)" 75 "RESV,ERR (the reservations could not be read on the host): REFUSED"
+out=$(G "$ORCH" claim gpu1:0 --lane drift-gems --until 2h --peak-ram 4322 --peak-vram 3000 --dry-run 2>&1)
+case "$out" in *"reservations"*"could not be read"*) pass "the RESV,ERR refusal says the reservations could not be read" ;; *) fail "RESV,ERR text: $out" ;; esac
 # admit (the run's own recheck of a peak above its claim) applies the same subtraction
 fresh; probe_fixture gpu1 1 0 10240; sed -i 's/^LANE,.*/LANE,OK,1024000/' "$PROBES/gpu1.probe"
 claim gpu1:0 --lane drift-gems --until 2h --peak-ram 2878 --peak-vram 3000 >/dev/null
 claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 2878 --peak-vram 3000 >/dev/null
 check "$(rc G drift-gems@team admit --card gpu1:0 --peak-ram 5500)" 75 "admit (#241): a run peak above its claim is refused beside the lane (5500 + 2878 + 1536 = 9914 > 9444; it fit the static 10444)"
+# r3 item 6: admit holds the host lock across its peak recheck and ledger update, like claim (lock → probe → unlock)
+rm -f "$PROBES/gpu1.seq"
+check "$(rc G drift-gems@team admit --card gpu1:0 --peak-ram 3000)" 0 "admit under the host lock: a peak that fits is admitted"
+seq=$(tr '\n' ' ' < "$PROBES/gpu1.seq" 2>/dev/null)
+case "$seq" in "LOCK PROBE "*"UNLOCK recorded=2 ") case "${seq#LOCK }" in *" LOCK "*) fail "admit lock sequence (a second lock): [$seq]" ;; *) pass "admit: lock → probes (live VRAM, footprint) → recheck → unlock, the two claims still recorded at unlock (item 6)" ;; esac ;; *) fail "admit lock sequence: [$seq]" ;; esac
+touch "$PROBES/gpu1.locked"
+check "$(rc G drift-gems@team admit --card gpu1:0 --peak-ram 3000)" 75 "admit with the host lock held elsewhere: REFUSED, fail closed (item 6)"
+rm -f "$PROBES/gpu1.locked"
 rm -f "$PROBES/gpu1.probe"                                                            # the host fell asleep between claim and admit
 check "$(rc G drift-gems@team admit --card gpu1:0 --peak-ram 3000)" 75 "admit with the host asleep: the footprint is unreadable, REFUSED (no lock on admit, so the footprint check itself carries it)"
 out=$(G drift-gems@team admit --card gpu1:0 --peak-ram 3000 2>&1)

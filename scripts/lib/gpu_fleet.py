@@ -267,6 +267,10 @@ def lane_footprint(fleet: dict, host: str) -> tuple:
     if p.get("lane_err"):
         raise Refused(f"{host} lane footprint: ps failed on the host (LANE,ERR), and a failure is not a measured "
                       f"zero; check the host, then claim")
+    if p.get("resv_err"):
+        raise Refused(f"{host} lane footprint: the reservations could not be read on the host (RESV,ERR: a listing, "
+                      f"a file or a value failed), and a failure is not a zero; check ~/.local/state/dreamteam/"
+                      f"reservations there, then claim")
     if "lane_mb" not in p or "resv_mb" not in p:
         raise Refused(f"{host} lane footprint: the probe has no {'LANE' if 'lane_mb' not in p else 'RESV'} line (an "
                       f"older dreamteam on {host}?); update it, then claim")
@@ -540,7 +544,8 @@ def live_vram_check(fleet: dict, card: str, peak_vram_mib: int) -> str:
 
 def cmd_admit(a, fleet, cfg) -> int:
     t = now()
-    with Ledger() as L:
+    host = card_of(fleet, a.card)["host"]
+    with HostLock(fleet, host), Ledger() as L:   # the lock spans the peak recheck and the ledger, as in claim (#256 r3 item 6)
         claim = _authorize_run(a, fleet, cfg, L, t)
         peak, grows, cap = _peaks_for_run(a, claim, fleet)
         print(f"  cap: peak {peak} MB x {'1.5 (grows)' if grows else '1.2'} = {cap} MB")
@@ -557,7 +562,9 @@ nvidia-smi --query-gpu=index,pci.bus_id,memory.used,memory.total,utilization.gpu
 nvidia-smi --query-compute-apps=gpu_bus_id,pid,used_memory,process_name --format=csv,noheader,nounits 2>/dev/null | sed 's/^/APP,/'
 awk '/MemAvailable/{a=$2}/SwapTotal/{t=$2}/SwapFree/{f=$2}END{print "MEM,"a","t","f}' /proc/meminfo
 if lane=$(ps -eo pid=,ppid=,rss=,comm= 2>/dev/null) && [ -n "$lane" ]; then printf '%s\n' "$lane" | awk '{pp[$1]=$2; rss[$1]=$3; c[$1]=$4; n++; id[n]=$1} END{for(i=1;i<=n;i++){q=id[i]; while(q>1 && (q in pp)){if(c[q]=="claude"){s+=rss[id[i]]; break}; q=pp[q]}}; print "LANE,OK," s+0}'; else echo LANE,ERR; fi
-r=0; now=$(date +%s); for f in "${DREAMTEAM_RESERVATIONS:-$HOME/.local/state/dreamteam/reservations}"/*; do [ -f "$f" ] || continue; read -r mb exp < "$f" 2>/dev/null || continue; case "$mb$exp" in ''|*[!0-9]*) continue ;; esac; if [ "$exp" -gt "$now" ]; then r=$((r + mb)); else rm -f -- "$f"; fi; done; echo "RESV,$r"
+d="${DREAMTEAM_RESERVATIONS:-$HOME/.local/state/dreamteam/reservations}"; r=0; ok=1; now=$(date +%s)
+if [ -e "$d" ]; then if ! ls -- "$d" >/dev/null 2>&1; then ok=0; else for f in "$d"/*; do [ -e "$f" ] || continue; [ -f "$f" ] || { ok=0; break; }; read -r mb exp rest < "$f" 2>/dev/null || { ok=0; break; }; case "$mb$exp" in ''|*[!0-9]*) ok=0; break ;; esac; [ "${#mb}" -le 7 ] && [ "${#exp}" -le 12 ] || { ok=0; break; }; if [ "$exp" -gt "$now" ]; then r=$((r + mb)); else rm -f -- "$f"; fi; done; [ "$r" -le 1000000 ] || ok=0; fi; fi
+if [ "$ok" = 1 ]; then echo "RESV,OK,$r"; else echo "RESV,ERR"; fi
 for p in __PATHS__; do printf 'DISK,%s,%s\n' "$p" "$(df -BG --output=avail "$p" 2>/dev/null | tail -1 | tr -dc 0-9)"; done
 if [ -n "__PAUSE__" ] && [ -e "__PAUSE__" ]; then echo PAUSE,1; else echo PAUSE,0; fi
 """
@@ -664,8 +671,10 @@ def probe(fleet: dict, host: str) -> dict:
             out["lane_mb"] = int(parts[2]) // 1024
         elif parts[0] == "LANE":                                       # LANE,ERR: ps failed on the host (#256 r1 item 2)
             out["lane_err"] = True
-        elif parts[0] == "RESV" and len(parts) >= 2 and parts[1].isdigit():   # MB reserved for lanes admitted, not yet running
-            out["resv_mb"] = int(parts[1])
+        elif parts[0] == "RESV" and len(parts) >= 3 and parts[1] == "OK" and parts[2].isdigit():   # MB reserved (#256 r2)
+            out["resv_mb"] = int(parts[2])
+        elif parts[0] == "RESV":                                       # RESV,ERR: the reservations could not be read (r3 item 5)
+            out["resv_err"] = True
         elif parts[0] == "DISK" and len(parts) >= 3:
             out["disk"][parts[1]] = int(parts[2]) if parts[2].isdigit() else None
         elif parts[0] == "PAUSE":

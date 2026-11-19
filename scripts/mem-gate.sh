@@ -21,6 +21,11 @@ STATE="${DREAMTEAM_STATE:-$ROOT/state}"
 INPUT="$(cat 2>/dev/null || true)"
 TOOL="$(printf '%s' "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)"
 case "$TOOL" in Agent|Task) ;; *) exit 0 ;; esac
+# the reservation TOKEN (#256 r3 item 3): this session's id and the Agent call's subagent_type, which the lane's
+# SubagentStart hook sees again as session_id and agent_type
+SESSION="$(printf '%s' "$INPUT" | jq -r '.session_id // "-"' 2>/dev/null || echo -)"
+ATYPE="$(printf '%s' "$INPUT" | jq -r '.tool_input.subagent_type // .tool_input.name // "agent"' 2>/dev/null || echo agent)"
+RSV="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/reservation.sh"
 
 # --- config (defaults baked in so it works before config.json exists) ---
 # A config the gate cannot trust is a BLOCK (exit 2), never an admit (xreview #230 r1): the helper must load, the merged
@@ -78,6 +83,11 @@ mkdir -p "$(dirname "$HLOCK")" 2>/dev/null
 ( : >>"$HLOCK" ) 2>/dev/null || invalid "cannot open the host lock $HLOCK"
 exec 9>>"$HLOCK"
 flock -w "$HLOCK_WAIT" 9 || invalid "host lock $HLOCK not taken within ${HLOCK_WAIT}s (a GPU claim is probing this host, or another lane is starting): retry"
+# --- outstanding reservations (#256 r3 item 1): lanes already admitted whose processes are not yet visible. Read
+#     under the lock; their MB comes off the available RAM and their count goes on the agent count below, so two
+#     gates in a row cannot both pass on the same free memory. Unreadable → BLOCK.
+read -r RESV_MB RESV_N < <(bash "$RSV" outstanding 2>/dev/null) || invalid "cannot read the outstanding reservations"
+dreamteam_uint "${RESV_MB:-x}" "$MAXMB" && dreamteam_uint "${RESV_N:-x}" 100000 || invalid "outstanding reservations unreadable ('${RESV_MB:-}' '${RESV_N:-}')"
 
 # --- measure RAM (instant — this is the real OOM guard, runs BEFORE the count) ---
 AVAIL=$(free -m | awk '/^Mem:/{print $7}')
@@ -85,6 +95,7 @@ SWAP_USED=$(free -m | awk '/^Swap:/{print $3}')
 SWAP_FREE=$(free -m | awk '/^Swap:/{print $4}')
 # the measurements too: a reading that is not a number is a block, never a comparison error that falls through
 dreamteam_uint "${AVAIL:-x}" "$MAXMB" || invalid "free -m gave no readable available memory ('$AVAIL')"
+AVAIL=$(( AVAIL - RESV_MB )); [ "$AVAIL" -ge 0 ] || AVAIL=0     # reserved RAM is as good as used (#256 r3 item 1)
 if [ "$MIN_SWAP_FREE" -gt 0 ]; then dreamteam_uint "${SWAP_FREE:-x}" "$MAXMB" || invalid "free -m gave no readable swap free ('$SWAP_FREE')"; fi
 HEADROOM=$(( AVAIL - HOST_RESERVE - BALLOON - LOCAL_EFF ))
 BUDGET=$(( HEADROOM / PER_AGENT )); [ "$BUDGET" -lt 0 ] && BUDGET=0
@@ -92,7 +103,7 @@ BUDGET=$(( HEADROOM / PER_AGENT )); [ "$BUDGET" -lt 0 ] && BUDGET=0
 block() {
   {
     echo "🚫 DREAMTEAM MEMORY GATE — spawn blocked: $1"
-    echo "   avail=${AVAIL}MiB  swap_used=${SWAP_USED}MiB  agents=${2:-not counted (RAM block fires before the count)}  budget=${BUDGET} more"
+    echo "   avail=${AVAIL}MiB (after ${RESV_MB}MiB reserved by ${RESV_N} admitted, not yet running)  swap_used=${SWAP_USED}MiB  agents=${2:-not counted (RAM block fires before the count)}  budget=${BUDGET} more"
     echo "   (per_agent=${PER_AGENT}  host_reserve=${HOST_RESERVE}  balloon_reserve=${BALLOON}  floor=${MIN_AVAIL}${LOCAL_NOTE})"
     echo "   Recover headroom: let in-flight agents finish + merge, reuse an idle teammate"
     echo "   (/dreamteam-roster), close Waydroid (waydroid session stop) + the browser, or"
@@ -110,10 +121,11 @@ block() {
 # Count cap last — uses `claude agents --json` (real status), pgrep fallback (see lib.sh).
 if command -v count_agents >/dev/null 2>&1; then NAGENTS=$(count_agents); else
   NAGENTS=$(pgrep -fc 'claude/versions' 2>/dev/null || true); NAGENTS=${NAGENTS:-0}; fi
-[ "$NAGENTS" -ge "$MAX_AGENTS" ] && block "${NAGENTS} agents already running (cap ${MAX_AGENTS})." "$NAGENTS"
+NAGENTS=$(( NAGENTS + RESV_N ))                                   # reserved agents hold a slot too (#256 r3 item 1)
+[ "$NAGENTS" -ge "$MAX_AGENTS" ] && block "${NAGENTS} agents already running or reserved (cap ${MAX_AGENTS}; ${RESV_N} reserved, not yet running)." "$NAGENTS"
 
 # --- the reservation (dreamteam #256 r2): admitted, and still under the host lock, so a GPU claim that locks next
 #     sees this lane's budget before its process exists; the lane's SessionStart consumes it (hooks.json), else it
 #     expires in 90 s. Cannot write it → BLOCK: an unreserved start is the race this closes.
-bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/reservation.sh" add "$PER_AGENT" 90 >/dev/null || invalid "cannot write the lane reservation (scripts/reservation.sh beside this gate)"
+bash "$RSV" add "$PER_AGENT" 90 "$SESSION" "$ATYPE" >/dev/null || invalid "cannot write the lane reservation (scripts/reservation.sh beside this gate)"
 exit 0
