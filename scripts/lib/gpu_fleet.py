@@ -561,10 +561,10 @@ PROBE = r"""
 nvidia-smi --query-gpu=index,pci.bus_id,memory.used,memory.total,utilization.gpu --format=csv,noheader,nounits 2>/dev/null | sed 's/^/GPU,/'
 nvidia-smi --query-compute-apps=gpu_bus_id,pid,used_memory,process_name --format=csv,noheader,nounits 2>/dev/null | sed 's/^/APP,/'
 awk '/MemAvailable/{a=$2}/SwapTotal/{t=$2}/SwapFree/{f=$2}END{print "MEM,"a","t","f}' /proc/meminfo
-if lane=$(ps -eo pid=,ppid=,rss=,comm= 2>/dev/null) && [ -n "$lane" ]; then printf '%s\n' "$lane" | awk '{pp[$1]=$2; rss[$1]=$3; c[$1]=$4; n++; id[n]=$1} END{for(i=1;i<=n;i++){q=id[i]; while(q>1 && (q in pp)){if(c[q]=="claude"){s+=rss[id[i]]; break}; q=pp[q]}}; print "LANE,OK," s+0}'; else echo LANE,ERR; fi
 d="${DREAMTEAM_RESERVATIONS:-$HOME/.local/state/dreamteam/reservations}"; r=0; ok=1; now=$(date +%s)
-if [ -e "$d" ]; then if ! ls -- "$d" >/dev/null 2>&1; then ok=0; else for f in "$d"/*; do [ -e "$f" ] || continue; [ -f "$f" ] || { ok=0; break; }; read -r mb exp rest < "$f" 2>/dev/null || { ok=0; break; }; case "$mb$exp" in ''|*[!0-9]*) ok=0; break ;; esac; [ "${#mb}" -le 7 ] && [ "${#exp}" -le 12 ] || { ok=0; break; }; if [ "$exp" -gt "$now" ]; then r=$((r + mb)); else rm -f -- "$f"; fi; done; [ "$r" -le 1000000 ] || ok=0; fi; fi
+if [ -e "$d" ]; then if ! [ -d "$d" ] || ! [ -r "$d" ] || ! [ -x "$d" ]; then ok=0; else for f in "$d"/*; do [ -e "$f" ] || continue; case "$f" in *.expired|*.tmp) continue ;; esac; [ -f "$f" ] && [ -r "$f" ] || { ok=0; break; }; read -r mb exp ses typ st < "$f" 2>/dev/null || { ok=0; break; }; case "$mb" in ''|*[!0-9]*) ok=0; break ;; esac; case "$exp" in ''|*[!0-9]*) ok=0; break ;; esac; case "${st:-}" in ''|*[!0-9]*) ok=0; break ;; esac; [ -n "${ses:-}" ] && [ -n "${typ:-}" ] && [ "${#mb}" -le 7 ] && [ "${#exp}" -le 12 ] || { ok=0; break; }; if [ "$st" != 0 ] || [ "$exp" -gt "$now" ]; then r=$((r + mb)); else mv -f -- "$f" "$f.expired" 2>/dev/null || { ok=0; break; }; fi; done; [ "$r" -le 1000000 ] || ok=0; fi; fi
 if [ "$ok" = 1 ]; then echo "RESV,OK,$r"; else echo "RESV,ERR"; fi
+if lane=$(ps -eo pid=,ppid=,rss=,comm= 2>/dev/null) && [ -n "$lane" ]; then printf '%s\n' "$lane" | awk '{pp[$1]=$2; rss[$1]=$3; c[$1]=$4; n++; id[n]=$1} END{for(i=1;i<=n;i++){q=id[i]; while(q>1 && (q in pp)){if(c[q]=="claude"){s+=rss[id[i]]; break}; q=pp[q]}}; print "LANE,OK," s+0}'; else echo LANE,ERR; fi
 for p in __PATHS__; do printf 'DISK,%s,%s\n' "$p" "$(df -BG --output=avail "$p" 2>/dev/null | tail -1 | tr -dc 0-9)"; done
 if [ -n "__PAUSE__" ] && [ -e "__PAUSE__" ]; then echo PAUSE,1; else echo PAUSE,0; fi
 """

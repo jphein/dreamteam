@@ -86,7 +86,8 @@ flock -w "$HLOCK_WAIT" 9 || invalid "host lock $HLOCK not taken within ${HLOCK_W
 # --- outstanding reservations (#256 r3 item 1): lanes already admitted whose processes are not yet visible. Read
 #     under the lock; their MB comes off the available RAM and their count goes on the agent count below, so two
 #     gates in a row cannot both pass on the same free memory. Unreadable → BLOCK.
-read -r RESV_MB RESV_N < <(bash "$RSV" outstanding 2>/dev/null) || invalid "cannot read the outstanding reservations"
+RESV_OUT=$(bash "$RSV" outstanding --locked 2>"$STATE_ERR") || invalid "cannot read the outstanding reservations ($(head -c 160 "$STATE_ERR" 2>/dev/null))"
+read -r RESV_MB RESV_N <<<"$RESV_OUT"
 dreamteam_uint "${RESV_MB:-x}" "$MAXMB" && dreamteam_uint "${RESV_N:-x}" 100000 || invalid "outstanding reservations unreadable ('${RESV_MB:-}' '${RESV_N:-}')"
 
 # --- measure RAM (instant — this is the real OOM guard, runs BEFORE the count) ---
@@ -127,5 +128,5 @@ NAGENTS=$(( NAGENTS + RESV_N ))                                   # reserved age
 # --- the reservation (dreamteam #256 r2): admitted, and still under the host lock, so a GPU claim that locks next
 #     sees this lane's budget before its process exists; the lane's SessionStart consumes it (hooks.json), else it
 #     expires in 90 s. Cannot write it → BLOCK: an unreserved start is the race this closes.
-bash "$RSV" add "$PER_AGENT" 90 "$SESSION" "$ATYPE" >/dev/null || invalid "cannot write the lane reservation (scripts/reservation.sh beside this gate)"
+bash "$RSV" add "$PER_AGENT" 90 "$SESSION" "$ATYPE" --locked >/dev/null || invalid "cannot write the lane reservation (scripts/reservation.sh beside this gate)"
 exit 0

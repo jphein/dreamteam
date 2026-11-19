@@ -205,6 +205,51 @@ printf '400 %s s-a morpheus 0\n' "$(( $(date +%s) - 1 ))" > "$RESV/9-9-9"
 r=$(DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HLOCK" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$RS" start s-a morpheus >/dev/null 2>&1; echo $?)
 [ "$r" -eq 5 ] && [ ! -e "$RESV/9-9-9" ] && grep -q "s-a morpheus" "$RESV/../late-starts.log" 2>/dev/null && pass "start on an expired token: pruned, logged as a late start, exit 5 (item 4)" || fail "late start: rc=$r exists=$([ -e "$RESV/9-9-9" ] && echo y || echo n) log=[$(cat "$RESV/../late-starts.log" 2>/dev/null)]"
 
+# 2e) xreview #256 r4 (Sen 2026-11-18 20:58), one red case per item:
+#   1  scan errors are nonzero and delete nothing: an unreadable directory, a malformed file (evidence kept); a
+#      missing directory is "0 0" (never reserved), an unreadable one is an error the gate turns into a block
+#   2  a STARTED reservation never expires on its own (SubagentStart is not proof the RSS is there yet): it is
+#      released by the lane's SubagentStop (stop <session> <type>); an unstarted one past expiry is tombstoned
+#   3  one token class per reservation, not one token: parallel same-type spawns in one session hold equal-size
+#      reservations, so start/stop count per class; a third start with none unstarted is exit 3, said
+#   4  the tombstone (<file>.expired) survives a scan, so a late start is still recognised after live/outstanding
+#      pruned the live file; a start-hook without ids logs that too
+#   7  every helper read runs under the host lock (--locked = the caller already holds it, the gate), writes are
+#      tmp + rename; live under a held lock is exit 4
+RESV="$TMP/resv4"; rm -rf "$RESV"; HL="$TMP/host4.lock"
+R4() { DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HL" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$RS" "$@"; }
+out=$(R4 outstanding 2>&1); r=$?; [ "$r" -eq 0 ] && [ "$out" = "0 0" ] && pass "r4 item 1: a directory that never existed is 0 0, exit 0" || fail "missing dir: rc=$r out=[$out]"
+R4 add 300 90 s-a morpheus >/dev/null; printf '400\n' > "$RESV/bad-1-1"
+out=$(R4 outstanding 2>&1); r=$?; [ "$r" -ne 0 ] && [ -e "$RESV/bad-1-1" ] && pass "r4 item 1: a malformed file is a scan ERROR (exit $r), the file kept as evidence" || fail "malformed: rc=$r out=[$out] kept=$([ -e "$RESV/bad-1-1" ] && echo y || echo n)"
+rm -f "$RESV/bad-1-1"; chmod 000 "$RESV"
+out=$(R4 outstanding 2>&1); r=$?; chmod 700 "$RESV"
+[ "$r" -ne 0 ] && pass "r4 item 1: an unreadable directory is a scan ERROR (exit $r), not 0 0" || fail "unreadable dir: rc=$r out=[$out]"
+chmod 000 "$RESV"
+FAKE_AVAIL=60000 FAKE_SWAP_USED=0 FAKE_PGREP_COUNT=1 DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HL" \
+  run_gate "$MEM_GATE" '{"session_id":"s-a","tool_name":"Agent","tool_input":{"prompt":"x","subagent_type":"morpheus"}}'
+chmod 700 "$RESV"
+[ "$GRC" -eq 2 ] && grep -qi 'reservation' "$TMP/err" && pass "r4 item 1: the gate BLOCKS when the reservations cannot be read" || fail "gate on unreadable reservations: rc=$GRC $(head -1 "$TMP/err")"
+rm -rf "$RESV"; R4 add 300 90 s-a morpheus >/dev/null; f=$(ls "$RESV"/* | head -1)
+R4 start s-a morpheus >/dev/null 2>&1; sed -i "s/^300 [0-9]*/300 $(( $(date +%s) - 1 ))/" "$f"
+[ "$(R4 live)" = 300 ] && [ -e "$f" ] && pass "r4 item 2: a STARTED reservation past its expiry still counts (released by stop, not by time)" || fail "started past expiry: live=$(R4 live) exists=$([ -e "$f" ] && echo y || echo n)"
+r=$(R4 stop s-a morpheus >/dev/null 2>&1; echo $?); [ "$r" -eq 0 ] && [ "$(R4 live)" = 0 ] && pass "r4 item 2: SubagentStop releases the started reservation (stop <session> <type>)" || fail "stop: rc=$r live=$(R4 live)"
+r=$(R4 stop s-a morpheus >/dev/null 2>&1; echo $?); [ "$r" -eq 3 ] && pass "r4 item 2: a second stop finds nothing (exit 3)" || fail "second stop: rc=$r"
+rm -rf "$RESV"; R4 add 300 90 s-a morpheus >/dev/null; R4 add 300 90 s-a morpheus >/dev/null
+r1=$(R4 start s-a morpheus >/dev/null 2>&1; echo $?); r2=$(R4 start s-a morpheus >/dev/null 2>&1; echo $?); r3=$(R4 start s-a morpheus >/dev/null 2>&1; echo $?)
+[ "$r1$r2$r3" = "003" ] && [ "$(R4 live)" = 600 ] && pass "r4 item 3: two parallel same-type spawns: two starts mark two reservations, a third is exit 3; both still count (equal sizes per class, said in the script)" || fail "same-type pair: rc=$r1,$r2,$r3 live=$(R4 live)"
+rm -rf "$RESV"; R4 add 300 90 s-a morpheus >/dev/null; f=$(ls "$RESV"/* | head -1); sed -i "s/^300 [0-9]*/300 $(( $(date +%s) - 1 ))/" "$f"
+[ "$(R4 live)" = 0 ] && [ ! -e "$f" ] && [ -e "$f.expired" ] && pass "r4 item 4: live prunes an expired UNSTARTED reservation to a tombstone (<file>.expired), not to nothing" || fail "tombstone: live=$(R4 live) file=$([ -e "$f" ] && echo y || echo n) tomb=$([ -e "$f.expired" ] && echo y || echo n)"
+r=$(R4 start s-a morpheus >/dev/null 2>&1; echo $?)
+[ "$r" -eq 5 ] && grep -q "s-a morpheus" "$RESV/../late-starts.log" && [ ! -e "$f.expired" ] && pass "r4 item 4: a late start is still recognised from the tombstone after the scan (exit 5, logged, tombstone consumed)" || fail "late start via tombstone: rc=$r tomb=$([ -e "$f.expired" ] && echo y || echo n) log=[$(tail -1 "$RESV/../late-starts.log" 2>/dev/null)]"
+printf '{"hook_event_name":"SubagentStart"}' | R4 start-hook >/dev/null 2>&1
+grep -q "no session_id or agent_type" "$RESV/../start-hook.log" 2>/dev/null && pass "r4 item 4: a start-hook without ids is logged, not silently skipped" || fail "start-hook without ids: log=[$(cat "$RESV/../start-hook.log" 2>/dev/null | tail -1)]"
+rm -rf "$RESV"; R4 add 300 90 s-a morpheus >/dev/null
+[ -z "$(ls "$RESV" | grep '\.tmp$')" ] && [ "$(ls "$RESV" | wc -l)" -eq 1 ] && pass "r4 item 7: add leaves one complete file and no .tmp (tmp + rename)" || fail "add files: $(ls "$RESV" | tr '\n' ' ')"
+flock "$HL" sleep 30 & HOLDER=$!; sleep 0.3
+r=$(R4 live >/dev/null 2>&1; echo $?); [ "$r" -eq 4 ] && pass "r4 item 7: live under a held host lock is exit 4 (every read is serialized)" || fail "live with lock held: rc=$r"
+out=$(R4 live --locked 2>&1); r=$?; [ "$r" -eq 0 ] && [ "$out" = 300 ] && pass "r4 item 7: live --locked (the caller holds the lock, as the gate does) reads without taking it again" || fail "live --locked: rc=$r out=[$out]"
+pkill -P "$HOLDER" 2>/dev/null; kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null
+
 # 3) Non-Agent tools pass through untouched (gate only guards Agent|Task).
 FAKE_AVAIL=2000 \
   run_gate "$MEM_GATE" '{"tool_name":"Bash","tool_input":{"command":"ls"}}'

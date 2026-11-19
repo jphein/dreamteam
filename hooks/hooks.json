@@ -119,6 +119,11 @@
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/idle-assign.sh\" idle",
             "timeout": 4
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/reservation.sh\" stop-hook",
+            "timeout": 8
           }
         ]
       }
