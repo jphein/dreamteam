@@ -1,0 +1,10 @@
+[Unit]
+Description=dreamteam: CHECK unpushed-commits (repos under ~/Projects and ~/srv whose history is on this disk only)
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Projects/dreamteam
+ExecStart=/usr/bin/bash %h/Projects/dreamteam/scripts/unpushed-commits-check.sh
+# git reads over many repos: idle I/O and low CPU priority (the server's copy is on a slow disk)
+IOSchedulingClass=idle
+Nice=15
+TimeoutStartSec=45min
