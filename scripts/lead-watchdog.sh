@@ -92,6 +92,12 @@ case "$last" in
     *) line warn "pane $PANE dead (resume hint for ${sid:0:8}) but the last line is not a prompt: '${last:0:60}'"; exit 0 ;;
 esac
 
+# The input line must be EMPTY before anything is typed: a prompt-looking last line can still hold a half-typed
+# command (e.g. `rm x #`), and our Enter would run it. Ctrl-U discards whatever is on the line (readline and zle);
+# then the pane is looked at again and must still be a shell with no child.
+tm send-keys -t "$PANE" C-u
+sleep 0.3
+if [ -n "$(pgrep -P "$pane_pid" 2>/dev/null)" ]; then line warn "pane $PANE started something while being checked: nothing typed"; exit 0; fi
 echo "$now" >> "$HIST"
 tm send-keys -t "$PANE" -l "$launch"
 sleep 0.3

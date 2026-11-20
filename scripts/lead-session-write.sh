@@ -15,10 +15,11 @@
 # A hook must never block a session start: every path exits 0 and prints nothing, every wait is bounded (2 s each
 # for stdin, the id parse and tmux), and the script runs itself under `timeout 5` with an outer exit 0.
 set -u
-# The whole hook runs once more under `timeout 5`, and this outer call ALWAYS exits 0: a stall or a crash inside can
+# The whole hook runs once more under `timeout --kill-after=1 5` (SIGKILL one second after an ignored SIGTERM),
+# and this outer call ALWAYS exits 0: a stall or a crash inside can
 # neither hold nor fail a session start. (hooks.json keeps the plain `bash <script>` form every other hook uses.)
 if [ -z "${LEAD_SESSION_WRITE_INNER:-}" ]; then
-    LEAD_SESSION_WRITE_INNER=1 timeout 5 bash "${BASH_SOURCE[0]}" "$@" >/dev/null 2>&1
+    LEAD_SESSION_WRITE_INNER=1 timeout --kill-after=1 5 bash "${BASH_SOURCE[0]}" "$@" >/dev/null 2>&1
     exit 0
 fi
 STATE="${LEAD_WATCHDOG_STATE:-$HOME/.local/state/dreamteam}"
@@ -26,12 +27,12 @@ LEAD_SESSION="${DREAMTEAM_LEAD_SESSION:-spire}"
 ENVF="${LEAD_LAUNCH_ENV:-$HOME/.config/claude-code/env.sh}"
 [ -n "${TMUX_PANE:-}" ] || exit 0                     # not in tmux: not the lead; stdin is not even read
 # bounded: a stdin that never closes, or a tmux that does not answer, must not hold a session start
-input=$(timeout 2 cat 2>/dev/null || true)
-sid=$(printf '%s' "$input" | timeout 2 python3 -I -c 'import json,sys
+input=$(timeout --kill-after=1 2 cat 2>/dev/null || true)
+sid=$(printf '%s' "$input" | timeout --kill-after=1 2 python3 -I -c 'import json,sys
 try: print(json.load(sys.stdin).get("session_id",""))
 except Exception: pass' 2>/dev/null)
 [[ "$sid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || exit 0
-pane=$(timeout 2 tmux ${LEAD_TMUX_SOCKET:+-L "$LEAD_TMUX_SOCKET"} display -p -t "$TMUX_PANE" '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null) || exit 0
+pane=$(timeout --kill-after=1 2 tmux ${LEAD_TMUX_SOCKET:+-L "$LEAD_TMUX_SOCKET"} display -p -t "$TMUX_PANE" '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null) || exit 0
 [[ "$pane" =~ ^[A-Za-z0-9_.-]+:[0-9]+\.[0-9]+$ ]] || exit 0
 [ "${pane%%:*}" = "$LEAD_SESSION" ] || exit 0
 [ "$(pwd -P)" = "$(cd "$HOME" && pwd -P)" ] || exit 0
