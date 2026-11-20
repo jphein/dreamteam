@@ -23,30 +23,44 @@ What "ahead" means here, and its limits (say them in the report, do not paper ov
   - "No remote-tracking branch holds it" is this clone's last knowledge of its remotes. Nothing is fetched (a check
     must not write into a repository), so a commit that reached the remote by another road still reads as ahead.
   - Age is the committer date of the oldest such commit. A rebase renews it.
-Read-only: git runs with GIT_OPTIONAL_LOCKS=0, no hooks, no fsmonitor, no prompt, and only `rev-parse`, `remote`
-and `rev-list`. Directory names with a tab or newline are reported as errors by position, never printed raw.
+Read-only: git runs with GIT_OPTIONAL_LOCKS=0, no hooks, no fsmonitor, no prompt, every transport forbidden
+(`protocol.allow=never`) and lazy fetching off (GIT_NO_LAZY_FETCH, git 2.45+), and only `config --get-regexp`,
+`symbolic-ref`, `show-ref`, `rev-parse`, `remote` and `rev-list`, each under one timeout. A PARTIAL clone (promisor
+remote) is not inspected at all and counts as an error: on a git older than 2.45 a missing object there could
+start a fetch, which writes. A HEAD that exists but cannot be resolved to a commit is an error, never "empty".
+Directory names with a tab or newline are reported as errors by position, never printed raw.
 Exit: 0 RESULT printed · 2 a root is not a readable directory (nothing after it is trusted) · 22 bad arguments.
 """
 import os
 import subprocess
 import sys
 
-ENV = dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0", LC_ALL="C")
+ENV = dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0", GIT_NO_LAZY_FETCH="1", LC_ALL="C")
 for k in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
     ENV.pop(k, None)
-GIT = ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]
+GIT = ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never"]
+try:
+    TIMEOUT = float(os.environ.get("DREAMTEAM_UNPUSHED_GIT_TIMEOUT", "120"))
+    if not 0 < TIMEOUT <= 3600:
+        raise ValueError
+except ValueError:
+    TIMEOUT = 120.0
+
+
+def run(repo, *args):
+    """(exit status, stdout text) of ONE git call under the timeout; (None, "") when it could not run or finish."""
+    try:
+        p = subprocess.run(GIT + ["-C", repo] + list(args), env=ENV, stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired):
+        return None, ""
+    return p.returncode, p.stdout.decode("utf-8", "replace")
 
 
 def git(repo, *args):
     """stdout text, or None when git did not exit 0 in time."""
-    try:
-        p = subprocess.run(GIT + ["-C", repo] + list(args), env=ENV, stdin=subprocess.DEVNULL,
-                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=120)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if p.returncode != 0:
-        return None
-    return p.stdout.decode("utf-8", "replace")
+    rc, out = run(repo, *args)
+    return out if rc == 0 else None
 
 
 def stamps(text):
@@ -62,14 +76,22 @@ def stamps(text):
 
 def look(repo):
     """→ (kind, commits, oldest) with kind in clean | empty | ahead-candidate | no-remote | error."""
-    head = subprocess.run(GIT + ["-C", repo, "rev-parse", "--verify", "-q", "HEAD^{commit}"], env=ENV,
-                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    if head.returncode == 1:
-        # rc 1 from --verify -q is "no such commit": a repository with nothing committed. Anything else is a failure.
-        inside = git(repo, "rev-parse", "--git-dir")
-        return ("empty", 0, 0) if inside is not None else ("error", 0, 0)
-    if head.returncode != 0:
+    # A partial clone is not inspected: `config --get-regexp` exits 1 for "no such key", 0 when one is set.
+    rc, _ = run(repo, "config", "--get-regexp", r"^(extensions\.partialclone|remote\..*\.(promisor|partialclonefilter))$")
+    if rc != 1:
         return ("error", 0, 0)
+    rc, _ = run(repo, "rev-parse", "--verify", "-q", "HEAD^{commit}")
+    if rc is None:
+        return ("error", 0, 0)
+    if rc != 0:
+        # "empty" only for a truly unborn branch: HEAD names a branch and that branch ref does not exist. A HEAD
+        # whose ref exists but whose object is missing or not a commit also fails --verify, and that is an error.
+        rc_s, ref = run(repo, "symbolic-ref", "-q", "HEAD")
+        ref = ref.strip()
+        if rc_s != 0 or not ref.startswith("refs/heads/"):
+            return ("error", 0, 0)
+        rc_r, _ = run(repo, "show-ref", "--verify", "-q", ref)
+        return ("empty", 0, 0) if rc_r == 1 else ("error", 0, 0)
     remotes = git(repo, "remote")
     if remotes is None:
         return ("error", 0, 0)

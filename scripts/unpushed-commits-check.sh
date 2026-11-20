@@ -17,7 +17,8 @@
 #
 # Roots: $DREAMTEAM_UNPUSHED_ROOTS (colon-separated, absolute), else ~/Projects:~/srv. Top-level directories only.
 #        A root that does not exist on this host is a fail, not a zero.
-# Age:   $DREAMTEAM_UNPUSHED_MIN_AGE seconds (default 86400).
+# Age:   $DREAMTEAM_UNPUSHED_MIN_AGE seconds (default 86400). Each git call is bounded by
+#        $DREAMTEAM_UNPUSHED_GIT_TIMEOUT seconds (default 120); a call that does not finish makes that repo unreadable.
 # Tell:  each finding's owner hears of it ONCE, when it first appears: one message per owner per run, naming up to
 #        five repos and the list file. The owner of a directory is its line in $DREAMTEAM_REPO_OWNERS (default
 #        ~/.config/dreamteam/repo-owners.tsv, `<directory name><TAB><lane>`), else the lead ($DREAMTEAM_LEAD_MAIL,
@@ -52,6 +53,9 @@ IFS=: read -r -a ROOTS <<< "$roots_raw"
 min_age="${DREAMTEAM_UNPUSHED_MIN_AGE:-86400}"
 [[ "$min_age" =~ ^[0-9]{1,9}$ ]] || { check_line "$NAME" fail "DREAMTEAM_UNPUSHED_MIN_AGE is not a number of seconds" "$OWNER"; exit $?; }
 now="${DREAMTEAM_NOW:-$(date +%s)}"; [[ "$now" =~ ^[0-9]{1,12}$ ]] || now=$(date +%s)
+# The lead's name becomes an argument of the mail command, like a mapped lane: the same plain grammar, checked first.
+lead="${DREAMTEAM_LEAD_MAIL:-sen}"
+[[ "$lead" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || { check_line "$NAME" fail "DREAMTEAM_LEAD_MAIL is not a plain lane name" "$OWNER"; exit $?; }
 
 mkdir -p "$STATE" 2>/dev/null && [ -d "$STATE" ] || { check_line "$NAME" fail "no state dir $STATE" "$OWNER"; exit $?; }
 LOCK="$STATE/unpushed-commits.lock"
@@ -114,7 +118,6 @@ check_line "$NAME" "$status" "$fact" "$nxt"; rc=$?
 told="$STATE/unpushed-commits.told"
 [ -f "$told" ] && [ ! -L "$told" ] || : > "$told"
 owners="${DREAMTEAM_REPO_OWNERS:-$HOME/.config/dreamteam/repo-owners.tsv}"
-lead="${DREAMTEAM_LEAD_MAIL:-sen}"
 owner_of() {   # directory name → lane (a plain lane name from the map), else the lead
   local o=""
   if [ -f "$owners" ] && [ ! -L "$owners" ]; then
@@ -133,9 +136,14 @@ while IFS=$'\t' read -r kind path n _; do
   [ "${count[$o]}" -le 5 ] && news[$o]="${news[$o]:-}${news[$o]:+; }$(basename -- "$path") ($kind, $n commits)"
 done < "$listf"
 newtold=$(mktemp "$STATE/.unpushed-commits.told.XXXXXX") || { echo "unpushed-commits-check: told memory not recorded" >&2; exit "$rc"; }
-# keep what is still a finding (a finding that went away is forgotten, so its return is told again)
+# Keep what is still a finding. A finding that went away is forgotten, so its return is told again; but only a
+# MEASUREMENT can say it went away: a repo that could not be read this run keeps its memory (or every hiccup of an
+# unreadable repo would tell its owner again).
 while IFS= read -r line; do
-  [ -n "$line" ] && grep -qF -- "$line"$'\t' "$listf" && printf '%s\n' "$line" >> "$newtold"
+  [ -n "$line" ] || continue
+  if grep -qF -- "$line"$'\t' "$listf" || grep -qF -- "error"$'\t'"${line#*$'\t'}"$'\t' "$listf"; then
+    printf '%s\n' "$line" >> "$newtold"
+  fi
 done < "$told"
 for o in "${!news[@]}"; do
   more=""; [ "${count[$o]}" -gt 5 ] && more="; and $(( ${count[$o]} - 5 )) more"

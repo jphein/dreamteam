@@ -23,6 +23,9 @@ chmod +x "$T/bin/mail"; : > "$T/mail.log"
 run() { DREAMTEAM_UNPUSHED_ROOTS="${ROOTS_OVERRIDE:-$P:$V}" DREAMTEAM_NOW="$NOW" XDG_STATE_HOME="$T/state" DREAMTEAM_CHECKS_DIR="$T/checks" \
         DREAMTEAM_MAIL_CMD="$T/bin/mail" DREAMTEAM_LEAD_MAIL=lead DREAMTEAM_REPO_OWNERS="$T/cfg/owners.tsv" DREAMTEAM_CHECK_HOST=familiar \
         HOME="$T" bash "$S" "$@" > "$T/stdout"; local rc=$?; case "${1:-}" in --list) cat "$T/stdout" ;; esac; return "$rc"; }
+run_lead() { DREAMTEAM_UNPUSHED_ROOTS="$T/onlyok" DREAMTEAM_NOW="$NOW" XDG_STATE_HOME="$T/state" DREAMTEAM_CHECKS_DIR="$T/checks" \
+        DREAMTEAM_MAIL_CMD="$T/bin/mail" DREAMTEAM_LEAD_MAIL="$1" DREAMTEAM_REPO_OWNERS="$T/cfg/owners.tsv" DREAMTEAM_CHECK_HOST=familiar \
+        HOME="$T" bash "$S" > /dev/null 2>&1; }
 line() { cat "$T"/checks/unpushed-commits*.line 2>/dev/null; }
 mails() { wc -l < "$T/mail.log"; }
 commit() { # repo, message, age in days
@@ -135,6 +138,53 @@ case "$(line)" in "CHECK unpushed-commits fail · the measurement did not finish
 snap() { find "$P" "$V" -path '*/.git/*' -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum; find "$P" "$V" -path '*/.git/*' | wc -l; }
 a=$(snap); run; b=$(snap); [ "$a" = "$b" ] && ok || bad "a run changed something under a .git"
 [ -z "$(git -C "$P/alpha" for-each-ref refs/remotes | head -c 1)" ] && bad "fixture has no remote ref (control)" || ok
+
+# 13b. review round 1. A PARTIAL clone is never inspected (an old git could fetch a missing object there, which
+# writes): it is unreadable, not clean. Positive control: the same repo without the setting is clean.
+mkdir "$T/pc"; mkrepo "$T/pc/part" part
+ROOTS_OVERRIDE="$T/pc" run; case "$(line)" in "CHECK unpushed-commits ok · 0 of 1 "*) ok ;; *) bad "partial-clone control: $(line)" ;; esac
+git -C "$T/pc/part" config remote.origin.promisor true
+ROOTS_OVERRIDE="$T/pc" run; case "$(line)" in "CHECK unpushed-commits warn · "*"1 unreadable"*) ok ;; *) bad "promisor remote inspected: $(line)" ;; esac
+git -C "$T/pc/part" config --unset remote.origin.promisor; git -C "$T/pc/part" config extensions.partialClone origin
+ROOTS_OVERRIDE="$T/pc" run; case "$(line)" in "CHECK unpushed-commits warn · "*"1 unreadable"*) ok ;; *) bad "extensions.partialClone inspected: $(line)" ;; esac
+# every git call the check makes forbids all transports and lazy fetching, and none is a command that writes
+# (a wrapper logs each call's arguments and environment, then runs the real git)
+realgit=$(command -v git); mkdir "$T/gitlog"
+printf '#!/bin/sh\nprintf "%%s | lazy=%%s locks=%%s\\n" "$*" "${GIT_NO_LAZY_FETCH:-unset}" "${GIT_OPTIONAL_LOCKS:-unset}" >> "%s/git.calls"\nexec %s "$@"\n' "$T" "$realgit" > "$T/gitlog/git"; chmod +x "$T/gitlog/git"
+: > "$T/git.calls"; PATH="$T/gitlog:$PATH" ROOTS_OVERRIDE="$T/onlyok:$T/pc" run
+n=$(wc -l < "$T/git.calls"); g=$(grep -c -- '-c protocol.allow=never .* | lazy=1 locks=0$' "$T/git.calls" || true)
+[ "$n" -ge 4 ] && [ "$n" = "$g" ] && ok || bad "git calls without the transport guard: $g of $n guarded"
+! grep -qE ' (fetch|pull|push|status|gc|checkout|commit|add|reset|update-ref|pack-refs|repack|prune) ' "$T/git.calls" && ok || bad "a writing git command was called: $(grep -E ' (fetch|status|gc) ' "$T/git.calls" | head -n 2)"
+[ "$(sed -E 's/.* -C [^ ]+ ([a-z-]+).*/\1/' "$T/git.calls" | sort -u | tr '\n' ' ')" = "config remote rev-list rev-parse " ] && ok || bad "git subcommands used: $(sed -E 's/.* -C [^ ]+ ([a-z-]+).*/\1/' "$T/git.calls" | sort -u | tr '\n' ' ')"
+# a HEAD that exists but cannot be resolved is unreadable, never "empty"
+mkdir "$T/hd"; mkrepo "$T/hd/gone" gone2; mkrepo "$T/hd/tree" tree2; git init -q -b main "$T/hd/unborn"
+printf '%s\n' 1111111111111111111111111111111111111111 > "$T/hd/gone/.git/refs/heads/main"; rm -f "$T/hd/gone/.git/packed-refs"
+tr=$(git -C "$T/hd/tree" rev-parse 'HEAD^{tree}'); [ "${#tr}" = 40 ] || bad "fixture: no tree id"   # read BEFORE the ref is overwritten
+printf '%s\n' "$tr" > "$T/hd/tree/.git/refs/heads/main"; rm -f "$T/hd/tree/.git/packed-refs"
+[ "$(git -C "$T/hd/tree" cat-file -t "$(cat "$T/hd/tree/.git/refs/heads/main")")" = tree ] && ok || bad "fixture: HEAD's ref does not name a tree"
+ROOTS_OVERRIDE="$T/hd" run
+case "$(line)" in "CHECK unpushed-commits warn · 0 of 3 repos ahead for a day or more, 0 without a remote, 2 unreadable · list: "*) ok ;; *) bad "broken HEADs: $(line)" ;; esac
+grep -q $'^error\t'"$T/hd/gone"$'\t' "$T/state/dreamteam/unpushed-commits.list" && grep -q $'^error\t'"$T/hd/tree"$'\t' "$T/state/dreamteam/unpushed-commits.list" && ok || bad "broken HEADs not listed as errors"
+! grep -q "unborn" "$T/state/dreamteam/unpushed-commits.list" && ok || bad "a truly unborn repo was listed"
+# a git call that never finishes is cut by the timeout and that repo is unreadable (stub git: sleeps on the first call)
+mkdir "$T/gitbin"; printf '#!/bin/sh\nexec sleep 30\n' > "$T/gitbin/git"; chmod +x "$T/gitbin/git"
+s0=$(date +%s); PATH="$T/gitbin:$PATH" DREAMTEAM_UNPUSHED_GIT_TIMEOUT=1 ROOTS_OVERRIDE="$T/onlyok" run; s1=$(date +%s)
+case "$(line)" in "CHECK unpushed-commits warn · "*"1 unreadable"*) [ $((s1-s0)) -lt 15 ] && ok || bad "stalled git took $((s1-s0)) s" ;; *) bad "stalled git: $(line)" ;; esac
+# the lead's name is held to the lane grammar before anything is measured or sent
+: > "$T/mail.log"
+for badlead in "-oProxy" "Sen" "a b" ""; do
+  run_lead "$badlead"
+  case "$(line)" in "CHECK unpushed-commits fail · DREAMTEAM_LEAD_MAIL is not a plain lane name"*) : ;; *) [ -z "$badlead" ] || bad "lead '$badlead' accepted: $(line)" ;; esac
+done
+[ "$(mails)" = 0 ] && ok || bad "a message was sent with an invalid lead name"
+# an unreadable run does not erase the told-once memory: finding → unreadable → the same finding = no second message
+mkdir "$T/mem"; mkrepo "$T/mem/keep"; : > "$T/mail.log"
+ROOTS_OVERRIDE="$T/mem" run; [ "$(mails)" = 1 ] && ok || bad "memory fixture not told ($(mails))"
+mv "$T/mem/keep/.git/HEAD" "$T/mem/keep/.git/HEAD.aside"
+ROOTS_OVERRIDE="$T/mem" run; case "$(line)" in *"1 unreadable"*) ok ;; *) bad "memory fixture not unreadable: $(line)" ;; esac
+grep -q $'^no-remote\t'"$T/mem/keep"'$' "$T/state/dreamteam/unpushed-commits.told" && ok || bad "an unreadable run erased the memory"
+mv "$T/mem/keep/.git/HEAD.aside" "$T/mem/keep/.git/HEAD"
+ROOTS_OVERRIDE="$T/mem" run; [ "$(mails)" = 1 ] && ok || bad "told again after an unreadable run ($(mails))"
 
 # 14. arguments, lock, units
 run --nope 2>/dev/null; [ "$?" = 22 ] && ok || bad "bad argument not 22"
