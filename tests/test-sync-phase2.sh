@@ -74,17 +74,64 @@ out=$(bash "$CP"); [ "$(cat "$TMP/elsewhere.txt")" = target ] && [ -L "$C/hooks/
 rm -f "$C/hooks/b.sh"; mv "$C/hooks" "$C/hooks.real"; mkdir -p "$TMP/linkedhooks"; ln -s "$TMP/linkedhooks" "$C/hooks"
 out=$(bash "$CP"); [ -z "$(ls -A "$TMP/linkedhooks")" ] && case "$out" in *"3 local edits left alone"*) true ;; *) false ;; esac && ok "nothing is written behind a symlinked directory" || bad "linked dir: '$out' $(ls -A "$TMP/linkedhooks")"
 rm -f "$C/hooks"; mv "$C/hooks.real" "$C/hooks"; bash "$CP" >/dev/null
-# an editor writing INTO the file while it is being replaced gets its bytes back
-mkdir -p "$TMP/mvrace"; REALMV="$(command -v mv)"
-printf '#!/bin/sh\ncase "$*" in *"/.config-pull."*"/hooks/a.sh") echo "written in place mid-replace" > "%s/hooks/a.sh" ;; esac\nexec "%s" "$@"\n' "$C" "$REALMV" > "$TMP/mvrace/mv"; chmod +x "$TMP/mvrace/mv"
+# ---- races, driven through the Python core with one system call wrapped (the core has no test hooks of its own) ----
+stdir=$(dirname "$(find "$XDG_STATE_HOME/dreamteam/config-pull" -maxdepth 2 -name repo.git)")
+HEADSHA=$(git --git-dir="$stdir/repo.git" rev-parse refs/remotes/origin/main)
+cat > "$TMP/drv.py" <<'PY'
+"""Run config_deploy.main with ONE os function wrapped, so a test can make something happen at an exact moment.
+   drv.py <lib dir> <what> <arg> -- <config_deploy args...>"""
+import os, sys
+lib, what, arg = sys.argv[1:4]
+rest = sys.argv[sys.argv.index("--") + 1:]
+sys.path.insert(0, lib)
+import config_deploy as cd
+live = rest[2]
+real_rename, real_link = os.rename, os.link
+state = {"done": False}
+def rename(src, dst, **kw):
+    if not state["done"] and dst == "a.sh" and str(src).startswith(".config-pull."):
+        state["done"] = True
+        if what == "inplace":            # an editor writes INTO the old file just before it is displaced
+            with open(os.path.join(live, "hooks", "a.sh"), "w") as f: f.write(arg + "\n")
+        elif what == "swap-parent":      # the parent directory is replaced by a symlink to another directory
+            os.rename(os.path.join(live, "hooks"), os.path.join(live, "hooks.moved"))
+            os.symlink(arg, os.path.join(live, "hooks"))
+    return real_rename(src, dst, **kw)
+def link(src, dst, **kw):
+    if what == "appear" and dst == "c.sh" and not state["done"]:
+        state["done"] = True             # the owner creates the file just before we would publish ours
+        with open(os.path.join(live, "hooks", "c.sh"), "w") as f: f.write(arg + "\n")
+    if what == "no-witness" and str(dst).endswith("/hooks/a.sh"):
+        raise OSError(18, "Invalid cross-device link")     # the backup dir is on another filesystem
+    return real_link(src, dst, **kw)
+os.rename, os.link = rename, link
+sys.exit(cd.main(rest))
+PY
+core() { python3 -I "$TMP/drv.py" "$ROOT/scripts/lib" "$1" "$2" -- "$stdir/repo.git" "$HEADSHA" "$C" "$TMP/bk-$1" "projects/"; }
+
+# an editor writing INTO the file while it is being replaced gets its bytes back; no fixed recovery name is used
+echo v1 > "$C/hooks/a.sh"; echo sentinel > "$C/hooks/a.sh.config-pull-edit"; echo outside > "$TMP/outside.txt"; ln -s "$TMP/outside.txt" "$C/hooks/a.sh.recover"
+out=$(core inplace "written in place mid-replace")
+[ "$(cat "$C/hooks/a.sh")" = "written in place mid-replace" ] && grep -q "edits=1" <<< "$out" && ok "an in-place write landing during the replace is detected and put back" || bad "in-place race: '$(cat "$C/hooks/a.sh")' / $out"
+[ "$(cat "$C/hooks/a.sh.config-pull-edit")" = sentinel ] && [ "$(cat "$TMP/outside.txt")" = outside ] && ok "the recovery uses a unique temp name: a file and a symlink at fixed-looking names are untouched" || bad "recovery clobbered a neighbour"
+rm -f "$C/hooks/a.sh.config-pull-edit" "$C/hooks/a.sh.recover"
+# no hard-link witness (backup dir on another filesystem): the file is NOT replaced, even though its bytes are an old version
 echo v1 > "$C/hooks/a.sh"
-out=$(PATH="$TMP/mvrace:$PATH" bash "$CP")
-[ "$(cat "$C/hooks/a.sh")" = "written in place mid-replace" ] && case "$out" in *"1 local edits left alone"*) true ;; *) false ;; esac && ok "an in-place write landing during the replace is detected and put back" || bad "in-place race: '$(cat "$C/hooks/a.sh")' / $out"
-echo v1 > "$C/hooks/a.sh"; bash "$CP" >/dev/null
+out=$(core no-witness x)
+[ "$(cat "$C/hooks/a.sh")" = v1 ] && grep -q "updated=0 edits=1" <<< "$out" && ok "no witness link possible: the file is left alone and counted (never a copy as stand-in)" || bad "no-witness: '$(cat "$C/hooks/a.sh")' / $out"
+# the parent directory swapped for a symlink just before the rename: nothing lands in the other directory
+mkdir -p "$TMP/otherdir"; echo "other dir's own a.sh" > "$TMP/otherdir/a.sh"; echo v1 > "$C/hooks/a.sh"
+out=$(core swap-parent "$TMP/otherdir")
+[ "$(cat "$TMP/otherdir/a.sh")" = "other dir's own a.sh" ] && [ -z "$(find "$TMP/otherdir" -name '.config-pull.*')" ] && ok "a parent swapped for a symlink mid-pass cannot redirect the write: the other directory is untouched" || bad "parent swap wrote outside: $(cat "$TMP/otherdir/a.sh")"
+[ "$(cat "$C/hooks.moved/a.sh")" = v3 ] && ok "the write went to the directory that was pinned (now renamed aside)" || bad "pinned dir content: $(cat "$C/hooks.moved/a.sh" 2>&1)"
+rm -f "$C/hooks"; mv "$C/hooks.moved" "$C/hooks"
 # a file that appears where an absent one is being created is not replaced
-rm -f "$C/hooks/c.sh"; mkdir -p "$TMP/lnrace"; REALLN="$(command -v ln)"
-printf '#!/bin/sh\ncase "$*" in *"/hooks/c.sh") [ -e "%s/hooks/c.sh" ] || echo "appeared just now" > "%s/hooks/c.sh" ;; esac\nexec "%s" "$@"\n' "$C" "$C" "$REALLN" > "$TMP/lnrace/ln"; chmod +x "$TMP/lnrace/ln"
-out=$(PATH="$TMP/lnrace:$PATH" bash "$CP"); [ "$(cat "$C/hooks/c.sh")" = "appeared just now" ] && ok "a file appearing at an absent path during the pass is kept (no-replace publish)" || bad "appearing file replaced"
+rm -f "$C/hooks/c.sh"
+out=$(core appear "appeared just now"); [ "$(cat "$C/hooks/c.sh")" = "appeared just now" ] && ok "a file appearing at an absent path during the pass is kept (no-replace publish)" || bad "appearing file replaced: $out"
+# a long history: the matching old version is found although it is far from the end of git's output
+for i in $(seq 1 60); do echo "rev $i" > "$TMP/w/hooks/long.sh"; q -C "$TMP/w" add hooks/long.sh; q -C "$TMP/w" commit -m "long $i"; done; q -C "$TMP/w" push origin main
+echo "rev 2" > "$C/hooks/long.sh"; out=$(bash "$CP")
+[ "$(cat "$C/hooks/long.sh")" = "rev 60" ] && ok "an old version deep in a 60-commit history is recognised and replaced" || bad "long history: $(cat "$C/hooks/long.sh") / $out"
 [ -z "$(find "$C" -name '.config-pull.*')" ] && ok "no temp file is left in the live dir" || bad "temp files left: $(find "$C" -name '.config-pull.*' | head -2)"
 rm -f "$C/hooks/c.sh"; bash "$CP" >/dev/null
 
