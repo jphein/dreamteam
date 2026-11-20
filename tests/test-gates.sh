@@ -85,6 +85,7 @@ JSON
 GRC=0
 run_gate() {
   GRC=0
+  rm -rf "$TMP/resv-default"          # each run starts without the previous admit's reservation in the seam dir
   printf '%s' "$2" | bash "$1" 2>"$TMP/err" || GRC=$?
 }
 
@@ -92,12 +93,35 @@ echo "── mem-gate.sh (memory safety gate) ───────────�
 
 # 1) BLOCK when available RAM is below the floor. avail=2000 < minAvailable=8000.
 export PATH="$BIN:$PATH" CLAUDE_PLUGIN_ROOT="$EMPTY_ROOT" DREAMTEAM_CONFIG="$CONFIG"
+export DREAMTEAM_RESERVATIONS="$TMP/resv-default" DREAMTEAM_HOST_LOCK="$TMP/host.lock"   # never the runner's real state (#256 r3)
 FAKE_AVAIL=2000 FAKE_SWAP_USED=500 \
   run_gate "$MEM_GATE" '{"tool_name":"Agent","tool_input":{"prompt":"x"}}'
 if [ "$GRC" -eq 2 ] && grep -qi 'MEMORY GATE' "$TMP/err"; then
   pass "mem-gate BLOCKS (exit 2 + gate message) when avail 2000MiB < 8000MiB floor"
 else
   fail "mem-gate should block on low avail — got exit $GRC; stderr: $(head -1 "$TMP/err")"
+fi
+
+# 1b) the HOST LOCK (dreamteam #256 r1 item 3): the gate's measurement and a GPU claim's probe-to-record window share
+#     one lock on the host (~/.local/state/dreamteam/host.lock; seams DREAMTEAM_HOST_LOCK, DREAMTEAM_HOST_LOCK_WAIT).
+#     Held elsewhere → the gate BLOCKS after its wait (fail closed); free → taken, and the usual decision follows.
+HLOCK="$TMP/host.lock"
+flock "$HLOCK" sleep 30 & HOLDER=$!
+sleep 0.3
+FAKE_AVAIL=2000 FAKE_SWAP_USED=500 DREAMTEAM_HOST_LOCK="$HLOCK" DREAMTEAM_HOST_LOCK_WAIT=1 \
+  run_gate "$MEM_GATE" '{"tool_name":"Agent","tool_input":{"prompt":"x"}}'
+if [ "$GRC" -eq 2 ] && grep -qi 'host lock' "$TMP/err"; then
+  pass "mem-gate BLOCKS on a held host lock (a claim's probe-to-record window), fail closed after 1 s"
+else
+  fail "host lock held: exit $GRC; stderr: $(head -1 "$TMP/err")"
+fi
+pkill -P "$HOLDER" 2>/dev/null; kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null   # flock AND the sleep it forked hold the fd
+FAKE_AVAIL=2000 FAKE_SWAP_USED=500 DREAMTEAM_HOST_LOCK="$HLOCK" DREAMTEAM_HOST_LOCK_WAIT=1 \
+  run_gate "$MEM_GATE" '{"tool_name":"Agent","tool_input":{"prompt":"x"}}'
+if [ "$GRC" -eq 2 ] && grep -qi 'MEMORY GATE' "$TMP/err" && ! grep -qi 'host lock' "$TMP/err"; then
+  pass "mem-gate takes a free host lock and goes on to its own decision (control: the floor block, not the lock)"
+else
+  fail "host lock free: exit $GRC; stderr: $(head -1 "$TMP/err")"
 fi
 
 # 2) ALLOW when RAM is plentiful and agent count is under the cap.
@@ -108,6 +132,132 @@ if [ "$GRC" -eq 0 ]; then
 else
   fail "mem-gate should allow with plenty of RAM — got exit $GRC; stderr: $(head -1 "$TMP/err")"
 fi
+
+# 2b) the RESERVATION (dreamteam #256 r2): the gate's lock is released when it exits, BEFORE the caller starts the
+#     lane, so an ADMITTED spawn, still under the lock, writes $DREAMTEAM_RESERVATIONS/<gate pid>-<ts> holding
+#     "<perAgentMB> <now+90>" for the GPU sampler; the lane's SessionStart consumes it. A blocked spawn writes none.
+RESV="$TMP/resv"; rm -rf "$RESV"
+FAKE_AVAIL=60000 FAKE_SWAP_USED=0 FAKE_PGREP_COUNT=1 DREAMTEAM_RESERVATIONS="$RESV" \
+  run_gate "$MEM_GATE" '{"tool_name":"Agent","tool_input":{"prompt":"x"}}'
+rf=$(ls "$RESV" 2>/dev/null | head -1); nowg=$(date +%s); rmb=""; rexp=0
+[ -n "$rf" ] && read -r rmb rexp _rest < "$RESV/$rf"
+if [ "$GRC" -eq 0 ] && [ -n "$rf" ] && [ "${rmb:-0}" -gt 0 ] && [ "$rexp" -ge $((nowg + 85)) ] && [ "$rexp" -le $((nowg + 95)) ]; then
+  pass "an admitted spawn leaves a reservation (${rmb} MB, expires in ~90 s) for the GPU sampler"
+else
+  fail "reservation after admit: rc=$GRC file=[$rf] content=[$(cat "$RESV/$rf" 2>/dev/null)]"
+fi
+rm -rf "$RESV"
+FAKE_AVAIL=2000 FAKE_SWAP_USED=500 DREAMTEAM_RESERVATIONS="$RESV" \
+  run_gate "$MEM_GATE" '{"tool_name":"Agent","tool_input":{"prompt":"x"}}'
+if [ "$GRC" -eq 2 ] && [ -z "$(ls "$RESV" 2>/dev/null)" ]; then
+  pass "a blocked spawn reserves nothing"
+else
+  fail "reservation after block: rc=$GRC files=[$(ls "$RESV" 2>/dev/null | tr '\n' ' ')]"
+fi
+
+# 2c) xreview #256 r3 item 1: the gate SUBTRACTS outstanding reservations from its own budget, under the lock. With the
+#     real config (perAgent 300, hostReserve 6000, balloon 4000, floor 8000, cap 36), avail 10400 leaves headroom 400
+#     = one agent: gate A admits and reserves 300; gate B, before A's lane exists, sees 10400 - 300 reserved =
+#     headroom 100 → blocked, naming the reservation. Reserved agents count toward the cap too: 35 live + 1 reserved
+#     = 36 → blocked.
+rm -rf "$RESV"
+FAKE_AVAIL=10400 FAKE_SWAP_USED=0 FAKE_PGREP_COUNT=1 DREAMTEAM_RESERVATIONS="$RESV" \
+  run_gate "$MEM_GATE" '{"session_id":"s-a","tool_name":"Agent","tool_input":{"prompt":"x","subagent_type":"morpheus"}}'
+[ "$GRC" -eq 0 ] && pass "over-admit (r3 item 1): gate A admits with headroom for exactly one agent" || fail "gate A: rc=$GRC $(head -1 "$TMP/err")"
+FAKE_AVAIL=10400 FAKE_SWAP_USED=0 FAKE_PGREP_COUNT=1 DREAMTEAM_RESERVATIONS="$RESV" \
+  run_gate "$MEM_GATE" '{"session_id":"s-a","tool_name":"Agent","tool_input":{"prompt":"x","subagent_type":"morpheus"}}'
+if [ "$GRC" -eq 2 ] && grep -qi 'reserved' "$TMP/err"; then
+  pass "over-admit (r3 item 1): gate B is BLOCKED by A's outstanding reservation, named in the message"
+else
+  fail "gate B should block on the reservation: rc=$GRC $(head -1 "$TMP/err")"
+fi
+[ "$(ls "$RESV" | wc -l)" -eq 1 ] && pass "a blocked gate B reserved nothing more (one file)" || fail "reservations after B: $(ls "$RESV" | tr '\n' ' ')"
+FAKE_AVAIL=60000 FAKE_SWAP_USED=0 FAKE_PGREP_COUNT=35 DREAMTEAM_RESERVATIONS="$RESV" \
+  run_gate "$MEM_GATE" '{"session_id":"s-a","tool_name":"Agent","tool_input":{"prompt":"x","subagent_type":"morpheus"}}'
+if [ "$GRC" -eq 2 ] && grep -qi 'reserved' "$TMP/err" && grep -qi 'cap' "$TMP/err"; then
+  pass "the agent cap counts reserved agents (35 live + 1 reserved = cap 36)"
+else
+  fail "cap with a reservation: rc=$GRC $(head -1 "$TMP/err")"
+fi
+
+# 2d) xreview #256 r3 items 2–4: the reservation carries a TOKEN (session + subagent type) and `start` runs under the
+#     host lock. start marks the oldest unexpired, unstarted reservation of that session and type (the lane's own);
+#     another session's or type's cannot be taken (exit 3, nothing changed); the lock held → exit 4, nothing changed;
+#     an expired match is pruned, logged as a late start and exit 5 (item 4: a SubagentStart hook cannot cancel a
+#     start, so the late start is on record). The reservation keeps counting until it expires: no deletion, so the
+#     live sampler never undercounts the handoff (item 2).
+RS="$ROOT/scripts/reservation.sh"; rm -rf "$RESV"
+tok=$(DREAMTEAM_RESERVATIONS="$RESV" bash "$RS" add 400 90 s-a morpheus)
+r=$(DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HLOCK" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$RS" start s-b morpheus >/dev/null 2>&1; echo $?)
+[ "$r" -eq 3 ] && grep -q " 0$" "$tok" && pass "start: another session's token is not taken (exit 3, unstarted)" || fail "start other session: rc=$r $(cat "$tok")"
+r=$(DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HLOCK" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$RS" start s-a luna >/dev/null 2>&1; echo $?)
+[ "$r" -eq 3 ] && pass "start: another type's token is not taken (exit 3)" || fail "start other type: rc=$r"
+flock "$HLOCK" sleep 30 & HOLDER=$!; sleep 0.3
+r=$(DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HLOCK" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$RS" start s-a morpheus >/dev/null 2>&1; echo $?)
+[ "$r" -eq 4 ] && grep -q " 0$" "$tok" && pass "start under a held host lock: exit 4 after 1 s, nothing changed (item 2)" || fail "start with lock held: rc=$r $(cat "$tok")"
+pkill -P "$HOLDER" 2>/dev/null; kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null
+r=$(DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HLOCK" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$RS" start s-a morpheus >/dev/null 2>&1; echo $?)
+[ "$r" -eq 0 ] && ! grep -q " 0$" "$tok" && pass "start: the lane's own token is marked started (lock free)" || fail "start own: rc=$r $(cat "$tok")"
+[ "$(DREAMTEAM_RESERVATIONS="$RESV" bash "$RS" live)" -eq 400 ] && pass "a started reservation still counts until it expires (no deletion: no undercount window)" || fail "live after start: $(DREAMTEAM_RESERVATIONS="$RESV" bash "$RS" live)"
+r=$(DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HLOCK" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$RS" start s-a morpheus >/dev/null 2>&1; echo $?)
+[ "$r" -eq 3 ] && pass "start twice: the started token is not taken again (exit 3)" || fail "start twice: rc=$r"
+printf '400 %s s-a morpheus 0\n' "$(( $(date +%s) - 1 ))" > "$RESV/9-9-9"
+r=$(DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HLOCK" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$RS" start s-a morpheus >/dev/null 2>&1; echo $?)
+[ "$r" -eq 5 ] && [ ! -e "$RESV/9-9-9" ] && grep -q "s-a morpheus" "$RESV/../late-starts.log" 2>/dev/null && pass "start on an expired token: pruned, logged as a late start, exit 5 (item 4)" || fail "late start: rc=$r exists=$([ -e "$RESV/9-9-9" ] && echo y || echo n) log=[$(cat "$RESV/../late-starts.log" 2>/dev/null)]"
+
+# 2e) xreview #256 r4 (Sen 2026-11-18 20:58), one red case per item:
+#   1  scan errors are nonzero and delete nothing: an unreadable directory, a malformed file (evidence kept); a
+#      missing directory is "0 0" (never reserved), an unreadable one is an error the gate turns into a block
+#   2  a STARTED reservation never expires on its own (SubagentStart is not proof the RSS is there yet): it is
+#      released by the lane's SubagentStop (stop <session> <type>); an unstarted one past expiry is tombstoned
+#   3  one token class per reservation, not one token: parallel same-type spawns in one session hold equal-size
+#      reservations, so start/stop count per class; a third start with none unstarted is exit 3, said
+#   4  the tombstone (<file>.expired) survives a scan, so a late start is still recognised after live/outstanding
+#      pruned the live file; a start-hook without ids logs that too
+#   7  every helper read runs under the host lock (--locked = the caller already holds it, the gate), writes are
+#      tmp + rename; live under a held lock is exit 4
+RESV="$TMP/resv4"; rm -rf "$RESV"; HL="$TMP/host4.lock"
+R4() { DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HL" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$RS" "$@"; }
+out=$(R4 outstanding 2>&1); r=$?; [ "$r" -eq 0 ] && [ "$out" = "0 0" ] && pass "r4 item 1: a directory that never existed is 0 0, exit 0" || fail "missing dir: rc=$r out=[$out]"
+R4 add 300 90 s-a morpheus >/dev/null; printf '400\n' > "$RESV/bad-1-1"
+out=$(R4 outstanding 2>&1); r=$?; [ "$r" -ne 0 ] && [ -e "$RESV/bad-1-1" ] && pass "r4 item 1: a malformed file is a scan ERROR (exit $r), the file kept as evidence" || fail "malformed: rc=$r out=[$out] kept=$([ -e "$RESV/bad-1-1" ] && echo y || echo n)"
+rm -f "$RESV/bad-1-1"; chmod 000 "$RESV"
+out=$(R4 outstanding 2>&1); r=$?; chmod 700 "$RESV"
+[ "$r" -ne 0 ] && pass "r4 item 1: an unreadable directory is a scan ERROR (exit $r), not 0 0" || fail "unreadable dir: rc=$r out=[$out]"
+chmod 000 "$RESV"
+FAKE_AVAIL=60000 FAKE_SWAP_USED=0 FAKE_PGREP_COUNT=1 DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HL" \
+  run_gate "$MEM_GATE" '{"session_id":"s-a","tool_name":"Agent","tool_input":{"prompt":"x","subagent_type":"morpheus"}}'
+chmod 700 "$RESV"
+[ "$GRC" -eq 2 ] && grep -qi 'reservation' "$TMP/err" && pass "r4 item 1: the gate BLOCKS when the reservations cannot be read" || fail "gate on unreadable reservations: rc=$GRC $(head -1 "$TMP/err")"
+rm -rf "$RESV"; R4 add 300 90 s-a morpheus >/dev/null; f=$(ls "$RESV"/* | head -1)
+R4 start s-a morpheus >/dev/null 2>&1; sed -i "s/^300 [0-9]*/300 $(( $(date +%s) - 1 ))/" "$f"
+[ "$(R4 live)" = 300 ] && [ -e "$f" ] && pass "r4 item 2: a STARTED reservation past its expiry still counts (released by stop, not by time)" || fail "started past expiry: live=$(R4 live) exists=$([ -e "$f" ] && echo y || echo n)"
+r=$(R4 stop s-a morpheus >/dev/null 2>&1; echo $?); [ "$r" -eq 0 ] && [ "$(R4 live)" = 0 ] && pass "r4 item 2: SubagentStop releases the started reservation (stop <session> <type>)" || fail "stop: rc=$r live=$(R4 live)"
+r=$(R4 stop s-a morpheus >/dev/null 2>&1; echo $?); [ "$r" -eq 3 ] && pass "r4 item 2: a second stop finds nothing (exit 3)" || fail "second stop: rc=$r"
+rm -rf "$RESV"; R4 add 300 90 s-a morpheus >/dev/null; R4 add 300 90 s-a morpheus >/dev/null
+r1=$(R4 start s-a morpheus >/dev/null 2>&1; echo $?); r2=$(R4 start s-a morpheus >/dev/null 2>&1; echo $?); r3=$(R4 start s-a morpheus >/dev/null 2>&1; echo $?)
+[ "$r1$r2$r3" = "003" ] && [ "$(R4 live)" = 600 ] && pass "r4 item 3: two parallel same-type spawns: two starts mark two reservations, a third is exit 3; both still count (equal sizes per class, said in the script)" || fail "same-type pair: rc=$r1,$r2,$r3 live=$(R4 live)"
+rm -rf "$RESV"; R4 add 300 90 s-a morpheus >/dev/null; f=$(ls "$RESV"/* | head -1); sed -i "s/^300 [0-9]*/300 $(( $(date +%s) - 1 ))/" "$f"
+[ "$(R4 live)" = 0 ] && [ ! -e "$f" ] && [ -e "$f.expired" ] && pass "r4 item 4: live prunes an expired UNSTARTED reservation to a tombstone (<file>.expired), not to nothing" || fail "tombstone: live=$(R4 live) file=$([ -e "$f" ] && echo y || echo n) tomb=$([ -e "$f.expired" ] && echo y || echo n)"
+r=$(R4 start s-a morpheus >/dev/null 2>&1; echo $?)
+[ "$r" -eq 5 ] && grep -q "s-a morpheus" "$RESV/../late-starts.log" && [ ! -e "$f.expired" ] && pass "r4 item 4: a late start is still recognised from the tombstone after the scan (exit 5, logged, tombstone consumed)" || fail "late start via tombstone: rc=$r tomb=$([ -e "$f.expired" ] && echo y || echo n) log=[$(tail -1 "$RESV/../late-starts.log" 2>/dev/null)]"
+printf '{"hook_event_name":"SubagentStart"}' | R4 start-hook >/dev/null 2>&1
+grep -q "no session_id or agent_type" "$RESV/../start-hook.log" 2>/dev/null && pass "r4 item 4: a start-hook without ids is logged, not silently skipped" || fail "start-hook without ids: log=[$(cat "$RESV/../start-hook.log" 2>/dev/null | tail -1)]"
+rm -rf "$RESV"; R4 add 300 90 s-a morpheus >/dev/null
+[ -z "$(ls "$RESV" | grep '\.tmp$')" ] && [ "$(ls "$RESV" | wc -l)" -eq 1 ] && pass "r4 item 7: add leaves one complete file and no .tmp (tmp + rename)" || fail "add files: $(ls "$RESV" | tr '\n' ' ')"
+flock "$HL" sleep 30 & HOLDER=$!; sleep 0.3
+r=$(R4 live >/dev/null 2>&1; echo $?); [ "$r" -eq 4 ] && pass "r4 item 7: live under a held host lock is exit 4 (every read is serialized)" || fail "live with lock held: rc=$r"
+out=$(R4 live --locked 2>&1); r=$?; [ "$r" -eq 0 ] && [ "$out" = 300 ] && pass "r4 item 7: live --locked (the caller holds the lock, as the gate does) reads without taking it again" || fail "live --locked: rc=$r out=[$out]"
+pkill -P "$HOLDER" 2>/dev/null; kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null
+# 2f) security review on 445fbf1e: a token field with a space (an Agent call's name as the type) would write a record
+#     no scan can parse, and under item 1 that one file blocks the gate until an operator moves it. The token fields
+#     are sanitised at add, start and stop alike ([A-Za-z0-9._:-], at most 128, else _), so the hook-side raw values
+#     still match and a scan never meets a self-inflicted malformed record. Mutant: san returns its input (red here).
+rm -rf "$RESV"; f=$(R4 add 300 90 "s a/b" "my type!" 2>/dev/null)
+out=$(R4 outstanding 2>&1); r=$?
+[ "$r" -eq 0 ] && [ "$out" = "300 1" ] && grep -q "s_a_b my_type_ 0$" "$f" && pass "a token with spaces and punctuation is sanitised at add: the record parses (300 1)" || fail "sanitised add: rc=$r out=[$out] rec=[$(cat "$f" 2>/dev/null)]"
+r=$(R4 start "s a/b" "my type!" >/dev/null 2>&1; echo $?); [ "$r" -eq 0 ] && pass "start with the same raw token matches the sanitised record" || fail "sanitised start: rc=$r"
+r=$(R4 stop "s a/b" "my type!" >/dev/null 2>&1; echo $?); [ "$r" -eq 0 ] && [ "$(R4 live)" = 0 ] && pass "stop with the same raw token releases it" || fail "sanitised stop: rc=$r live=$(R4 live)"
 
 # 3) Non-Agent tools pass through untouched (gate only guards Agent|Task).
 FAKE_AVAIL=2000 \
