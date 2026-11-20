@@ -1,0 +1,8 @@
+[Unit]
+Description=dreamteam: copy this host's new session transcripts one way (CHECK transcripts-push)
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash %h/Projects/dreamteam/scripts/transcripts-push.sh
+Nice=15
+IOSchedulingClass=idle
+TimeoutStartSec=8min
