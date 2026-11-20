@@ -80,6 +80,14 @@ printf 'session=%s\npane=lwtest:0.0\nlaunch=touch %s/PWNED; claude --resume %s\n
 out=$(run)
 [ ! -e "$T/PWNED" ] && grep -q -- "--resume $SID2 --permission-mode bypassPermissions" "$T/claude.args" 2>/dev/null && ok "a tampered launch line is ignored (never typed); the canonical line runs" || bad "tampered launch: $out $(ls "$T" | tr '\n' ' ')"
 
+# 9b. a launch line of exactly the writer's SHAPE but naming another file to source is never typed either
+fresh "no hint here"; printf 'touch %s/SOURCED\n' "$T" > "$T/evil-env.sh"
+printf 'session=%s\npane=lwtest:0.0\nlaunch=. %s/evil-env.sh; claude --resume %s --permission-mode bypassPermissions\n' "$SID2" "$T" "$SID2" > "$T/state/lead.session"
+out=$(run); sleep 0.5
+[ ! -e "$T/SOURCED" ] && grep -q -- "--resume $SID2 --permission-mode bypassPermissions" "$T/claude.args" 2>/dev/null && ok "a right-shaped launch line naming another env file is not typed: the watchdog's own env path is used" || bad "alternate env sourced: $(ls "$T" | tr '\n' ' ')"
+fresh "no hint here"; printf 'session=%s\npane=lwtest:0.0\n' "$SID2" > "$T/state/lead.session"
+out=$(LEAD_LAUNCH_ENV='/x; touch /nope' run); grep -q '^CHECK lead-liveness fail · the launch-env path or the session id is not in a plain form' <<<"$out" && [ ! -e "$T/claude.args" ] && ok "a launch-env setting that is not a plain path: nothing is typed" || bad "odd launch env: $out"
+
 # 10. a lead.session with a bad id, or one that is a symlink, is not used
 fresh "no hint here"; printf 'session=not-a-uuid; rm -rf x\npane=lwtest:0.0\n' > "$T/state/lead.session"; out=$(run)
 grep -q '^CHECK lead-liveness fail · pane lwtest:0.0 is at a shell with no' <<<"$out" && [ ! -e "$T/claude.args" ] && ok "a bad id in lead.session → fail, no relaunch" || bad "bad id: $out"
@@ -105,12 +113,25 @@ grep -q '^CHECK lead-liveness ok · relaunched 11111111 in lwtest:0.0 .* from le
 # 12. the unit can never again be stopped by a lost exec bit: ExecStart goes through bash, and git records 100755
 grep -q '^ExecStart=/usr/bin/bash %h/Projects/dreamteam/scripts/lead-watchdog.sh$' "$here/systemd/dreamteam-lead-watchdog.service" && ok "the unit starts the script through bash" || bad "unit ExecStart: $(grep ExecStart "$here/systemd/dreamteam-lead-watchdog.service")"
 if git -C "$here" rev-parse --git-dir >/dev/null 2>&1; then
-  m=$(git -C "$here" ls-files -s -- scripts/lead-watchdog.sh scripts/lead-session-write.sh | cut -c1-6 | sort -u | tr '\n' ' ')
-  [ "$m" = "100755 " ] && ok "both scripts are committed executable (100755)" || bad "git modes: $m"
+  m=$(git -C "$here" ls-files -s -- scripts/lead-watchdog.sh scripts/lead-session-write.sh | awk '{print $1, $4}' | tr '\n' '|')
+  [ "$m" = "100755 scripts/lead-session-write.sh|100755 scripts/lead-watchdog.sh|" ] && ok "exactly these two scripts, each committed executable (100755)" || bad "git modes: $m"
 else
   ok "git modes: skipped (not a git checkout)"
 fi
-python3 -I -c "import json,sys; h=json.load(open(sys.argv[1])); e=[x for g in h['hooks']['SessionStart'] for x in g['hooks'] if 'lead-session-write.sh' in x['command']]; sys.exit(0 if len(e)==1 and 0 < e[0]['timeout'] <= 5 else 1)" "$here/hooks/hooks.json" \
+# the hook is bounded: through the REGISTERED command line, with stdin held open and with a tmux that never answers
+CMD=$(python3 -I -c "import json,sys; h=json.load(open(sys.argv[1])); e=[x for g in h['hooks']['SessionStart'] for x in g['hooks'] if 'lead-session-write.sh' in x['command']]; assert len(e)==1 and 0 < e[0]['timeout'] <= 10; print(e[0]['command'])" "$here/hooks/hooks.json") \
   && ok "the writer is registered once on SessionStart with a timeout in seconds" || bad "hooks.json registration"
+case "$CMD" in "timeout 5 bash "*"/scripts/lead-session-write.sh\" || true") ok "the registered command is time-boxed and cannot fail the session start" ;; *) bad "registered command: $CMD" ;; esac
+fresh ""; pane_id=$(tmux -L lwtest display -p -t lwtest:0.0 '#{pane_id}'); rm -f "$T/state/lead.session"
+# stdin is a FIFO that a background writer keeps open and never writes to: only the HOOK is timed, not a pipeline
+mkfifo "$T/held"; sleep 30 > "$T/held" & holder=$!
+t0=$(date +%s); ( cd "$T/home" && HOME="$T/home" TMUX_PANE="$pane_id" DREAMTEAM_LEAD_SESSION=lwtest CLAUDE_PLUGIN_ROOT="$here" bash -c "$CMD" < "$T/held" ); rc=$?; t1=$(date +%s)
+[ "$rc" = 0 ] && [ $((t1 - t0)) -le 8 ] && ok "stdin held open: the registered hook returns 0 within its bound ($((t1 - t0)) s)" || bad "held-open stdin: rc=$rc after $((t1 - t0)) s"
+mkdir -p "$T/slowtmux"; printf '#!/bin/sh\nsleep 30\n' > "$T/slowtmux/tmux"; chmod +x "$T/slowtmux/tmux"
+t0=$(date +%s); ( cd "$T/home" && printf '{"session_id":"%s"}' "$SID2" | PATH="$T/slowtmux:$PATH" HOME="$T/home" TMUX_PANE="$pane_id" DREAMTEAM_LEAD_SESSION=lwtest CLAUDE_PLUGIN_ROOT="$here" bash -c "$CMD" ); rc=$?; t1=$(date +%s)
+[ "$rc" = 0 ] && [ $((t1 - t0)) -le 8 ] && [ ! -e "$T/state/lead.session" ] && ok "a tmux that never answers: returns 0 within its bound, writes nothing ($((t1 - t0)) s)" || bad "stalled tmux: rc=$rc after $((t1 - t0)) s"
+t0=$(date +%s); ( cd "$T/home" && env -u TMUX_PANE HOME="$T/home" bash "$WR" < "$T/held" ); rc=$?; t1=$(date +%s)
+[ "$rc" = 0 ] && [ $((t1 - t0)) -le 1 ] && ok "outside tmux the hook returns at once without reading stdin" || bad "non-tmux: rc=$rc after $((t1 - t0)) s"
+kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
 
 echo "lead-watchdog: $pass ok, $fail failed"; [ "$fail" = 0 ]

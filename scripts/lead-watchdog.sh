@@ -15,20 +15,20 @@
 set -u
 STATE="${LEAD_WATCHDOG_STATE:-$HOME/.local/state/dreamteam}"
 # lead.session (written by scripts/lead-session-write.sh at the lead's SessionStart): where the lead really runs and
-# its session id. Read as data, line by line, each value checked against a strict shape; never sourced. The launch
-# line is typed into a shell, so it is accepted ONLY in the one form the writer produces, for that same id.
+# its session id. Read as data, line by line, each value checked against a strict shape; never sourced. ONLY the id
+# and the pane are taken from it. The command typed into the shell is always built here, from this script's own
+# launch-env path and the validated id: the file's `launch=` line is information for a person and is never typed
+# (a line of the right shape could still name another file to source).
 UUID='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
-f_sid=""; f_pane=""; f_launch=""
+f_sid=""; f_pane=""
 LS="$STATE/lead.session"
 if [ -f "$LS" ] && [ ! -L "$LS" ]; then
     while IFS= read -r l; do
         case "$l" in
             session=*) [[ "${l#session=}" =~ ^$UUID$ ]] && f_sid="${l#session=}" ;;
             pane=*)    [[ "${l#pane=}" =~ ^[A-Za-z0-9_.-]+:[0-9]+\.[0-9]+$ ]] && f_pane="${l#pane=}" ;;
-            launch=*)  f_launch="${l#launch=}" ;;
         esac
     done < "$LS"
-    [[ -n "$f_sid" && "$f_launch" =~ ^\.\ [A-Za-z0-9_./-]+\;\ claude\ --resume\ $f_sid\ --permission-mode\ bypassPermissions$ ]] || f_launch=""
 fi
 PANE="${LEAD_PANE:-${f_pane:-spire:0.0}}"
 SESSION="${PANE%%:*}"
@@ -67,8 +67,8 @@ if [ -z "$sid" ]; then
     tell "lead pane $PANE is dead with no resume hint and no lead.session; relaunch by hand"
     exit 0
 fi
+[[ "$LAUNCH_ENV" =~ ^/[A-Za-z0-9_./-]+$ && "$sid" =~ ^$UUID$ ]] || { line fail "the launch-env path or the session id is not in a plain form: not typing anything"; tell "lead-watchdog: launch env or id not plain; relaunch by hand"; exit 0; }
 launch=". $LAUNCH_ENV; claude --resume $sid --permission-mode bypassPermissions"
-[ -n "$f_launch" ] && [ "$sid" = "$f_sid" ] && launch="$f_launch"
 
 # Someone typing in the session? (a human may be at the keys)
 act=$(tm display -p -t "$PANE" '#{client_activity}' 2>/dev/null || echo 0); now=$(date +%s)

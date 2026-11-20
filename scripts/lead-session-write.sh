@@ -12,19 +12,20 @@
 #   launch=. <env file>; claude --resume <uuid> --permission-mode bypassPermissions
 # "The lead" = a session inside tmux whose tmux session is $DREAMTEAM_LEAD_SESSION (default `spire`) and whose
 # working directory is $HOME (FOR-AGENTS: the fleet lead is tmux `spire`, Claude in ~). Any other session: nothing.
-# A hook must never block a session start: every path exits 0 and prints nothing.
+# A hook must never block a session start: every path exits 0 and prints nothing, every wait is bounded (2 s each
+# for stdin, the id parse and tmux), and hooks.json runs it under `timeout 5 … || true` as well.
 set -u
 STATE="${LEAD_WATCHDOG_STATE:-$HOME/.local/state/dreamteam}"
 LEAD_SESSION="${DREAMTEAM_LEAD_SESSION:-spire}"
 ENVF="${LEAD_LAUNCH_ENV:-$HOME/.config/claude-code/env.sh}"
-tm() { tmux ${LEAD_TMUX_SOCKET:+-L "$LEAD_TMUX_SOCKET"} "$@"; }
-input=$(cat 2>/dev/null || true)
-[ -n "${TMUX_PANE:-}" ] || exit 0
-sid=$(printf '%s' "$input" | python3 -I -c 'import json,sys
+[ -n "${TMUX_PANE:-}" ] || exit 0                     # not in tmux: not the lead; stdin is not even read
+# bounded: a stdin that never closes, or a tmux that does not answer, must not hold a session start
+input=$(timeout 2 cat 2>/dev/null || true)
+sid=$(printf '%s' "$input" | timeout 2 python3 -I -c 'import json,sys
 try: print(json.load(sys.stdin).get("session_id",""))
 except Exception: pass' 2>/dev/null)
 [[ "$sid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || exit 0
-pane=$(tm display -p -t "$TMUX_PANE" '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null) || exit 0
+pane=$(timeout 2 tmux ${LEAD_TMUX_SOCKET:+-L "$LEAD_TMUX_SOCKET"} display -p -t "$TMUX_PANE" '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null) || exit 0
 [[ "$pane" =~ ^[A-Za-z0-9_.-]+:[0-9]+\.[0-9]+$ ]] || exit 0
 [ "${pane%%:*}" = "$LEAD_SESSION" ] || exit 0
 [ "$(pwd -P)" = "$(cd "$HOME" && pwd -P)" ] || exit 0
