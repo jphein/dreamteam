@@ -1,0 +1,6 @@
+[Unit]
+Description=Reap stale ~/fambuild/agent-* cargo build caches
+[Service]
+Type=oneshot
+User=jp
+ExecStart=/usr/local/bin/reap-fambuild-agents 2

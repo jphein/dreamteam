@@ -1,0 +1,7 @@
+[Unit]
+Description=Daily reap of stale fambuild agent caches
+[Timer]
+OnCalendar=daily
+Persistent=true
+[Install]
+WantedBy=timers.target

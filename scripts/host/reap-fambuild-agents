@@ -1,0 +1,24 @@
+#!/bin/bash
+# Reap stale per-agent cargo build caches under ~/fambuild.
+# Each spawned agent worktree leaves a 2-7GB target/ dir that is never cleaned;
+# they filled the 238G NVMe to 100% twice (17-23GB reclaimed each time) and broke
+# builds with "No space left on device". Only agent-* is touched — named project
+# dirs (esp32c6-watch, per-feature worktrees) are build-hot and left alone.
+set -u
+AGE_DAYS="${1:-2}"
+FB=/home/jp/fambuild
+[ -d "$FB" ] || exit 0
+# Skip while a real compile is running so we never yank a live target dir.
+# NOTE: -x matches the executable name. A -f/cmdline match here false-positives
+# on any shell whose command line merely CONTAINS "cargo build" (e.g. a
+# `while pgrep -f "cargo build"` wait-loop), which would wedge the reaper off.
+if pgrep -u jp -x cargo >/dev/null || pgrep -u jp -x rustc >/dev/null; then
+  echo "compile active - skipping"; exit 0
+fi
+freed=0
+while IFS= read -r d; do
+  [ -n "$d" ] || continue
+  sz=$(du -sm "$d" 2>/dev/null | cut -f1)
+  rm -rf "$d" && { freed=$((freed + ${sz:-0})); echo "reaped $(basename "$d") (${sz}MB)"; }
+done < <(find "$FB" -maxdepth 1 -type d -name "agent-*" -mtime "+$AGE_DAYS" 2>/dev/null)
+echo "reap-fambuild-agents: freed ${freed}MB; $(df -h / | awk "NR==2{print \$4\" free (\"\$5\" used)\"}")"

@@ -1,0 +1,7 @@
+[Unit]
+Description=dreamteam: resume Claude panes stalled on a pool-quota error once the reset time has passed
+Documentation=file://%h/Projects/dreamteam/docs/CHECKS.md
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/Projects/dreamteam/scripts/quota_resume.py
