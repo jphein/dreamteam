@@ -3,5 +3,5 @@ Description=CHECK lead-liveness: relaunch the fleet lead's Claude Code in spire:
 
 [Service]
 Type=oneshot
-ExecStart=%h/Projects/dreamteam/scripts/lead-watchdog.sh
+ExecStart=/usr/bin/bash %h/Projects/dreamteam/scripts/lead-watchdog.sh
 Nice=10
