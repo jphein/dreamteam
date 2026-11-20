@@ -105,6 +105,16 @@ def link(src, dst, **kw):
         raise OSError(18, "Invalid cross-device link")     # the backup dir is on another filesystem
     return real_link(src, dst, **kw)
 os.rename, os.link = rename, link
+if what == "exec-swap":                  # after the bytes were read as current, the leaf becomes a symlink
+    real_read = cd.Deployer.read_at
+    def read_at(dfd, name):
+        data = real_read(dfd, name)
+        if name == "a.sh" and not state["done"] and isinstance(data, bytes):
+            state["done"] = True
+            os.rename(os.path.join(live, "hooks", "a.sh"), os.path.join(live, "hooks", "a.sh.aside"))
+            os.symlink(arg, os.path.join(live, "hooks", "a.sh"))
+        return data
+    cd.Deployer.read_at = staticmethod(read_at)
 sys.exit(cd.main(rest))
 PY
 core() { python3 -I "$TMP/drv.py" "$ROOT/scripts/lib" "$1" "$2" -- "$stdir/repo.git" "$HEADSHA" "$C" "$TMP/bk-$1" "projects/"; }
@@ -134,6 +144,12 @@ echo target > "$TMP/chmod-target.txt"; chmod 600 "$TMP/chmod-target.txt"; mv "$C
 bash "$CP" >/dev/null; [ "$(stat -c %a "$TMP/chmod-target.txt")" = 600 ] && ok "a symlink at an executable tracked path: its target's mode is never changed" || bad "chmod followed a symlink: $(stat -c %a "$TMP/chmod-target.txt")"
 rm -f "$C/hooks/a.sh"; mv "$C/hooks/a.sh.real" "$C/hooks/a.sh"; chmod 644 "$C/hooks/a.sh"; bash "$CP" >/dev/null
 [ -x "$C/hooks/a.sh" ] && ok "a current file that lost its exec bit gets it back" || bad "exec bit not restored"
+# the RACE: the file is read as current but not executable, then the leaf is swapped for a symlink before the mode is set
+chmod 644 "$C/hooks/a.sh"; echo t > "$TMP/chmod-race.txt"; chmod 600 "$TMP/chmod-race.txt"
+HEADSHA=$(git --git-dir="$stdir/repo.git" rev-parse refs/remotes/origin/main)
+out=$(core exec-swap "$TMP/chmod-race.txt")
+[ "$(stat -c %a "$TMP/chmod-race.txt")" = 600 ] && grep -qE "edits=[1-9]" <<< "$out" && ok "a leaf swapped for a symlink between the read and the mode change: the target's mode is untouched and it is counted" || bad "exec race: mode $(stat -c %a "$TMP/chmod-race.txt") / $out"
+rm -f "$C/hooks/a.sh"; mv "$C/hooks/a.sh.aside" "$C/hooks/a.sh"; bash "$CP" >/dev/null
 # tracked entries the job does not handle are never hidden behind an ok
 ln -s a.sh "$TMP/w/hooks/link.sh"; q -C "$TMP/w" add hooks/link.sh; q -C "$TMP/w" commit -m symlink; q -C "$TMP/w" push origin main
 out=$(bash "$CP"); case "$out" in "CHECK config-pull warn · "*" local edits left alone, 1 tracked entries not handled (symlinks or odd names) · "*) ok "a tracked symlink: warn naming the unhandled entry, never 'all current'" ;; *) bad "tracked symlink: '$out'" ;; esac

@@ -18,10 +18,8 @@ How it stays safe against the tree changing underneath it:
 - New bytes are written to a uniquely named temp file in that same directory (O_CREAT|O_EXCL).
 - An absent file is published with link(2), which never replaces: a file that appears meanwhile survives.
 - A present file is first hard-linked into the backup directory. That link shares the live file's inode, so it is a
-  witness: it is judged, the temp file is renamed over the live name, and the witness is judged AGAIN. An editor that
-  wrote into the old file in between is seen by the second look and its bytes are put back (through a unique temp
-  file, never a fixed name). If the hard link cannot be made (another filesystem), the file is NOT replaced: a copy
-  would not be a witness.
+  witness: it is judged, the temp file is renamed over the live name, and the witness is judged AGAIN. If the hard
+  link cannot be made (another filesystem), the file is NOT replaced: a copy would not be a witness.
 - An in-place write that lands after the witness was judged is NOT put back automatically: its bytes are in the
   witness (kept in the backup directory) and the pass reports "displaced".
 - Not excluded: an editor that REPLACES the live file (by rename, i.e. a new inode) between our witness link and our

@@ -17,9 +17,11 @@
 # belong to other mechanisms). Every replaced file's previous bytes are first kept in a dated backup directory.
 #
 # How a file is replaced: see scripts/lib/config_deploy.py (pinned directory descriptors, a no-replace link for an
-# absent file, a hard-link witness judged before and after the rename, no copy fallback, unique recovery names).
-# What is not excluded: an editor that replaces the file by rename in the instant between the witness link and our
-# rename. The window is two system calls; the job says so and does not claim more.
+# absent file, a hard-link witness judged before and after the rename, no copy fallback, no automatic restoration).
+# An in-place write landing during a replacement is not put back: its bytes stay in the backup dir and the line is fail.
+# What is not excluded: an editor that REPLACES the file by rename between the witness link and our rename. That
+# interval covers reading the witness and, the first time a path is judged, one `git log`; such a replacement would
+# be lost. The job says so and does not claim more.
 #
 # Line (docs/CHECKS.md):
 #   CHECK config-pull[-<host>] ok   · main at <sha>, N files updated, all T current · every 10 min, owner Sen
