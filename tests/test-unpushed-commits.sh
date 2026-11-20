@@ -248,6 +248,31 @@ grep -q $'^lane-a\t.*we\\\\nird (no-remote' "$T/mail.log" && grep -q $'^lane-b\t
 [ "$(mails)" = 3 ] && ok || bad "three owners expected, $(mails) messages"
 printf 'beta\tluna-web\ngamma\t-oBad Name\n' > "$T/cfg/owners.tsv"
 
+# 13e. review round 4. The branch name is kept byte for byte when asking whether its ref exists: a name ending in
+# a no-break space, or holding a byte that is not UTF-8, with a broken ref is unreadable, never "empty".
+mkdir "$T/rn"
+git init -q -b "main"$' ' "$T/rn/nbsp"; commit "$T/rn/nbsp" one 30
+git init -q -b "b"$'\xff' "$T/rn/raw"; commit "$T/rn/raw" one 30
+ROOTS_OVERRIDE="$T/rn" run; case "$(line)" in "CHECK unpushed-commits warn · 0 of 2 repos ahead for a day or more, 2 without a remote · list: "*) ok ;; *) bad "odd branch names (control): $(line)" ;; esac
+printf '%s\n' 1111111111111111111111111111111111111111 > "$T/rn/nbsp/.git/refs/heads/main"$' '
+printf '%s\n' 1111111111111111111111111111111111111111 > "$T/rn/raw/.git/refs/heads/b"$'\xff'
+ROOTS_OVERRIDE="$T/rn" run
+case "$(line)" in "CHECK unpushed-commits warn · 0 of 2 repos ahead for a day or more, 0 without a remote, 2 unreadable · list: "*) ok ;; *) bad "a broken ref under an odd branch name read as empty: $(line)" ;; esac
+# the place the line is published is settled before ANY line, against ALL roots: an early failure, or a state dir
+# inside the first root with the checks dir inside the second, writes nothing into either repository
+mkdir "$T/two"; mkrepo "$T/two/r1" tr1; mkrepo "$T/two/r2" tr2; mkdir "$T/twostate"; ln -s "$T/two/r1" "$T/twostate/dreamteam"
+snap2() { find "$T/two" | sort | sha256sum; }
+b=$(snap2); old=$(line)
+DREAMTEAM_UNPUSHED_ROOTS="$T/two/r1:$T/two/r2" XDG_STATE_HOME="$T/twostate" DREAMTEAM_CHECKS_DIR="$T/two/r2/checks" DREAMTEAM_NOW="$NOW" \
+  DREAMTEAM_MAIL_CMD="$T/bin/mail" DREAMTEAM_LEAD_MAIL=lead DREAMTEAM_CHECK_HOST=familiar HOME="$T" bash "$S" >/dev/null 2>&1; rc=$?
+[ "$rc" = 1 ] && [ "$(snap2)" = "$b" ] && [ "$(line)" = "$old" ] && ok || bad "state in root 1 + checks in root 2 wrote something (rc $rc)"
+DREAMTEAM_UNPUSHED_ROOTS="$T/two" XDG_STATE_HOME="$T/state" DREAMTEAM_CHECKS_DIR="$T/two/r2/checks" DREAMTEAM_NOW="$NOW" DREAMTEAM_UNPUSHED_MIN_AGE="soon" \
+  DREAMTEAM_MAIL_CMD="$T/bin/mail" DREAMTEAM_LEAD_MAIL=lead DREAMTEAM_CHECK_HOST=familiar HOME="$T" bash "$S" >/dev/null 2>&1; rc=$?
+[ "$rc" = 1 ] && [ "$(snap2)" = "$b" ] && ok || bad "an early failure line was written into a repository (rc $rc)"
+DREAMTEAM_UNPUSHED_ROOTS="$T/two" XDG_STATE_HOME="$T/state" DREAMTEAM_CHECKS_DIR="$T/checks" DREAMTEAM_NOW="$NOW" DREAMTEAM_UNPUSHED_MIN_AGE="soon" \
+  DREAMTEAM_MAIL_CMD="$T/bin/mail" DREAMTEAM_LEAD_MAIL=lead DREAMTEAM_CHECK_HOST=familiar HOME="$T" bash "$S" >/dev/null 2>&1
+case "$(line)" in "CHECK unpushed-commits fail · DREAMTEAM_UNPUSHED_MIN_AGE is not a number of seconds"*) ok ;; *) bad "control: the early failure line is not published where it is safe: $(line)" ;; esac
+
 # 14. arguments, lock, units
 run --nope 2>/dev/null; [ "$?" = 22 ] && ok || bad "bad argument not 22"
 run --list extra 2>/dev/null; [ "$?" = 22 ] && ok || bad "extra argument not 22"

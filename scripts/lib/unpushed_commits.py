@@ -58,7 +58,9 @@ def run(repo, *args):
                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=TIMEOUT)
     except (OSError, subprocess.TimeoutExpired):
         return None, ""
-    return p.returncode, p.stdout.decode("utf-8", "replace")
+    # surrogateescape: bytes that are not UTF-8 survive a round trip back into a git argument unchanged. A ref name
+    # is passed back to git below, so it must be the name git printed, byte for byte.
+    return p.returncode, p.stdout.decode("utf-8", "surrogateescape")
 
 
 def git(repo, *args):
@@ -96,7 +98,7 @@ def look(repo):
         # "empty" only for a truly unborn branch: HEAD names a branch and that branch ref does not exist. A HEAD
         # whose ref exists but whose object is missing or not a commit also fails --verify, and that is an error.
         rc_s, ref = run(repo, "symbolic-ref", "-q", "HEAD")
-        ref = ref.strip()
+        ref = ref[:-1] if ref.endswith("\n") else ref   # only git's own newline: a name may end in other whitespace
         if rc_s != 0 or not ref.startswith("refs/heads/"):
             return ("error", 0, 0)
         rc_r, _ = run(repo, "show-ref", "--verify", "-q", ref)

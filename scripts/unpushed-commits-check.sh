@@ -49,6 +49,17 @@ STATE="${XDG_STATE_HOME:-$HOME/.local/state}/dreamteam"
 roots_raw="${DREAMTEAM_UNPUSHED_ROOTS:-$HOME/Projects:$HOME/srv}"
 case "$roots_raw" in *$'\n'*|*$'\r'*) check_line "$NAME" fail "DREAMTEAM_UNPUSHED_ROOTS holds a newline" "$OWNER"; exit $? ;; esac
 IFS=: read -r -a ROOTS <<< "$roots_raw"
+# Where the line is published is settled BEFORE the first line can be published, against ALL roots: this check
+# never writes into what it inspects, and that includes its own failure lines. A checks dir inside a root (through
+# any symlink) means no line can be written safely: stderr and exit 1.
+checks_dir="${DREAMTEAM_CHECKS_DIR:-$HOME/.local/state/checks}"
+checks_real=$(realpath -m -- "$checks_dir" 2>/dev/null) && [ -n "$checks_real" ] \
+  || { echo "unpushed-commits-check: cannot resolve the checks dir; nothing written" >&2; exit 1; }
+for r in "${ROOTS[@]}"; do
+  case "$r" in /*) ;; *) continue ;; esac               # a relative root is refused below, with a line
+  rr=$(realpath -m -- "$r" 2>/dev/null) && [ -n "$rr" ] || { echo "unpushed-commits-check: cannot resolve a root; nothing written" >&2; exit 1; }
+  case "$checks_real/" in "$rr/"*) echo "unpushed-commits-check: the checks dir lies inside an inspected root; nothing written" >&2; exit 1 ;; esac
+done
 [ "${#ROOTS[@]}" -ge 1 ] || { check_line "$NAME" fail "no roots given" "$OWNER"; exit $?; }
 min_age="${DREAMTEAM_UNPUSHED_MIN_AGE:-86400}"
 [[ "$min_age" =~ ^[0-9]{1,9}$ ]] || { check_line "$NAME" fail "DREAMTEAM_UNPUSHED_MIN_AGE is not a number of seconds" "$OWNER"; exit $?; }
@@ -61,15 +72,13 @@ for r in "${ROOTS[@]}"; do
   case "$r" in /*) ;; *) check_line "$NAME" fail "a root is not an absolute path" "$OWNER"; exit $? ;; esac
   [ -d "$r" ] && [ -r "$r" ] && [ -x "$r" ] || { check_line "$NAME" fail "${r/#$HOME/\~} is not a readable directory" "$OWNER"; exit $?; }
 done
-# This check never writes into what it inspects. The two directories it writes to (its state dir and the dir the
-# line is published in) are resolved through every symlink BEFORE anything is created, and neither may lie inside
-# a root. A symlinked ancestor pointing into a repository is caught here, not after the first file exists.
-checks_dir="${DREAMTEAM_CHECKS_DIR:-$HOME/.local/state/checks}"
-state_real=$(realpath -m -- "$STATE" 2>/dev/null) && checks_real=$(realpath -m -- "$checks_dir" 2>/dev/null) \
-  && [ -n "$state_real" ] && [ -n "$checks_real" ] || { echo "unpushed-commits-check: cannot resolve the state or checks dir; nothing written" >&2; exit 1; }
+# The state dir likewise: resolved through every symlink BEFORE anything is created in it, and it may not lie
+# inside a root (the checks dir was settled above, before the first line). A symlinked ancestor pointing into a
+# repository is caught here, not after the first file exists.
+state_real=$(realpath -m -- "$STATE" 2>/dev/null) && [ -n "$state_real" ] \
+  || { echo "unpushed-commits-check: cannot resolve the state dir; nothing written" >&2; exit 1; }
 for r in "${ROOTS[@]}"; do
   rr=$(realpath -- "$r" 2>/dev/null) && [ -n "$rr" ] || { echo "unpushed-commits-check: cannot resolve a root; nothing written" >&2; exit 1; }
-  case "$checks_real/" in "$rr/"*) echo "unpushed-commits-check: the checks dir lies inside an inspected root; nothing written" >&2; exit 1 ;; esac
   case "$state_real/" in "$rr/"*) check_line "$NAME" fail "the state dir lies inside an inspected root: nothing was written there" "$OWNER"; exit $? ;; esac
 done
 mkdir -p "$STATE" 2>/dev/null && [ -d "$STATE" ] || { check_line "$NAME" fail "no state dir $STATE" "$OWNER"; exit $?; }
