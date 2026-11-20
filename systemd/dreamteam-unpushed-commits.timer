@@ -1,0 +1,7 @@
+[Unit]
+Description=dreamteam: CHECK unpushed-commits daily at 05:40 (after sync-conflicts at 05:20: one walk at a time)
+[Timer]
+OnCalendar=*-*-* 05:40:00
+Persistent=true
+[Install]
+WantedBy=timers.target
