@@ -178,7 +178,10 @@ check "$resv" "RESV,ERR" "sampler: a reservations directory that cannot be liste
 printf '400\n' > "$rd/15-6"
 resv=$(python3 "$LIB" probe-script gpu1 | HOME="$h" DREAMTEAM_RESERVATIONS= PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^RESV,')
 check "$resv" "RESV,ERR" "sampler: a reservation file with only an MB field is RESV,ERR (each field validated, r4 item 5)"
-rm -f "$rd/15-6"
+rm -f "$rd/15-6"; printf '700 notanumber s-a morpheus 0\n' > "$rd/15-7"
+resv=$(python3 "$LIB" probe-script gpu1 | HOME="$h" DREAMTEAM_RESERVATIONS= PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^RESV,')
+check "$resv" "RESV,ERR" "sampler: a non-numeric expiry is RESV,ERR on its own (the expiry digit check, not the started-field check: mutant probe-exp-digits-unchecked)"
+rm -f "$rd/15-7"
 resv=$(python3 "$LIB" probe-script gpu1 | DREAMTEAM_RESERVATIONS="$rd/10-1" PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^RESV,')
 check "$resv" "RESV,ERR" "sampler: a regular file where the reservations directory should be is RESV,ERR (r4 item 5)"
 order=$(python3 "$LIB" probe-script gpu1 | HOME="$h" DREAMTEAM_RESERVATIONS= PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep -o '^RESV\|^LANE' | tr '\n' ' ')
