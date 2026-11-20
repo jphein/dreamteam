@@ -65,6 +65,15 @@ fi
 exec 9>> "$LOCK" || { check_line "$NAME" fail "cannot open the lock in $STATE" "$OWNER"; exit $?; }
 flock -n 9 || { echo "unpushed-commits-check: another run holds the lock; nothing published" >&2; exit 75; }
 
+# The state files this run reads must be plain files of ours, or absent: a symlink there could point into a
+# repository, and this check never writes into one. Refused before anything is measured.
+told="$STATE/unpushed-commits.told"
+for f in "$told" "$STATE/unpushed-commits.list"; do
+  if [ -L "$f" ] || { [ -e "$f" ] && { [ ! -f "$f" ] || [ ! -O "$f" ]; }; }; then
+    check_line "$NAME" fail "a state file is a symlink or not a plain file of ours: $(basename -- "$f")" "$OWNER"; exit $?
+  fi
+done
+
 for r in "${ROOTS[@]}"; do
   case "$r" in /*) ;; *) check_line "$NAME" fail "a root is not an absolute path" "$OWNER"; exit $? ;; esac
   [ -d "$r" ] && [ -r "$r" ] && [ -x "$r" ] || { check_line "$NAME" fail "${r/#$HOME/\~} is not a readable directory" "$OWNER"; exit $?; }
@@ -115,8 +124,10 @@ check_line "$NAME" "$status" "$fact" "$nxt"; rc=$?
 [ "$LIST" = 1 ] && cat -- "$listf"
 
 # Tell each NEW finding's owner once. `told` holds "<kind>\t<path>" for findings already told.
-told="$STATE/unpushed-commits.told"
-[ -f "$told" ] && [ ! -L "$told" ] || : > "$told"
+# (The memory file was checked before the measurement: a plain file of ours, or absent. It is only ever replaced by
+# a rename, never opened for writing, so nothing can be written through it.)
+[ -e "$told" ] || { nt=$(mktemp "$STATE/.unpushed-commits.told.XXXXXX") && mv -T -f -- "$nt" "$told"; } \
+  || { echo "unpushed-commits-check: told memory could not be created; nobody is told this run" >&2; exit "$rc"; }
 owners="${DREAMTEAM_REPO_OWNERS:-$HOME/.config/dreamteam/repo-owners.tsv}"
 owner_of() {   # directory name → lane (a plain lane name from the map), else the lead
   local o=""

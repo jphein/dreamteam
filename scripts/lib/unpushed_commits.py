@@ -28,7 +28,8 @@ Read-only: git runs with GIT_OPTIONAL_LOCKS=0, no hooks, no fsmonitor, no prompt
 `symbolic-ref`, `show-ref`, `rev-parse`, `remote` and `rev-list`, each under one timeout. A PARTIAL clone (promisor
 remote) is not inspected at all and counts as an error: on a git older than 2.45 a missing object there could
 start a fetch, which writes. A HEAD that exists but cannot be resolved to a commit is an error, never "empty".
-Directory names with a tab or newline are reported as errors by position, never printed raw.
+A directory whose name holds a control character (tab, newline, ...) is not inspected: it is an error, listed
+with each such character shown as "?". A directory that cannot be looked into is an error too, never skipped.
 Exit: 0 RESULT printed · 2 a root is not a readable directory (nothing after it is trusted) · 22 bad arguments.
 """
 import os
@@ -61,6 +62,11 @@ def git(repo, *args):
     """stdout text, or None when git did not exit 0 in time."""
     rc, out = run(repo, *args)
     return out if rc == 0 else None
+
+
+def plain(name):
+    """A directory name as one printable TSV field: every control character becomes "?"."""
+    return "".join("?" if (ord(c) < 32 or ord(c) == 127) else c for c in name)
 
 
 def stamps(text):
@@ -125,14 +131,30 @@ def main(argv):
         except OSError:
             print(f"unpushed_commits: cannot list {root}", file=sys.stderr)
             return 2
-        for i, name in enumerate(names):
+        for name in names:
             path = os.path.join(root, name)
             if os.path.islink(path) or not os.path.isdir(path):
                 continue
-            if not os.path.lexists(os.path.join(path, ".git")):
+            # Is it a repository? Only "there is no .git here" makes it not one. A directory we may not look into
+            # (or any other failure to ask) is a repository we could not measure, never a directory we may skip.
+            try:
+                os.lstat(os.path.join(path, ".git"))
+            except FileNotFoundError:
+                continue
+            except OSError:
+                tot["repos"] += 1
+                tot["errors"] += 1
+                print(f"error\t{root}/{plain(name)}\t0\t0")
                 continue
             tot["repos"] += 1
-            shown = path if not any(c in name for c in "\t\n\r") else f"{root}/<entry {i} with an odd name>"
+            if plain(name) != name:
+                # A name with a control character cannot be written as one TSV field. It is not inspected and is
+                # an error under its name with each such character shown as "?": stable from run to run, and
+                # never a finding, so it has no owner and no memory of its own.
+                tot["errors"] += 1
+                print(f"error\t{root}/{plain(name)}\t0\t0")
+                continue
+            shown = path
             kind, n, oldest = look(path)
             if kind == "error":
                 tot["errors"] += 1

@@ -186,6 +186,43 @@ grep -q $'^no-remote\t'"$T/mem/keep"'$' "$T/state/dreamteam/unpushed-commits.tol
 mv "$T/mem/keep/.git/HEAD.aside" "$T/mem/keep/.git/HEAD"
 ROOTS_OVERRIDE="$T/mem" run; [ "$(mails)" = 1 ] && ok || bad "told again after an unreadable run ($(mails))"
 
+# 13c. review round 2. A repository directory that cannot be looked into is unreadable, never skipped.
+if [ "$(id -u)" != 0 ]; then
+  mkdir "$T/perm"; mkrepo "$T/perm/shut" shut; mkrepo "$T/perm/open" open2; chmod 000 "$T/perm/shut"
+  ROOTS_OVERRIDE="$T/perm" run
+  case "$(line)" in "CHECK unpushed-commits warn · 0 of 2 repos ahead for a day or more, 0 without a remote, 1 unreadable · list: "*) ok ;; *) bad "a closed repo dir was skipped: $(line)" ;; esac
+  grep -q $'^error\t'"$T/perm/shut"$'\t' "$T/state/dreamteam/unpushed-commits.list" && ok || bad "closed repo dir not listed"
+  chmod 700 "$T/perm/shut"
+  ROOTS_OVERRIDE="$T/perm" run; case "$(line)" in "CHECK unpushed-commits ok · 0 of 2 "*) ok ;; *) bad "control for the closed dir: $(line)" ;; esac
+fi
+# a directory with no .git at all is still simply not a repository (control for the rule above)
+mkdir -p "$T/perm2/justadir"; mkrepo "$T/perm2/r" r2; ROOTS_OVERRIDE="$T/perm2" run
+case "$(line)" in "CHECK unpushed-commits ok · 0 of 1 "*) ok ;; *) bad "a plain dir was counted: $(line)" ;; esac
+# a symlink where the memory or the list should be is refused BEFORE anything is opened: nothing is written through it
+mkdir "$T/sl"; mkrepo "$T/sl/victim" victim; echo "sentinel" > "$T/sl/victim/keepme.txt"; mkdir -p "$T/slstate/dreamteam"
+for f in unpushed-commits.told unpushed-commits.list; do
+  rm -f "$T/slstate/dreamteam/"unpushed-commits.*; ln -s "$T/sl/victim/keepme.txt" "$T/slstate/dreamteam/$f"
+  DREAMTEAM_UNPUSHED_ROOTS="$T/sl" DREAMTEAM_NOW="$NOW" XDG_STATE_HOME="$T/slstate" DREAMTEAM_CHECKS_DIR="$T/checks" DREAMTEAM_MAIL_CMD="$T/bin/mail" \
+    DREAMTEAM_LEAD_MAIL=lead DREAMTEAM_CHECK_HOST=familiar HOME="$T" bash "$S" >/dev/null 2>&1
+  case "$(line)" in "CHECK unpushed-commits fail · a state file is a symlink or not a plain file of ours: $f"*) : ;; *) bad "symlinked $f not refused: $(line)" ;; esac
+  [ "$(cat "$T/sl/victim/keepme.txt")" = "sentinel" ] && [ -L "$T/slstate/dreamteam/$f" ] || bad "something was written through the symlinked $f"
+done
+[ "$(cat "$T/sl/victim/keepme.txt")" = "sentinel" ] && ok || bad "the repository file behind the symlink changed"
+rm -f "$T/slstate/dreamteam/"unpushed-commits.*
+# a first run with no memory file creates it by rename and works
+DREAMTEAM_UNPUSHED_ROOTS="$T/sl" DREAMTEAM_NOW="$NOW" XDG_STATE_HOME="$T/slstate" DREAMTEAM_CHECKS_DIR="$T/checks" DREAMTEAM_MAIL_CMD="$T/bin/mail" \
+  DREAMTEAM_LEAD_MAIL=lead DREAMTEAM_CHECK_HOST=familiar HOME="$T" bash "$S" >/dev/null 2>&1
+[ -f "$T/slstate/dreamteam/unpushed-commits.told" ] && [ ! -L "$T/slstate/dreamteam/unpushed-commits.told" ] && ok || bad "first run did not create the memory file"
+# a directory whose name holds a control character is not inspected: an error under a stable printable name,
+# never a finding, nobody told; a sibling that sorts before it does not change that name
+mkdir "$T/odd"; oddn="$T/odd/we"$'\t'"ird"; mkrepo "$oddn"; : > "$T/mail.log"
+ROOTS_OVERRIDE="$T/odd" run
+case "$(line)" in "CHECK unpushed-commits warn · 0 of 1 repos ahead for a day or more, 0 without a remote, 1 unreadable · list: "*) ok ;; *) bad "odd name inspected: $(line)" ;; esac
+a=$(cat "$T/state/dreamteam/unpushed-commits.list"); [ "$a" = "error"$'\t'"$T/odd/we?ird"$'\t0\t0' ] && ok || bad "odd name row: $a"
+mkrepo "$T/odd/aaa" aaa; ROOTS_OVERRIDE="$T/odd" run
+grep -qxF "$a" "$T/state/dreamteam/unpushed-commits.list" && ok || bad "the odd name's row changed when a sibling was added"
+[ "$(mails)" = 0 ] && ok || bad "an uninspected odd-named dir was told as a finding"
+
 # 14. arguments, lock, units
 run --nope 2>/dev/null; [ "$?" = 22 ] && ok || bad "bad argument not 22"
 run --list extra 2>/dev/null; [ "$?" = 22 ] && ok || bad "extra argument not 22"
