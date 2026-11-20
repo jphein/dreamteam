@@ -7,14 +7,31 @@
 #
 # What: every tick, look at the lead pane. Alive (a child of the pane's shell is running) → `ok`. Dead at a shell prompt
 # with the resume hint in the pane history → type the pane's own launch line (`claude --resume <id> …`) and verify.
-# Dead with no hint → `fail` (a human exited it on purpose, or the history is gone): mail, never guess an id.
+# Dead with no hint → the id and pane recorded in lead.session by the lead's own SessionStart hook (2026-11-19: the
+# lead died 14:07 and nothing relaunched it); neither → `fail`: mail, never guess an id.
 # Guards: a kill-switch file; no relaunch while a client typed in the session within 60 s; at most 3 relaunches/hour.
 #
 # CHECK lead-liveness <ok|warn|fail> · <detail> · every 2 min, owner Sen      (dreamteam docs/CHECKS.md)
 set -u
-PANE="${LEAD_PANE:-spire:0.0}"
-SESSION="${PANE%%:*}"
 STATE="${LEAD_WATCHDOG_STATE:-$HOME/.local/state/dreamteam}"
+# lead.session (written by scripts/lead-session-write.sh at the lead's SessionStart): where the lead really runs and
+# its session id. Read as data, line by line, each value checked against a strict shape; never sourced. ONLY the id
+# and the pane are taken from it. The command typed into the shell is always built here, from this script's own
+# launch-env path and the validated id: the file's `launch=` line is information for a person and is never typed
+# (a line of the right shape could still name another file to source).
+UUID='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+f_sid=""; f_pane=""
+LS="$STATE/lead.session"
+if [ -f "$LS" ] && [ ! -L "$LS" ]; then
+    while IFS= read -r l; do
+        case "$l" in
+            session=*) [[ "${l#session=}" =~ ^$UUID$ ]] && f_sid="${l#session=}" ;;
+            pane=*)    [[ "${l#pane=}" =~ ^[A-Za-z0-9_.-]+:[0-9]+\.[0-9]+$ ]] && f_pane="${l#pane=}" ;;
+        esac
+    done < "$LS"
+fi
+PANE="${LEAD_PANE:-${f_pane:-spire:0.0}}"
+SESSION="${PANE%%:*}"
 CHECKS="${CHECKS_DIR:-$HOME/.local/state/checks}"
 OFF="$STATE/lead-watchdog.off"
 HIST="$STATE/lead-watchdog.relaunches"      # one epoch per relaunch
@@ -43,11 +60,15 @@ fi
 
 text=$(tm capture-pane -p -t "$PANE" -S -300 2>/dev/null)
 sid=$(grep -oE 'claude --resume [0-9a-f-]{36}' <<<"$text" | tail -1 | awk '{print $3}')
+src="the pane's hint"
+if [ -z "$sid" ] && [ -n "$f_sid" ] && [ "$PANE" = "${f_pane:-}" ]; then sid="$f_sid"; src="lead.session"; fi   # no hint needed
 if [ -z "$sid" ]; then
-    line fail "pane $PANE is at a shell with no 'Resume this session with' hint: not relaunching (an exit on purpose, or history lost)"
-    tell "lead pane $PANE is dead with no resume hint; relaunch by hand"
+    line fail "pane $PANE is at a shell with no 'Resume this session with' hint and no lead.session for it: not relaunching"
+    tell "lead pane $PANE is dead with no resume hint and no lead.session; relaunch by hand"
     exit 0
 fi
+[[ "$LAUNCH_ENV" =~ ^/[A-Za-z0-9_./-]+$ && "$sid" =~ ^$UUID$ ]] || { line fail "the launch-env path or the session id is not in a plain form: not typing anything"; tell "lead-watchdog: launch env or id not plain; relaunch by hand"; exit 0; }
+launch=". $LAUNCH_ENV; claude --resume $sid --permission-mode bypassPermissions"
 
 # Someone typing in the session? (a human may be at the keys)
 act=$(tm display -p -t "$PANE" '#{client_activity}' 2>/dev/null || echo 0); now=$(date +%s)
@@ -71,13 +92,22 @@ case "$last" in
     *) line warn "pane $PANE dead (resume hint for ${sid:0:8}) but the last line is not a prompt: '${last:0:60}'"; exit 0 ;;
 esac
 
+# The input line must be EMPTY before anything is typed: a prompt-looking last line can still hold a half-typed
+# command (e.g. `rm x #`), and our Enter would run it. Ctrl-E moves to the end of the line and Ctrl-U then discards
+# everything before the cursor, i.e. the whole line, wherever the cursor was (default bash/readline and zsh/zle
+# bindings; a shell with other bindings or a multi-line edit in progress is not covered). Then the pane is looked
+# at again and must still be a shell with no child.
+tm send-keys -t "$PANE" C-e
+tm send-keys -t "$PANE" C-u
+sleep 0.3
+if [ -n "$(pgrep -P "$pane_pid" 2>/dev/null)" ]; then line warn "pane $PANE started something while being checked: nothing typed"; exit 0; fi
 echo "$now" >> "$HIST"
-tm send-keys -t "$PANE" -l ". $LAUNCH_ENV; claude --resume $sid --permission-mode bypassPermissions"
+tm send-keys -t "$PANE" -l "$launch"
 sleep 0.3
 tm send-keys -t "$PANE" Enter
 for i in $(seq 1 "${LEAD_WATCHDOG_WAIT:-20}"); do
     sleep 1
-    [ -n "$(pgrep -P "$pane_pid" 2>/dev/null)" ] && { line ok "relaunched ${sid:0:8} in $PANE at $(date +%H:%M:%S) (child pid $(pgrep -P "$pane_pid" | head -1))"; tell "relaunched the lead (${sid:0:8}) in $PANE"; exit 0; }
+    [ -n "$(pgrep -P "$pane_pid" 2>/dev/null)" ] && { line ok "relaunched ${sid:0:8} in $PANE at $(date +%H:%M:%S) from $src (child pid $(pgrep -P "$pane_pid" | head -1))"; tell "relaunched the lead (${sid:0:8}) in $PANE"; exit 0; }
 done
 line fail "typed the relaunch for ${sid:0:8} in $PANE but no child appeared in ${LEAD_WATCHDOG_WAIT:-20} s"
 tell "relaunch of ${sid:0:8} typed but nothing started; look at $PANE"
