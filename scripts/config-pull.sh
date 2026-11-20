@@ -23,7 +23,8 @@
 #
 # Line (docs/CHECKS.md):
 #   CHECK config-pull[-<host>] ok   · main at <sha>, N files updated, all T current · every 10 min, owner Sen
-#   CHECK …                    warn · main at <sha>, N files updated, K local edits left alone · …
+#   CHECK …                    warn · main at <sha>, N files updated, K local edits left alone[, S tracked entries not handled] · …
+#   CHECK …                    fail · D edits displaced during the update: their bytes are kept in <backup dir> · …
 #   CHECK …                    fail · <not initialised | fetch did not work | …> · owner Sen       (unknown is never ok)
 # Environment: CONFIG_PULL_DIR (the live directory, absolute; default ~/.claude).
 # State: ${XDG_STATE_HOME:-~/.local/state}/dreamteam/config-pull/<key of the live dir>/{repo.git,branch,backup/}
@@ -85,14 +86,18 @@ sha=$(r rev-parse --short "$head") || say_fail "cannot read the head"
 bdir="$ST/backup/$(date +%Y%m%d-%H%M%S)-$$"
 out=$(python3 -I "$ROOT/scripts/lib/config_deploy.py" "$REPO" "$head" "$DIR" "$bdir" "$SKIP" 9>&- 2>/dev/null) \
   || say_fail "the deploy pass could not measure (git or the live directory unreadable)"
-[[ "$(tail -1 <<< "$out")" =~ ^RESULT\ total=([0-9]+)\ updated=([0-9]+)\ edits=([0-9]+)\ skipped=[0-9]+$ ]] \
+[[ "$(tail -1 <<< "$out")" =~ ^RESULT\ total=([0-9]+)\ updated=([0-9]+)\ edits=([0-9]+)\ skipped=([0-9]+)\ displaced=([0-9]+)$ ]] \
   || say_fail "the deploy pass gave no result line"
-total="${BASH_REMATCH[1]}"; updated="${BASH_REMATCH[2]}"; edits="${BASH_REMATCH[3]}"
+total="${BASH_REMATCH[1]}"; updated="${BASH_REMATCH[2]}"; edits="${BASH_REMATCH[3]}"; skipped="${BASH_REMATCH[4]}"; displaced="${BASH_REMATCH[5]}"
 rmdir -- "$bdir" 2>/dev/null || true          # empty when nothing was replaced
 
 [ "$total" -gt 0 ] || say_fail "the head tracks no file outside $SKIP"
-if [ "$edits" -gt 0 ]; then
-  check_line "$CHECK" warn "$br at $sha, $updated files updated, $edits local edits left alone" "$OWNER"
+if [ "$displaced" -gt 0 ]; then
+  # an edit was written into a file while it was being replaced: its bytes are in the backup dir, not in the live file
+  check_line "$CHECK" fail "$displaced edits displaced during the update: their bytes are kept in ${bdir/#$HOME/\~}" "$OWNER"
+elif [ "$edits" -gt 0 ] || [ "$skipped" -gt 0 ]; then
+  note="$edits local edits left alone"; [ "$skipped" -eq 0 ] || note="$note, $skipped tracked entries not handled (symlinks or odd names)"
+  check_line "$CHECK" warn "$br at $sha, $updated files updated, $note" "$OWNER"
 else
   check_line "$CHECK" ok "$br at $sha, $updated files updated, all $total current" "$OWNER"
 fi

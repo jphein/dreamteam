@@ -3,7 +3,7 @@
 
     python3 -I config_deploy.py <bare-git-dir> <head-sha> <live-dir> <backup-dir> <skip-prefix>
 
-Prints one line:  RESULT total=<T> updated=<U> edits=<E> skipped=<S>
+Prints one line:  RESULT total=<T> updated=<U> edits=<E> skipped=<S> displaced=<D>
 Exit 0 when the pass completed (whatever it found), 2 when it could not measure (git or the live root unusable).
 
 The one rule: a live file is replaced only when nothing can be lost by it: it is absent, or its exact bytes are a
@@ -22,7 +22,11 @@ How it stays safe against the tree changing underneath it:
   wrote into the old file in between is seen by the second look and its bytes are put back (through a unique temp
   file, never a fixed name). If the hard link cannot be made (another filesystem), the file is NOT replaced: a copy
   would not be a witness.
-- Not excluded: an editor that replaces the live file by rename between our link and our rename (two system calls).
+- An in-place write that lands after the witness was judged is NOT put back automatically: its bytes are in the
+  witness (kept in the backup directory) and the pass reports "displaced".
+- Not excluded: an editor that REPLACES the live file (by rename, i.e. a new inode) between our witness link and our
+  rename. That interval covers reading the witness and, the first time a path is judged, one `git log` for it: short,
+  but not just two system calls. Such a replacement would be lost; the job says so and does not claim otherwise.
 """
 import hashlib
 import os
@@ -53,7 +57,7 @@ class Deployer:
     def __init__(self, gitdir, head, live, backup, skip):
         self.gitdir, self.head, self.live, self.backup, self.skip = gitdir, head, live, backup, skip
         self.history = {}
-        self.total = self.updated = self.edits = self.skipped = 0
+        self.total = self.updated = self.edits = self.skipped = self.displaced = 0
 
     def versions(self, path):
         """Every blob id a commit reachable from the head recorded at exactly this path (whole output consumed)."""
@@ -122,6 +126,26 @@ class Deployer:
             os.close(fd)
 
     @staticmethod
+    def ensure_exec(dfd, name):
+        """Make a regular file executable through a descriptor opened with O_NOFOLLOW (never through a path that
+        could have become a symlink). True when it is executable afterwards."""
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=dfd)
+        except OSError:
+            return False
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                return False
+            if not st.st_mode & 0o100:
+                os.fchmod(fd, (st.st_mode | 0o111) & 0o777)
+            return True
+        except OSError:
+            return False
+        finally:
+            os.close(fd)
+
+    @staticmethod
     def write_temp(dfd, data, mode):
         """A uniquely named file with <data> in the pinned directory; returns its name."""
         for _ in range(20):
@@ -163,13 +187,8 @@ class Deployer:
                 self.edits += 1
                 return
             if cur is not None and blob_id(cur) == blob:
-                if fmode == 0o755:
-                    try:
-                        st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
-                        if not st.st_mode & 0o100:
-                            os.chmod(name, (st.st_mode | 0o111) & 0o777, dir_fd=dfd)
-                    except OSError:
-                        pass
+                if fmode == 0o755 and not self.ensure_exec(dfd, name):
+                    self.edits += 1            # the repo wants it executable and that could not be made so
                 return
             new = git(self.gitdir, "cat-file", "blob", blob)
             if blob_id(new) != blob:
@@ -203,12 +222,10 @@ class Deployer:
                     tmp = None
                     again = self.read_at(bfd, os.path.basename(bak))
                     if not isinstance(again, bytes) or not self.lossless(path, again):
-                        # an editor wrote into the old file after it was judged: its bytes go back, by a unique name
-                        if isinstance(again, bytes):
-                            st = os.stat(os.path.basename(bak), dir_fd=bfd, follow_symlinks=False)
-                            rec = self.write_temp(dfd, again, st.st_mode & 0o777)
-                            os.rename(rec, name, src_dir_fd=dfd, dst_dir_fd=dfd)
-                        self.edits += 1
+                        # An editor wrote into the old file after it was judged. Its bytes are IN the witness, which
+                        # stays in the backup directory. Nothing is put back automatically: a second rename could
+                        # itself displace something newer. The pass reports it; a person or a lane restores it.
+                        self.displaced += 1
                         return
                     self.updated += 1
                 finally:
@@ -261,7 +278,7 @@ def main(argv):
     except Unmeasured as e:
         print(f"config_deploy: could not measure ({e})", file=sys.stderr)
         return 2
-    print(f"RESULT total={d.total} updated={d.updated} edits={d.edits} skipped={d.skipped}")
+    print(f"RESULT total={d.total} updated={d.updated} edits={d.edits} skipped={d.skipped} displaced={d.displaced}")
     return 0
 
 

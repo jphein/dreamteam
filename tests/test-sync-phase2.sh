@@ -112,8 +112,9 @@ core() { python3 -I "$TMP/drv.py" "$ROOT/scripts/lib" "$1" "$2" -- "$stdir/repo.
 # an editor writing INTO the file while it is being replaced gets its bytes back; no fixed recovery name is used
 echo v1 > "$C/hooks/a.sh"; echo sentinel > "$C/hooks/a.sh.config-pull-edit"; echo outside > "$TMP/outside.txt"; ln -s "$TMP/outside.txt" "$C/hooks/a.sh.recover"
 out=$(core inplace "written in place mid-replace")
-[ "$(cat "$C/hooks/a.sh")" = "written in place mid-replace" ] && grep -q "edits=1" <<< "$out" && ok "an in-place write landing during the replace is detected and put back" || bad "in-place race: '$(cat "$C/hooks/a.sh")' / $out"
-[ "$(cat "$C/hooks/a.sh.config-pull-edit")" = sentinel ] && [ "$(cat "$TMP/outside.txt")" = outside ] && ok "the recovery uses a unique temp name: a file and a symlink at fixed-looking names are untouched" || bad "recovery clobbered a neighbour"
+grep -q "displaced=1" <<< "$out" && [ "$(cat "$TMP/bk-inplace/hooks/a.sh")" = "written in place mid-replace" ] && ok "an in-place write landing during the replace is detected; its bytes are kept in the backup dir" || bad "in-place race: $out / $(cat "$TMP/bk-inplace/hooks/a.sh" 2>&1)"
+[ "$(cat "$C/hooks/a.sh")" = v3 ] && ok "nothing is put back automatically (a second rename could displace something newer)" || bad "live after displacement: $(cat "$C/hooks/a.sh")"
+[ "$(cat "$C/hooks/a.sh.config-pull-edit")" = sentinel ] && [ "$(cat "$TMP/outside.txt")" = outside ] && ok "neighbour files and symlinks with fixed-looking names are untouched" || bad "a neighbour was clobbered"
 rm -f "$C/hooks/a.sh.config-pull-edit" "$C/hooks/a.sh.recover"
 # no hard-link witness (backup dir on another filesystem): the file is NOT replaced, even though its bytes are an old version
 echo v1 > "$C/hooks/a.sh"
@@ -128,6 +129,25 @@ rm -f "$C/hooks"; mv "$C/hooks.moved" "$C/hooks"
 # a file that appears where an absent one is being created is not replaced
 rm -f "$C/hooks/c.sh"
 out=$(core appear "appeared just now"); [ "$(cat "$C/hooks/c.sh")" = "appeared just now" ] && ok "a file appearing at an absent path during the pass is kept (no-replace publish)" || bad "appearing file replaced: $out"
+# the exec bit is set through a no-follow descriptor: a symlink swapped in at the leaf is not chmod-ed through
+echo target > "$TMP/chmod-target.txt"; chmod 600 "$TMP/chmod-target.txt"; mv "$C/hooks/a.sh" "$C/hooks/a.sh.real"; ln -s "$TMP/chmod-target.txt" "$C/hooks/a.sh"
+bash "$CP" >/dev/null; [ "$(stat -c %a "$TMP/chmod-target.txt")" = 600 ] && ok "a symlink at an executable tracked path: its target's mode is never changed" || bad "chmod followed a symlink: $(stat -c %a "$TMP/chmod-target.txt")"
+rm -f "$C/hooks/a.sh"; mv "$C/hooks/a.sh.real" "$C/hooks/a.sh"; chmod 644 "$C/hooks/a.sh"; bash "$CP" >/dev/null
+[ -x "$C/hooks/a.sh" ] && ok "a current file that lost its exec bit gets it back" || bad "exec bit not restored"
+# tracked entries the job does not handle are never hidden behind an ok
+ln -s a.sh "$TMP/w/hooks/link.sh"; q -C "$TMP/w" add hooks/link.sh; q -C "$TMP/w" commit -m symlink; q -C "$TMP/w" push origin main
+out=$(bash "$CP"); case "$out" in "CHECK config-pull warn · "*" local edits left alone, 1 tracked entries not handled (symlinks or odd names) · "*) ok "a tracked symlink: warn naming the unhandled entry, never 'all current'" ;; *) bad "tracked symlink: '$out'" ;; esac
+[ ! -e "$C/hooks/link.sh" ] && [ ! -L "$C/hooks/link.sh" ] && ok "and the symlink is not created in the live dir" || bad "tracked symlink was written"
+q -C "$TMP/w" rm -q hooks/link.sh; q -C "$TMP/w" commit -m nosymlink; q -C "$TMP/w" push origin main; bash "$CP" >/dev/null
+# a displaced edit turns the whole line to fail, naming where the bytes are
+mkdir -p "$TMP/fakeroot/scripts/lib"; cp "$ROOT/scripts/lib/check-line.sh" "$TMP/fakeroot/scripts/lib/"; cp "$CP" "$TMP/fakeroot/scripts/"
+printf 'print("RESULT total=4 updated=1 edits=0 skipped=0 displaced=1")\n' > "$TMP/fakeroot/scripts/lib/config_deploy.py"
+out=$(CLAUDE_PLUGIN_ROOT="$TMP/fakeroot" bash "$TMP/fakeroot/scripts/config-pull.sh")
+case "$out" in "CHECK config-pull fail · 1 edits displaced during the update: their bytes are kept in "*"/backup/"*) ok "a displaced edit: fail, with the backup dir in the line" ;; *) bad "displaced line: '$out'" ;; esac
+printf 'print("nothing useful")\n' > "$TMP/fakeroot/scripts/lib/config_deploy.py"
+out=$(CLAUDE_PLUGIN_ROOT="$TMP/fakeroot" bash "$TMP/fakeroot/scripts/config-pull.sh")
+case "$out" in "CHECK config-pull fail · the deploy pass gave no result line · "*) ok "no RESULT line from the core: fail, never a count" ;; *) bad "missing RESULT: '$out'" ;; esac
+
 # a long history: the matching old version is found although it is far from the end of git's output
 for i in $(seq 1 60); do echo "rev $i" > "$TMP/w/hooks/long.sh"; q -C "$TMP/w" add hooks/long.sh; q -C "$TMP/w" commit -m "long $i"; done; q -C "$TMP/w" push origin main
 echo "rev 2" > "$C/hooks/long.sh"; out=$(bash "$CP")
