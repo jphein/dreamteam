@@ -37,7 +37,7 @@ import subprocess
 import sys
 
 ENV = dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0", GIT_NO_LAZY_FETCH="1", LC_ALL="C")
-for k in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+for k in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_DISCOVERY_ACROSS_FILESYSTEM"):
     ENV.pop(k, None)
 GIT = ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never"]
 try:
@@ -50,8 +50,11 @@ except ValueError:
 
 def run(repo, *args):
     """(exit status, stdout text) of ONE git call under the timeout; (None, "") when it could not run or finish."""
+    # Git must answer for THIS directory or not at all: with the parent as the ceiling it cannot climb to an
+    # enclosing repository when this one's .git is broken (which would report the parent's state as this one's).
+    env = dict(ENV, GIT_CEILING_DIRECTORIES=os.path.dirname(os.path.abspath(repo)))
     try:
-        p = subprocess.run(GIT + ["-C", repo] + list(args), env=ENV, stdin=subprocess.DEVNULL,
+        p = subprocess.run(GIT + ["-C", repo] + list(args), env=env, stdin=subprocess.DEVNULL,
                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=TIMEOUT)
     except (OSError, subprocess.TimeoutExpired):
         return None, ""

@@ -223,6 +223,31 @@ mkrepo "$T/odd/aaa" aaa; ROOTS_OVERRIDE="$T/odd" run
 grep -qxF "$a" "$T/state/dreamteam/unpushed-commits.list" && ok || bad "the odd name's row changed when a sibling was added"
 [ "$(mails)" = 0 ] && ok || bad "an uninspected odd-named dir was told as a finding"
 
+# 13d. review round 3. A broken repository inside a clean ENCLOSING repository is unreadable: git must not climb to
+# the parent and report the parent's state as the child's. (The root here is itself a repository.)
+mkrepo "$T/enc" enc; mkdir -p "$T/enc/kid/.git"; mkrepo "$T/enc/good" encgood
+ROOTS_OVERRIDE="$T/enc" run
+case "$(line)" in "CHECK unpushed-commits warn · 0 of 2 repos ahead for a day or more, 0 without a remote, 1 unreadable · list: "*) ok ;; *) bad "a broken child read as its parent: $(line)" ;; esac
+grep -q $'^error\t'"$T/enc/kid"$'\t' "$T/state/dreamteam/unpushed-commits.list" && ok || bad "broken child not listed"
+# the state dir and the checks dir may not lie inside an inspected root, through any symlink: nothing is created there
+mkdir "$T/sy"; mkrepo "$T/sy/victim2" victim2; mkdir -p "$T/systate"; ln -s "$T/sy/victim2" "$T/systate/dreamteam"
+before=$(find "$T/sy/victim2" | sort | sha256sum)
+DREAMTEAM_UNPUSHED_ROOTS="$T/sy" DREAMTEAM_NOW="$NOW" XDG_STATE_HOME="$T/systate" DREAMTEAM_CHECKS_DIR="$T/checks" DREAMTEAM_MAIL_CMD="$T/bin/mail" \
+  DREAMTEAM_LEAD_MAIL=lead DREAMTEAM_CHECK_HOST=familiar HOME="$T" bash "$S" >/dev/null 2>&1
+case "$(line)" in "CHECK unpushed-commits fail · the state dir lies inside an inspected root"*) ok ;; *) bad "state dir inside a root accepted: $(line)" ;; esac
+[ "$(find "$T/sy/victim2" | sort | sha256sum)" = "$before" ] && ok || bad "files were created inside the repository: $(find "$T/sy/victim2" -newer "$T/systate" | head -n 3)"
+old=$(line); mkdir -p "$T/sy/victim2/sub"
+DREAMTEAM_UNPUSHED_ROOTS="$T/sy" DREAMTEAM_NOW="$NOW" XDG_STATE_HOME="$T/state" DREAMTEAM_CHECKS_DIR="$T/sy/victim2/sub/checks" DREAMTEAM_MAIL_CMD="$T/bin/mail" \
+  DREAMTEAM_LEAD_MAIL=lead DREAMTEAM_CHECK_HOST=familiar HOME="$T" bash "$S" >/dev/null 2>&1; rc=$?
+[ "$rc" = 1 ] && [ ! -e "$T/sy/victim2/sub/checks" ] && [ "$(line)" = "$old" ] && ok || bad "a checks dir inside a root was written to (rc $rc)"
+# a directory name with literal backslashes finds its own owner (awk -v would read \n and \\ as escapes)
+mkdir "$T/bs"; mkrepo "$T/bs/"'we\nird'; mkrepo "$T/bs/"'back\\slash'; mkrepo "$T/bs/"'wenird'
+printf '%s\t%s\n' 'we\nird' lane-a 'back\\slash' lane-b 'wenird' lane-c > "$T/cfg/owners.tsv"; : > "$T/mail.log"
+ROOTS_OVERRIDE="$T/bs" run
+grep -q $'^lane-a\t.*we\\\\nird (no-remote' "$T/mail.log" && grep -q $'^lane-b\t.*back\\\\\\\\slash (no-remote' "$T/mail.log" && grep -q $'^lane-c\t.*wenird (no-remote' "$T/mail.log" && ok || bad "backslash names not routed to their owners: $(cut -c1-70 "$T/mail.log" | tr '\n' '|')"
+[ "$(mails)" = 3 ] && ok || bad "three owners expected, $(mails) messages"
+printf 'beta\tluna-web\ngamma\t-oBad Name\n' > "$T/cfg/owners.tsv"
+
 # 14. arguments, lock, units
 run --nope 2>/dev/null; [ "$?" = 22 ] && ok || bad "bad argument not 22"
 run --list extra 2>/dev/null; [ "$?" = 22 ] && ok || bad "extra argument not 22"

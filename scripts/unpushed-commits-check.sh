@@ -57,6 +57,21 @@ now="${DREAMTEAM_NOW:-$(date +%s)}"; [[ "$now" =~ ^[0-9]{1,12}$ ]] || now=$(date
 lead="${DREAMTEAM_LEAD_MAIL:-sen}"
 [[ "$lead" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || { check_line "$NAME" fail "DREAMTEAM_LEAD_MAIL is not a plain lane name" "$OWNER"; exit $?; }
 
+for r in "${ROOTS[@]}"; do
+  case "$r" in /*) ;; *) check_line "$NAME" fail "a root is not an absolute path" "$OWNER"; exit $? ;; esac
+  [ -d "$r" ] && [ -r "$r" ] && [ -x "$r" ] || { check_line "$NAME" fail "${r/#$HOME/\~} is not a readable directory" "$OWNER"; exit $?; }
+done
+# This check never writes into what it inspects. The two directories it writes to (its state dir and the dir the
+# line is published in) are resolved through every symlink BEFORE anything is created, and neither may lie inside
+# a root. A symlinked ancestor pointing into a repository is caught here, not after the first file exists.
+checks_dir="${DREAMTEAM_CHECKS_DIR:-$HOME/.local/state/checks}"
+state_real=$(realpath -m -- "$STATE" 2>/dev/null) && checks_real=$(realpath -m -- "$checks_dir" 2>/dev/null) \
+  && [ -n "$state_real" ] && [ -n "$checks_real" ] || { echo "unpushed-commits-check: cannot resolve the state or checks dir; nothing written" >&2; exit 1; }
+for r in "${ROOTS[@]}"; do
+  rr=$(realpath -- "$r" 2>/dev/null) && [ -n "$rr" ] || { echo "unpushed-commits-check: cannot resolve a root; nothing written" >&2; exit 1; }
+  case "$checks_real/" in "$rr/"*) echo "unpushed-commits-check: the checks dir lies inside an inspected root; nothing written" >&2; exit 1 ;; esac
+  case "$state_real/" in "$rr/"*) check_line "$NAME" fail "the state dir lies inside an inspected root: nothing was written there" "$OWNER"; exit $? ;; esac
+done
 mkdir -p "$STATE" 2>/dev/null && [ -d "$STATE" ] || { check_line "$NAME" fail "no state dir $STATE" "$OWNER"; exit $?; }
 LOCK="$STATE/unpushed-commits.lock"
 if [ -L "$LOCK" ] || { [ -e "$LOCK" ] && { [ ! -f "$LOCK" ] || [ ! -O "$LOCK" ]; }; }; then
@@ -72,11 +87,6 @@ for f in "$told" "$STATE/unpushed-commits.list"; do
   if [ -L "$f" ] || { [ -e "$f" ] && { [ ! -f "$f" ] || [ ! -O "$f" ]; }; }; then
     check_line "$NAME" fail "a state file is a symlink or not a plain file of ours: $(basename -- "$f")" "$OWNER"; exit $?
   fi
-done
-
-for r in "${ROOTS[@]}"; do
-  case "$r" in /*) ;; *) check_line "$NAME" fail "a root is not an absolute path" "$OWNER"; exit $? ;; esac
-  [ -d "$r" ] && [ -r "$r" ] && [ -x "$r" ] || { check_line "$NAME" fail "${r/#$HOME/\~} is not a readable directory" "$OWNER"; exit $?; }
 done
 
 # The measurement: idle I/O and low priority where the tools exist (the server's copy is on a slow disk).
@@ -132,7 +142,8 @@ owners="${DREAMTEAM_REPO_OWNERS:-$HOME/.config/dreamteam/repo-owners.tsv}"
 owner_of() {   # directory name → lane (a plain lane name from the map), else the lead
   local o=""
   if [ -f "$owners" ] && [ ! -L "$owners" ]; then
-    o=$(awk -F '\t' -v n="$1" '$1 == n { print $2; exit }' "$owners" 2>/dev/null)
+    # the name goes through the environment: `awk -v` would read backslash sequences in a directory name
+    o=$(LOOKUP_NAME="$1" awk -F '\t' '$1 == ENVIRON["LOOKUP_NAME"] { print $2; exit }' "$owners" 2>/dev/null)
   fi
   [[ "$o" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] && printf '%s' "$o" || printf '%s' "$lead"
 }
