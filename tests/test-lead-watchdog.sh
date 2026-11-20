@@ -121,7 +121,10 @@ fi
 # the hook is bounded: through the REGISTERED command line, with stdin held open and with a tmux that never answers
 CMD=$(python3 -I -c "import json,sys; h=json.load(open(sys.argv[1])); e=[x for g in h['hooks']['SessionStart'] for x in g['hooks'] if 'lead-session-write.sh' in x['command']]; assert len(e)==1 and 0 < e[0]['timeout'] <= 10; print(e[0]['command'])" "$here/hooks/hooks.json") \
   && ok "the writer is registered once on SessionStart with a timeout in seconds" || bad "hooks.json registration"
-case "$CMD" in "timeout 5 bash "*"/scripts/lead-session-write.sh\" || true") ok "the registered command is time-boxed and cannot fail the session start" ;; *) bad "registered command: $CMD" ;; esac
+case "$CMD" in "bash \"\${CLAUDE_PLUGIN_ROOT}/scripts/lead-session-write.sh\"") ok "the registered command is the plain bash form (the script time-boxes itself)" ;; *) bad "registered command: $CMD" ;; esac
+grep -q 'LEAD_SESSION_WRITE_INNER=1 timeout 5 bash' "$WR" && ok "the script runs itself under timeout 5 with an outer exit 0" || bad "no self time-box in the writer"
+# a crash inside the hook still exits 0
+( cd "$T/home" && printf 'not json' | HOME="$T/home" TMUX_PANE="%999" DREAMTEAM_LEAD_SESSION=lwtest bash "$WR" ); [ $? = 0 ] && ok "a pane that does not exist and bad input: still exit 0" || bad "writer exit on bad input"
 fresh ""; pane_id=$(tmux -L lwtest display -p -t lwtest:0.0 '#{pane_id}'); rm -f "$T/state/lead.session"
 # stdin is a FIFO that a background writer keeps open and never writes to: only the HOOK is timed, not a pipeline
 mkfifo "$T/held"; sleep 30 > "$T/held" & holder=$!

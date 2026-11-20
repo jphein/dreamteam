@@ -13,8 +13,14 @@
 # "The lead" = a session inside tmux whose tmux session is $DREAMTEAM_LEAD_SESSION (default `spire`) and whose
 # working directory is $HOME (FOR-AGENTS: the fleet lead is tmux `spire`, Claude in ~). Any other session: nothing.
 # A hook must never block a session start: every path exits 0 and prints nothing, every wait is bounded (2 s each
-# for stdin, the id parse and tmux), and hooks.json runs it under `timeout 5 … || true` as well.
+# for stdin, the id parse and tmux), and the script runs itself under `timeout 5` with an outer exit 0.
 set -u
+# The whole hook runs once more under `timeout 5`, and this outer call ALWAYS exits 0: a stall or a crash inside can
+# neither hold nor fail a session start. (hooks.json keeps the plain `bash <script>` form every other hook uses.)
+if [ -z "${LEAD_SESSION_WRITE_INNER:-}" ]; then
+    LEAD_SESSION_WRITE_INNER=1 timeout 5 bash "${BASH_SOURCE[0]}" "$@" >/dev/null 2>&1
+    exit 0
+fi
 STATE="${LEAD_WATCHDOG_STATE:-$HOME/.local/state/dreamteam}"
 LEAD_SESSION="${DREAMTEAM_LEAD_SESSION:-spire}"
 ENVF="${LEAD_LAUNCH_ENV:-$HOME/.config/claude-code/env.sh}"

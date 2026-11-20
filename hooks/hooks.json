@@ -220,8 +220,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "timeout 5 bash \"${CLAUDE_PLUGIN_ROOT}/scripts/lead-session-write.sh\" || true",
-            "timeout": 6
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/lead-session-write.sh\"",
+            "timeout": 8
           }
         ]
       }
