@@ -50,6 +50,11 @@ fresh "$HINT"; tmux -L lwtest send-keys -t lwtest:0.0 -l "touch $T/UNINTENDED #"
 out=$(run); sleep 0.5
 [ ! -e "$T/UNINTENDED" ] && grep -q -- '--resume 3f2afe4b-df91-402b-8792-e19b2a007cf6' "$T/claude.args" 2>/dev/null && ok "pending text at the prompt is discarded (Ctrl-U); only the relaunch runs" || bad "pending input ran: $(ls "$T" | tr '\n' ' ') / $out"
 
+# 2c. the same with the cursor moved to the START of the pending text (Ctrl-U alone clears nothing there)
+fresh "$HINT"; tmux -L lwtest send-keys -t lwtest:0.0 -l "; touch $T/UNINTENDED2 #"; tmux -L lwtest send-keys -t lwtest:0.0 C-a; sleep 1.2
+out=$(run); sleep 0.5
+[ ! -e "$T/UNINTENDED2" ] && grep -q -- '--resume 3f2afe4b-df91-402b-8792-e19b2a007cf6' "$T/claude.args" 2>/dev/null && ok "pending text with the cursor at its start is discarded too (Ctrl-E, then Ctrl-U)" || bad "pending suffix ran: $(ls "$T" | tr '\n' ' ') / $out"
+
 # 3. dead without the hint → fail, no relaunch
 fresh "no hint here"; out=$(run)
 grep -q '^CHECK lead-liveness fail · pane lwtest:0.0 is at a shell with no' <<<"$out" && [ ! -e "$T/claude.args" ] && ok "dead without hint → fail, no relaunch" || bad "no hint: $out"
@@ -131,19 +136,19 @@ grep -q 'LEAD_SESSION_WRITE_INNER=1 timeout --kill-after=1 5 bash' "$WR" && ok "
 ( cd "$T/home" && printf 'not json' | HOME="$T/home" TMUX_PANE="%999" DREAMTEAM_LEAD_SESSION=lwtest bash "$WR" ); [ $? = 0 ] && ok "bad input: exit 0" || bad "writer exit on bad input"
 # a real crash of the inner hook (its tmux call kills it) is still exit 0 through the registered command
 mkdir -p "$T/killtmux"; printf '#!/bin/sh\nkill -9 $PPID\nsleep 5\n' > "$T/killtmux/tmux"; chmod +x "$T/killtmux/tmux"
-( cd "$T/home" && printf '{"session_id":"%s"}' "$SID2" | PATH="$T/killtmux:$PATH" HOME="$T/home" TMUX_PANE="%1" DREAMTEAM_LEAD_SESSION=lwtest CLAUDE_PLUGIN_ROOT="$here" bash -c "$CMD" ); rc=$?
+( cd "$T/home" && printf '{"session_id":"%s"}' "$SID2" | PATH="$T/killtmux:$PATH" HOME="$T/home" TMUX_PANE="%1" DREAMTEAM_LEAD_SESSION=lwtest CLAUDE_PLUGIN_ROOT="$here" timeout --kill-after=2 15 bash -c "$CMD" ); rc=$?
 [ "$rc" = 0 ] && ok "the inner hook killed mid-run: the registered command still returns 0" || bad "inner crash: rc=$rc"
 # a tmux that IGNORES SIGTERM cannot hold the hook past its bound (kill-after)
 mkdir -p "$T/stubborn"; printf '#!/bin/bash\ntrap "" TERM\nsleep 40 & wait\nsleep 40\n' > "$T/stubborn/tmux"; chmod +x "$T/stubborn/tmux"
-t0=$(date +%s); ( cd "$T/home" && printf '{"session_id":"%s"}' "$SID2" | PATH="$T/stubborn:$PATH" HOME="$T/home" TMUX_PANE="%1" DREAMTEAM_LEAD_SESSION=lwtest CLAUDE_PLUGIN_ROOT="$here" bash -c "$CMD" ); rc=$?; t1=$(date +%s)
+t0=$(date +%s); ( cd "$T/home" && printf '{"session_id":"%s"}' "$SID2" | PATH="$T/stubborn:$PATH" HOME="$T/home" TMUX_PANE="%1" DREAMTEAM_LEAD_SESSION=lwtest CLAUDE_PLUGIN_ROOT="$here" timeout --kill-after=2 15 bash -c "$CMD" ); rc=$?; t1=$(date +%s)
 [ "$rc" = 0 ] && [ $((t1 - t0)) -le 7 ] && ok "a tmux that ignores SIGTERM: killed, exit 0 inside the harness's 8 s ($((t1 - t0)) s)" || bad "stubborn tmux: rc=$rc after $((t1 - t0)) s"
 fresh ""; pane_id=$(tmux -L lwtest display -p -t lwtest:0.0 '#{pane_id}'); rm -f "$T/state/lead.session"
 # stdin is a FIFO that a background writer keeps open and never writes to: only the HOOK is timed, not a pipeline
 mkfifo "$T/held"; sleep 30 > "$T/held" & holder=$!
-t0=$(date +%s); ( cd "$T/home" && HOME="$T/home" TMUX_PANE="$pane_id" DREAMTEAM_LEAD_SESSION=lwtest CLAUDE_PLUGIN_ROOT="$here" bash -c "$CMD" < "$T/held" ); rc=$?; t1=$(date +%s)
+t0=$(date +%s); ( cd "$T/home" && HOME="$T/home" TMUX_PANE="$pane_id" DREAMTEAM_LEAD_SESSION=lwtest CLAUDE_PLUGIN_ROOT="$here" timeout --kill-after=2 15 bash -c "$CMD" < "$T/held" ); rc=$?; t1=$(date +%s)
 [ "$rc" = 0 ] && [ $((t1 - t0)) -le 8 ] && ok "stdin held open: the registered hook returns 0 within its bound ($((t1 - t0)) s)" || bad "held-open stdin: rc=$rc after $((t1 - t0)) s"
 mkdir -p "$T/slowtmux"; printf '#!/bin/sh\nsleep 30\n' > "$T/slowtmux/tmux"; chmod +x "$T/slowtmux/tmux"
-t0=$(date +%s); ( cd "$T/home" && printf '{"session_id":"%s"}' "$SID2" | PATH="$T/slowtmux:$PATH" HOME="$T/home" TMUX_PANE="$pane_id" DREAMTEAM_LEAD_SESSION=lwtest CLAUDE_PLUGIN_ROOT="$here" bash -c "$CMD" ); rc=$?; t1=$(date +%s)
+t0=$(date +%s); ( cd "$T/home" && printf '{"session_id":"%s"}' "$SID2" | PATH="$T/slowtmux:$PATH" HOME="$T/home" TMUX_PANE="$pane_id" DREAMTEAM_LEAD_SESSION=lwtest CLAUDE_PLUGIN_ROOT="$here" timeout --kill-after=2 15 bash -c "$CMD" ); rc=$?; t1=$(date +%s)
 [ "$rc" = 0 ] && [ $((t1 - t0)) -le 8 ] && [ ! -e "$T/state/lead.session" ] && ok "a tmux that never answers: returns 0 within its bound, writes nothing ($((t1 - t0)) s)" || bad "stalled tmux: rc=$rc after $((t1 - t0)) s"
 t0=$(date +%s); ( cd "$T/home" && env -u TMUX_PANE HOME="$T/home" bash "$WR" < "$T/held" ); rc=$?; t1=$(date +%s)
 [ "$rc" = 0 ] && [ $((t1 - t0)) -le 1 ] && ok "outside tmux the hook returns at once without reading stdin" || bad "non-tmux: rc=$rc after $((t1 - t0)) s"

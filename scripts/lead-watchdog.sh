@@ -93,8 +93,11 @@ case "$last" in
 esac
 
 # The input line must be EMPTY before anything is typed: a prompt-looking last line can still hold a half-typed
-# command (e.g. `rm x #`), and our Enter would run it. Ctrl-U discards whatever is on the line (readline and zle);
-# then the pane is looked at again and must still be a shell with no child.
+# command (e.g. `rm x #`), and our Enter would run it. Ctrl-E moves to the end of the line and Ctrl-U then discards
+# everything before the cursor, i.e. the whole line, wherever the cursor was (default bash/readline and zsh/zle
+# bindings; a shell with other bindings or a multi-line edit in progress is not covered). Then the pane is looked
+# at again and must still be a shell with no child.
+tm send-keys -t "$PANE" C-e
 tm send-keys -t "$PANE" C-u
 sleep 0.3
 if [ -n "$(pgrep -P "$pane_pid" 2>/dev/null)" ]; then line warn "pane $PANE started something while being checked: nothing typed"; exit 0; fi
