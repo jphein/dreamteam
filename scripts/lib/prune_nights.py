@@ -60,7 +60,13 @@ not on the remote any more); a clone whose history was amended or rebased (the r
 Ignored files (build output) are not looked at: these are the nightly's own fresh clones.
 
 How a selected clone is moved.
-  - Every directory is opened O_NOFOLLOW and used by descriptor.
+  - Every directory is opened O_NOFOLLOW ONCE and held: the base, each night, each clone, each quarantine. What a
+    held descriptor is (st_dev, st_ino) is recorded when it is opened. From then on nothing is done by path:
+    git is started in the clone's descriptor (`/proc/<pid>/fd/<n>`), every rename is renameat2 relative to two
+    held descriptors, expiry walks the held quarantine descriptor. Before each rename the descriptors involved
+    must still be what was recorded AND still be reachable at their configured path; after it they are compared
+    again. A path that is moved or replaced during an operation therefore cannot redirect a write: the operation
+    acts on the directories that were opened, and a directory that is no longer where it was is refused.
   - After the first judgment the clone is RENAMED inside its night to `.pruning-<name>-<random>`. The renamed
     directory must be the inode that was judged; the process table is scanned for a working directory, an open
     file or a mapped file inside it; it is JUDGED AGAIN in full; scanned once more; and the name is re-checked
@@ -71,7 +77,12 @@ How a selected clone is moved.
   - All three renames (aside, back, into the quarantine) are renameat2(RENAME_NOREPLACE): none can replace
     anything, not even an empty directory. Without that system call nothing is moved.
   - The quarantine dir is re-checked before every move and every expiry (still the directory at its configured
-    path); moved or replaced, it takes and loses nothing more this run.
+    path); moved or replaced, it takes and loses nothing more this run. The night is re-checked the same way
+    before each of its two renames (aside, back): a night moved out of the base has nothing renamed in it.
+  - Expiry removes an entry file by file through descriptors and, before EVERY unlink and rmdir, asks where that
+    directory lives now: a subtree moved out of the quarantine mid-removal is left alone from the next check on.
+    The one window that remains anywhere in this tool: a move landing between a check and the single system call
+    that follows it. Closing it needs a lock nothing else here takes.
   - Whenever a step says no, the directory is renamed back if its name is free; otherwise it stays under the
     `.pruning-…` name and the next run judges it like any other entry.
   This is not a lock (nothing else in the fleet locks a clone). A process of another user, or one of the owner's
@@ -157,11 +168,25 @@ def real_date(name):
         return False
 
 
+HELD = {}                                              # real path → the descriptor opened for it (this run)
+
+
 def git(path, *args):
-    """(exit status, stdout) of one git call that may only answer for `path` itself; (None, "") when it did not finish."""
+    """(exit status, stdout) of one git call that may only answer for the directory itself; (None, "") when it did
+    not finish. When this tool holds a descriptor for `path`, git is started IN that descriptor's directory
+    (`/proc/<pid>/fd/<n>`), so it reads the directory that was opened even if the name has since been pointed
+    elsewhere; the ceiling is that directory's present parent."""
+    fd = HELD.get(path)
+    where = path
+    if fd is not None:
+        try:
+            where = f"/proc/{os.getpid()}/fd/{fd}"
+            path = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError:
+            return None, ""
     env = dict(ENV, GIT_CEILING_DIRECTORIES=os.path.dirname(path))
     try:
-        p = subprocess.run(GIT + ["-C", path] + list(args), env=env, stdin=subprocess.DEVNULL,
+        p = subprocess.run(GIT + ["-C", where] + list(args), env=env, stdin=subprocess.DEVNULL,
                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=TIMEOUT)
     except (OSError, subprocess.TimeoutExpired):
         return None, ""
@@ -477,29 +502,97 @@ def mount_inside(real):
     does not follow symlinks but it does walk into a mount, and what is mounted there is not ours to remove."""
     src = os.environ.get("DREAMTEAM_PRUNE_MOUNTINFO", "/proc/self/mountinfo")   # test seam: a table from a file
     prefix = real + "/"
+    lines = 0
     try:
         with open(src, encoding="utf-8", errors="surrogateescape") as fh:
             for line in fh:
-                parts = line.split(" ")
-                if len(parts) < 5:
-                    return True
+                lines += 1
+                parts = line.rstrip("\n").split(" ")
+                # a mountinfo line: id, parent, major:minor, root, mount point, options, [tags...], "-", type, source, options
+                if (len(parts) < 10 or "-" not in parts[6:] or not parts[0].isdigit() or not parts[1].isdigit()
+                        or not parts[4].startswith("/")):
+                    return True                        # not a mount table we can read: nothing is expired or moved
                 mp = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), parts[4])
                 if mp == real or mp.startswith(prefix):
                     return True
     except OSError:
         return True
-    return False
+    return lines == 0                                  # an empty table is not "no mounts": it was not read
+
+
+IDENT = {}                                             # descriptor → (st_dev, st_ino) recorded when it was opened
+
+
+def hold(fd):
+    """Record what `fd` is, once, when it is opened. Every later check compares against this."""
+    st = os.fstat(fd)
+    IDENT[fd] = (st.st_dev, st.st_ino)
+    return fd
+
+
+def same_dir(fd, path):
+    """True while descriptor `fd` is still the directory it was when held (same st_dev and st_ino), still lives at
+    `path`, and `path`, not followed, still names it. Any of the three failing = that directory was moved or
+    replaced, and nothing is renamed into, out of or within it."""
+    try:
+        st = os.fstat(fd)
+        if IDENT.get(fd) != (st.st_dev, st.st_ino):
+            return False
+        if os.readlink(f"/proc/self/fd/{fd}") != path:
+            return False
+        at = os.stat(path, follow_symlinks=False)
+        return (at.st_dev, at.st_ino) == IDENT[fd]
+    except OSError:
+        return False
+
+
+def night_intact(night_fd, night_path):
+    """True while the opened night is still the directory at its path inside the base. Moved away or replaced =
+    False: nothing in it is renamed (a rename through the descriptor would land wherever it was moved to)."""
+    return same_dir(night_fd, night_path)
+
+
+def remove_entry(q, name):
+    """Remove the quarantine entry `name`, re-checking before EVERY removal that the directory being emptied still
+    lives inside that entry and that the quarantine is still where it was. A subtree moved out of the quarantine
+    while it is being removed is left alone from the next check on. What is not excluded, and cannot be without a
+    lock: a move landing between one check and the single unlink or rmdir that follows it.
+    Raises OSError when it stops; what was not yet removed stays."""
+    root = os.path.join(q["path"], name)
+
+    def here(fd):
+        p = os.readlink(f"/proc/self/fd/{fd}")
+        if not (p == root or p.startswith(root + "/")) or not q_intact(q):
+            raise OSError(errno.EXDEV, "moved while being removed")
+
+    def walk(parent_fd, nm, top):
+        fd = os.open(nm, NOFOLLOW_DIR, dir_fd=parent_fd)
+        try:
+            here(fd)
+            for e in os.listdir(fd):
+                st = os.stat(e, dir_fd=fd, follow_symlinks=False)
+                if stat.S_ISDIR(st.st_mode):
+                    walk(fd, e, False)
+                else:
+                    here(fd)
+                    os.unlink(e, dir_fd=fd)
+            here(fd)
+        finally:
+            os.close(fd)
+        if top:
+            if not q_intact(q):
+                raise OSError(errno.EXDEV, "the quarantine moved")
+        else:
+            here(parent_fd)
+        os.rmdir(nm, dir_fd=parent_fd)
+
+    walk(q["fd"], name, True)
 
 
 def q_intact(q):
     """True while the opened quarantine dir is still the directory at its configured path. Moved away, replaced or
     unreadable = False: nothing more is expired from it or moved into it this run."""
-    try:
-        if os.readlink(f"/proc/self/fd/{q['fd']}") != q["path"]:
-            return False
-        return os.path.samestat(os.stat(q["path"], follow_symlinks=False), os.fstat(q["fd"]))
-    except OSError:
-        return False
+    return same_dir(q["fd"], q["path"])
 
 
 def to_quarantine(night_fd, tomb, q, label_night, name):
@@ -545,8 +638,12 @@ def expire(q, tonight, keep_days, dry):
             continue
         if not dry:
             try:
-                shutil.rmtree(name, dir_fd=q["fd"])
+                remove_entry(q, name)
             except OSError:
+                q["report"].setdefault("not_expired", []).append(name)   # stopped part-way or never begun: said
+                if not q_intact(q):
+                    q["report"]["relocated"] = True
+                    break
                 continue
         gone.append(name)
     return gone
@@ -595,6 +692,8 @@ def put_back(night_fd, night_path, tomb, name):
     """After a refusal: the directory gets its name back when that name is free. Returns words for the report."""
     if tomb == name:
         return ""
+    if not night_intact(night_fd, night_path):
+        return f"; it stays as {tomb}: its night was moved or replaced during the run"
     try:
         rename_new(night_fd, tomb, night_fd, name)         # never replaces whatever took the name meanwhile
         return ""
@@ -635,7 +734,11 @@ def consider(night_fd, night_path, night, name, now, dry, res, qs):
                 raise OSError("moved")
         except OSError:
             return keep("its path does not lead to it")
-        why = judge(path, clone_fd, now, dry)
+        HELD[path] = clone_fd
+        try:
+            why = judge(path, clone_fd, now, dry)
+        finally:
+            HELD.pop(path, None)
         if why is not None:
             return keep(why)
         if dry:
@@ -646,10 +749,15 @@ def consider(night_fd, night_path, night, name, now, dry, res, qs):
             tomb = name                                # already set aside by an earlier run; judged afresh above
         else:
             tomb = f".pruning-{name}-{secrets.token_hex(6)}"
+            if not night_intact(night_fd, night_path):
+                return keep("its night was moved or replaced during the run (nothing was renamed)")
             try:
                 rename_new(night_fd, name, night_fd, tomb)
             except OSError:
                 return keep("it could not be set aside")
+            if not night_intact(night_fd, night_path):
+                # the night left the base between the check and the rename: say exactly where things are
+                return keep(f"its night was moved or replaced during the run; it is set aside as {tomb} in the moved directory")
         tomb_path = os.path.join(night_path, tomb)
         try:
             tomb_fd = os.open(tomb, NOFOLLOW_DIR, dir_fd=night_fd)
@@ -662,7 +770,12 @@ def consider(night_fd, night_path, night, name, now, dry, res, qs):
             if not still_there(night_fd, night_path, tomb, tomb_fd, judged):
                 return keep(moved)
             # set aside: scan, judge again in full, scan again; any "no" puts it back
-            why = users_of(tomb_path, os.getpid()) or judge(tomb_path, tomb_fd, now, dry) or users_of(tomb_path, os.getpid())
+            HELD[tomb_path] = tomb_fd
+            try:
+                why = (users_of(tomb_path, os.getpid()) or judge(tomb_path, tomb_fd, now, dry)
+                       or users_of(tomb_path, os.getpid()))
+            finally:
+                HELD.pop(tomb_path, None)
             if not still_there(night_fd, night_path, tomb, tomb_fd, judged):
                 return keep(moved)                     # the judgment above may have followed a symlink: it counts for nothing
             if why is not None:
@@ -686,6 +799,12 @@ def consider(night_fd, night_path, night, name, now, dry, res, qs):
             if why is not None:
                 return keep(why + put_back(night_fd, night_path, tomb, name))
             res["moved"].append(label)
+            # after the rename: the two directories it ran between must still be the ones held. It cannot be undone
+            # here, so it is SAID: this quarantine takes nothing more, and the line reports it.
+            if not (night_intact(night_fd, night_path) and q_intact(q)):
+                q["report"]["relocated"] = True
+                q["report"]["refused"] = True
+                q["full"] = True
         finally:
             os.close(tomb_fd)
     finally:
@@ -759,6 +878,7 @@ def main(argv):
         except OSError as e:
             print(f"prune_nights: the quarantine {qdir} cannot be used ({e}); nothing was moved", file=sys.stderr)
             return 2
+        hold(qfd)
         qs.append({"fd": qfd, "path": qnorm, "dev": dev, "stamp": tonight.replace("-", ""), "min_free": min_free, "full": False,
                    "report": {"dir": qnorm, "free_pct": None, "min_free_pct": min_free, "keep_days": keep_days, "refused": False}})
 
@@ -789,7 +909,7 @@ def main(argv):
     now = time.time()
     for night in nights[:-1]:
         try:
-            night_fd = os.open(night, NOFOLLOW_DIR, dir_fd=base_fd)
+            night_fd = hold(os.open(night, NOFOLLOW_DIR, dir_fd=base_fd))
         except OSError:
             res["kept"].append({"clone": night, "why": "the night directory could not be opened"})
             continue

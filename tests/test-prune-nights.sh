@@ -282,7 +282,7 @@ cat > "$T/drv.py" <<'EOP'
 import errno, importlib.util, os, shutil, sys
 spec = importlib.util.spec_from_file_location("pn", sys.argv[1]); pn = importlib.util.module_from_spec(spec); spec.loader.exec_module(pn)
 mode, extra, qdir = sys.argv[4], sys.argv[5], sys.argv[6]
-real_judge, real_users, real_new, real_expire, seen = pn.judge, pn.users_of, pn.rename_new, pn.expire, {"n": 0, "c": 0}
+real_judge, real_users, real_new, real_expire, real_listdir, seen = pn.judge, pn.users_of, pn.rename_new, pn.expire, os.listdir, {"n": 0, "c": 0, "j": 0, "l": 0}
 def judge(path, fd, now, dry):
     why = real_judge(path, fd, now, dry)
     if why is None and mode == "swap" and path.endswith("/swap"):
@@ -290,6 +290,13 @@ def judge(path, fd, now, dry):
         os.mkdir(path); shutil.copy(extra, path + "/newcomer.txt")     # ...and something else takes its name
     if why is None and mode in ("latewrite", "backcollide") and path.endswith("/" + mode):
         shutil.copy(extra, path + "/arrived.txt")      # a write that lands after the first judgment
+    if why is None and mode == "nightmoved" and path.endswith("/nightmoved"):
+        night = os.path.dirname(path); os.rename(night, extra + ".night-away"); os.mkdir(night)   # the whole night leaves the base
+    if mode == "nightmoved2" and "/.pruning-nightmoved2-" in path and not seen["j"]:
+        seen["j"] = 1
+        shutil.copy(extra, path + "/arrived.txt")      # the second judgment will refuse...
+        night = os.path.dirname(path); os.rename(night, extra + ".night-away"); os.mkdir(night)   # ...and the night leaves before the put-back
+        return real_judge(extra + ".night-away/" + os.path.basename(path), fd, now, dry)
     if why is None and mode == "qmoved" and path.endswith("/qmoved"):
         os.rename(qdir, qdir + ".away"); os.mkdir(qdir)                # the quarantine is moved away, a decoy takes its place
     return why
@@ -316,6 +323,14 @@ def expire(q, tonight, keep_days, dry):
     if mode == "qexpire":
         os.rename(qdir, qdir + ".away"); os.mkdir(qdir)                # moved away before the first removal
     return real_expire(q, tonight, keep_days, dry)
+def listdir(arg="."):
+    if mode == "expmoved" and isinstance(arg, int) and not seen["l"]:
+        p = os.readlink(f"/proc/self/fd/{arg}")
+        if os.path.basename(p) == "2026-09-03__expmoved__q20260910":
+            seen["l"] = 1
+            os.rename(p, extra + ".exp-away")          # the entry leaves the quarantine as its removal begins
+    return real_listdir(arg)
+os.listdir = listdir
 pn.judge, pn.users_of, pn.rename_new, pn.expire = judge, users_of, rename_new, expire
 sys.exit(pn.main(["prune_nights.py", "--quarantine", qdir, sys.argv[2], sys.argv[3]]))
 EOP
@@ -364,6 +379,26 @@ rmdir "$Q"; mv "$Q.away" "$Q"
 mkdir -p "$Q/2026-09-01__gone__q20260910"; echo keep > "$Q/2026-09-01__gone__q20260910/f"; drv qexpire
 [ "$(cat "$Q.away/2026-09-01__gone__q20260910/f" 2>/dev/null)" = keep ] && [ "$(jq -c '.expired' "$T/out/res.json")" = '[]' ] && ok || bad "expiry deleted from a quarantine that had been moved away: $(jq -c .expired "$T/out/res.json")"
 rmdir "$Q"; mv "$Q.away" "$Q"; rm -rf "$Q/2026-09-01__gone__q20260910"
+# ── round 6: a night moved out of the base during the run has NOTHING renamed in it ─────────────────────────────
+N10=2026-10-28
+mkclone $N10 nightmoved; drv nightmoved
+[ "$(ls -A "$T/newcomer.txt.night-away" | tr '\n' ' ')" = "nightmoved " ] && [ -d "$T/newcomer.txt.night-away/nightmoved/.git" ] && ok || bad "entries of a night that was moved away were renamed: $(ls -A "$T/newcomer.txt.night-away" | tr '\n' ' ')"
+case "$(why $N10/nightmoved)" in *"its night was moved or replaced during the run (nothing was renamed)"*) ok ;; *) bad "nightmoved why: $(why $N10/nightmoved)" ;; esac
+rm -rf "$B/$N10" "$T/newcomer.txt.night-away"
+mkclone $N10 nightmoved2; drv nightmoved2
+left=$(ls -A "$T/newcomer.txt.night-away" | tr '\n' ' ')
+case "$left" in ".pruning-nightmoved2-"*" ") [ "$(cat "$T/newcomer.txt.night-away"/.pruning-nightmoved2-*/arrived.txt)" = "arrived later" ] && ok || bad "the set-aside clone in a moved night is not whole" ;; *) bad "a put-back was renamed inside a night that had been moved away: $left" ;; esac
+rm -rf "$B/$N10" "$T/newcomer.txt.night-away"
+# ── round 6: an entry moved out of the quarantine WHILE it is being expired is left alone ──────────────────────
+mkdir -p "$Q/2026-09-03__expmoved__q20260910/deep/er" "$Q/2026-09-03__expstays__q20260910/d"
+for f in a deep/b deep/er/c; do echo keep > "$Q/2026-09-03__expmoved__q20260910/$f"; done; echo x > "$Q/2026-09-03__expstays__q20260910/d/f"
+drv expmoved
+[ "$(cat "$T/newcomer.txt.exp-away/a" "$T/newcomer.txt.exp-away/deep/b" "$T/newcomer.txt.exp-away/deep/er/c" 2>/dev/null | tr '\n' ' ')" = "keep keep keep " ] && ok || bad "files of an entry moved out of the quarantine mid-expiry were deleted: $(find "$T/newcomer.txt.exp-away" -type f | wc -l) left"
+[ "$(jq -c '.quarantine[0].not_expired' "$T/out/res.json")" = '["2026-09-03__expmoved__q20260910"]' ] && [ ! -e "$Q/2026-09-03__expstays__q20260910" ] && ok || bad "after a mid-expiry move: not_expired=$(jq -c '.quarantine[0].not_expired' "$T/out/res.json") the plain entry $([ -e "$Q/2026-09-03__expstays__q20260910" ] && echo stayed || echo went)"
+rm -rf "$T/newcomer.txt.exp-away"
+# expiry removes read-only files and nested dirs like any other (the walker is not rmtree)
+mkdir -p "$Q/2026-09-04__ro__q20260910/.git/objects/ab"; echo o > "$Q/2026-09-04__ro__q20260910/.git/objects/ab/cdef"; chmod 444 "$Q/2026-09-04__ro__q20260910/.git/objects/ab/cdef"; ln -s /etc/hostname "$Q/2026-09-04__ro__q20260910/alink"
+prune; [ ! -e "$Q/2026-09-04__ro__q20260910" ] && [ -e /etc/hostname ] && ok || bad "an entry with read-only files and a symlink was not fully expired: $(find "$Q/2026-09-04__ro__q20260910" 2>/dev/null | head -n 3 | tr '\n' ' ')"
 # ── round 5: mounts. An old entry, or a clone, with something mounted inside is never walked into ───────────────
 mkdir -p "$Q/2026-09-02__mnt__q20260910/sub" "$Q/2026-09-02__plain__q20260910"; echo foreign > "$Q/2026-09-02__mnt__q20260910/sub/theirs"
 mkclone $N6 hasmount; mkdir "$B/$N6/hasmount/mnt"; echo "mnt/" >> "$B/$N6/hasmount/.git/info/exclude"; mkclone $N6 nomount
@@ -373,7 +408,13 @@ DREAMTEAM_PRUNE_MOUNTINFO="$T/mountinfo" prune
 [ "$(jq -c '.quarantine[0].not_expired' "$T/out/res.json")" = '["2026-09-02__mnt__q20260910"]' ] && ok || bad "not_expired: $(jq -c '.quarantine[0].not_expired' "$T/out/res.json")"
 kept_as $N6/hasmount "something is mounted inside it"; goes $N6/nomount
 : > "$T/empty-mountinfo"; printf 'garbage\n' > "$T/bad-mountinfo"; mkclone $N6 mtab
-DREAMTEAM_PRUNE_MOUNTINFO="$T/bad-mountinfo" prune; kept_as $N6/mtab "something is mounted inside it"                # an unreadable table: fail closed
+printf '36 35 98:0 / /mnt rw\n' > "$T/short-mountinfo"; printf '36 35 98:0 / /mnt rw shared:1 ext4 /dev/x rw,errors=continue\n' > "$T/nosep-mountinfo"
+for tab in bad empty short nosep; do                                                             # a table that is not one: fail closed
+  DREAMTEAM_PRUNE_MOUNTINFO="$T/$tab-mountinfo" prune; kept_as $N6/mtab "something is mounted inside it"
+done
+mkdir -p "$Q/2026-09-05__tab__q20260910"; DREAMTEAM_PRUNE_MOUNTINFO="$T/empty-mountinfo" prune
+[ -d "$Q/2026-09-05__tab__q20260910" ] && jq -e '.quarantine[0].not_expired | index("2026-09-05__tab__q20260910")' "$T/out/res.json" >/dev/null && [ "$(jq '.expired | length' "$T/out/res.json")" = 0 ] && ok || bad "an empty mount table let an entry be expired: $(jq -c '[.expired, .quarantine[0].not_expired]' "$T/out/res.json")"
+rm -rf "$Q/2026-09-05__tab__q20260910"
 DREAMTEAM_PRUNE_MOUNTINFO="$T/no-such-file" prune; kept_as $N6/mtab "something is mounted inside it"
 rm -rf "$Q/2026-09-02__mnt__q20260910"; prune; goes $N6/mtab; goes $N6/hasmount
 # ── round 5: git's environment is BUILT, not inherited: no channel for a filter the selector did not see ────────

@@ -176,6 +176,13 @@ from outside the clone, that each tracking tip is still on the remote. Nothing i
 night, named in the line: a clone whose fix branch was squash-merged and deleted on the remote, one whose history
 was amended, any clone when the forge cannot be asked.
 
+**Held descriptors.** The base, each night, each clone and each quarantine dir is opened once, without following
+symlinks, and held; what each one is (device and inode) is recorded then. Nothing after that is done by path: git
+is started in the clone's descriptor, every rename is `renameat2` relative to two held descriptors, expiry walks
+the held quarantine descriptor. Before each rename the directories involved must still be what was recorded and
+still be at their configured path; after it they are compared again. A path moved or replaced during an operation
+cannot redirect a write: a directory that is no longer where it was is refused, and the line says so.
+
 **Things it will not do** (each from a review finding, each tested): replace anything by a rename (all three
 renames are `renameat2(RENAME_NOREPLACE)`; without that call nothing moves); walk into a mount (an old entry with
 something mounted inside is not expired and is named; a clone with a mount inside is not selected; an unreadable
