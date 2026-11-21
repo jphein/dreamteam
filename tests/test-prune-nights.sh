@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# scripts/lib/prune_nights.py (dreamteam #250/#255) on REAL git repositories: MOVE-THEN-DELETE. A selected clone is
-# moved to a quarantine dir and deleted from there by age. The forge is a stub `gh` that answers
+# scripts/lib/prune_nights.py (dreamteam #250/#255) on REAL git repositories: MOVE-THEN-DELETE, RENAME ONLY. A selected
+# clone is moved by one rename to the quarantine dir on ITS OWN filesystem and deleted from there by age; a clone
+# whose filesystem has no quarantine dir is not moved. Nothing is ever copied. The forge is a stub `gh` that answers
 # `repos/<o>/<n>` and `repos/<o>/<n>/compare/<sha>...<branch>` from real bare repositories under $T/forge, so
 # "is this commit on the remote now" is decided by real ancestry, not by a canned string.
 # Every refusal the two reviews asked for has a case here.
@@ -78,7 +79,7 @@ prune; rc=$?
 [ "$rc" = 0 ] && jq -e . "$T/out/res.json" >/dev/null 2>&1 && ok || bad "rc $rc or no JSON: $(cat "$T/out/err")"
 goes 2026-11-15/clean; [ ! -e "$B/2026-11-15" ] && ok || bad "an emptied night stayed"
 qc=$(ls -d "$Q"/2026-11-15__clean__q20261120); [ "$(cat "$qc/f.txt")" = one ] && git -C "$qc" rev-parse -q --verify HEAD >/dev/null && ok || bad "the quarantined clone is not whole"
-[ "$(jq -c '.quarantine | [.dir, .refused, .keep_days, .min_free_pct]' "$T/out/res.json")" = "[\"$Q\",false,14,10]" ] && ok || bad "quarantine block: $(jq -c .quarantine "$T/out/res.json")"
+[ "$(jq -c '.quarantine[0] | [.dir, .refused, .keep_days, .min_free_pct]' "$T/out/res.json")" = "[\"$Q\",false,14,10]" ] && ok || bad "quarantine block: $(jq -c .quarantine "$T/out/res.json")"
 goes 2026-11-16/clean2
 [ -d "$B/2026-11-19/prev/.git" ] && ok || bad "the previous night was touched"
 [ -d "$B/$TONIGHT/now/.git" ] && ok || bad "tonight was touched"
@@ -145,11 +146,18 @@ mkclone $N anntag;     git -C "$(c anntag)" tag -a -m note ann-here
 mkclone $N tagok;      git -C "$(c tagok)" tag v1; git -C "$(c tagok)" tag -a -m rel v2; git -C "$(c tagok)" push -q "$LAST_FORGE" v1 v2
 mkclone $N mapped;     python3 -I -c 'import mmap,os,sys,time; f=open(sys.argv[1],"rb"); m=mmap.mmap(f.fileno(),0,prot=mmap.PROT_READ); os.closerange(3,4096); open(sys.argv[2],"w").write("up"); time.sleep(120)' "$(c mapped)/f.txt" "$T/mapped.up" & BG+=("$!"); map_pid=$!
 for _ in $(seq 1 50); do [ -s "$T/mapped.up" ] && break; sleep 0.1; done
+# a filter defined in the RUNNER's own git config, switched on by a clone's committed .gitattributes: never run
+mkclone $N inherit;    echo '* filter=evil' > "$(c inherit)/.gitattributes"; git -C "$(c inherit)" add .gitattributes; git -C "$(c inherit)" commit -q -m attrs
+                       topush "$(c inherit)" main; touch -d '3 days ago' "$(c inherit)/f.txt"       # stat differs: git must re-read the file
+printf '[filter "evil"]\n\tclean = sh -c "touch %s/ran-inherited-filter; cat"\n\tsmudge = cat\n' "$T" > "$T/evil.gitconfig"
 # positive controls: a clean clone, and one whose remote main has simply moved on since the night
 mkclone $N good
 mkclone $N behind; git clone -q "$LAST_FORGE" "$T/adv"; git -C "$T/adv" commit -q --allow-empty -m later; git -C "$T/adv" push -q origin main
 snap_ahead=$(cd "$(c ahead)" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum)
-prune
+GIT_CONFIG_GLOBAL="$T/evil.gitconfig" prune
+[ ! -e "$T/ran-inherited-filter" ] && ok || bad "a filter from the runner's global git config was run on a clone"
+( cd "$(c inherit)" 2>/dev/null && GIT_CONFIG_GLOBAL="$T/evil.gitconfig" git status --porcelain >/dev/null 2>&1 ); [ -e "$T/ran-inherited-filter" ] && ok || { pruned $N/inherit && ok || bad "fixture: the inherited filter never fires, so the check above proves nothing"; }
+rm -f "$T/ran-inherited-filter"
 kept_as $N/dirty "uncommitted or untracked"
 kept_as $N/untracked "a config key this tool does not trust (status.showuntrackedfiles)"
 kept_as $N/untracked2 "uncommitted or untracked"
@@ -271,7 +279,7 @@ cat > "$T/drv.py" <<'EOP'
 import errno, importlib.util, os, shutil, sys
 spec = importlib.util.spec_from_file_location("pn", sys.argv[1]); pn = importlib.util.module_from_spec(spec); spec.loader.exec_module(pn)
 mode, extra, qdir = sys.argv[4], sys.argv[5], sys.argv[6]
-real_judge, real_users, real_rename, real_manifest, seen = pn.judge, pn.users_of, os.rename, pn.manifest, {"n": 0, "m": 0}
+real_judge, real_users, real_rename, seen = pn.judge, pn.users_of, os.rename, {"n": 0}
 def judge(path, fd, now, dry):
     why = real_judge(path, fd, now, dry)
     if why is None and mode == "swap" and path.endswith("/swap"):
@@ -287,14 +295,10 @@ def users_of(real, skip):
         os.symlink(extra + ".moved-outside", real)     # ...with a symlink left at its name
     return real_users(real, skip)
 def rename(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
-    if mode in ("xdev", "badcopy") and dst_dir_fd is not None and src_dir_fd is not None and dst_dir_fd != src_dir_fd:
-        raise OSError(errno.EXDEV, "cross-device (injected)")          # the quarantine is on another filesystem
+    if mode == "xdev" and dst_dir_fd is not None and src_dir_fd is not None and dst_dir_fd != src_dir_fd:
+        raise OSError(errno.EXDEV, "cross-device (injected)")          # the kernel says: not one filesystem after all
     return real_rename(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
-def manifest(root):
-    out = real_manifest(root)
-    seen["m"] += 1
-    return out[:-1] if mode == "badcopy" and seen["m"] == 2 else out   # the copy "lost" one entry
-pn.judge, pn.users_of, pn.manifest, os.rename = judge, users_of, manifest, rename
+pn.judge, pn.users_of, os.rename = judge, users_of, rename
 sys.exit(pn.main(["prune_nights.py", "--quarantine", qdir, sys.argv[2], sys.argv[3]]))
 EOP
 drv() { PATH="$T/ghbin:$PATH" DREAMTEAM_PRUNE_QUIET_HOURS=0 python3 -I "$T/drv.py" "$PN" "$B" "$TONIGHT" "$1" "$T/newcomer.txt" "$Q" > "$T/out/res.json" 2> "$T/out/err"; }
@@ -315,18 +319,37 @@ case "$(why $N6/outside)" in *"moved or replaced after being set aside"*) ok ;; 
 [ -d "$T/newcomer.txt.moved-outside/.git" ] && [ "$(cat "$T/newcomer.txt.moved-outside/f.txt")" = one ] && ok || bad "a directory moved outside its night was emptied or moved"
 ! ls "$Q" | grep -q "__outside__" && ok || bad "something reached the quarantine through a symlink"
 rm -rf "$B/$N6"/.pruning-outside-* "$T/newcomer.txt.moved-outside"
-# the quarantine on ANOTHER filesystem (injected EXDEV): copy, compare, publish, then empty the original
-mkclone $N6 xdev; ln -s f.txt "$B/$N6/xdev/alink"; git -C "$B/$N6/xdev" add alink; git -C "$B/$N6/xdev" commit -q -m link; topush "$B/$N6/xdev" main
-m0=$(cd "$B/$N6/xdev" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum)
+# NOTHING IS EVER COPIED. If the kernel refuses the rename as cross-device, the clone is not moved: it is back in
+# its night under its own name, whole, and nothing of it is in the quarantine.
+mkclone $N6 xdev; m0=$(cd "$B/$N6/xdev" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum)
 drv xdev
-goes $N6/xdev
-qx=$(ls -d "$Q"/${N6}__xdev__q20261120 2>/dev/null)
-[ -n "$qx" ] && [ "$(cd "$qx" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum)" = "$m0" ] && [ -L "$qx/alink" ] && ok || bad "the copy across filesystems is not the clone, byte for byte (or a symlink was followed)"
+kept_as $N6/xdev "not on its filesystem after all (nothing is ever copied)"
+[ "$(cd "$B/$N6/xdev" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum)" = "$m0" ] && ! ls -a "$Q" | grep -q "xdev" && ok || bad "after a refused cross-device rename: night=$(ls -a "$B/$N6" | tr '\n' ' ') quarantine=$(ls -a "$Q" | grep xdev | tr '\n' ' ')"
 ! ls -a "$Q" "$B/$N6" 2>/dev/null | grep -qE '\.partial$|^\.pruning-' && ok || bad "a .partial or .pruning- entry was left: $(ls -a "$Q" "$B/$N6" 2>/dev/null | grep -E 'partial|pruning' | tr '\n' ' ')"
-# ...and a copy that does not match is removed, the clone stays in its night under its own name
-mkclone $N6 badcopy; drv badcopy
-kept_as $N6/badcopy "its copy in the quarantine did not match"
-[ -d "$B/$N6/badcopy/.git" ] && ! ls -a "$Q" | grep -q "badcopy" && ok || bad "after a bad copy: night=$(ls -a "$B/$N6" | tr '\n' ' ') quarantine=$(ls -a "$Q" | grep badcopy | tr '\n' ' ')"
+! grep -qE '"cp"|copytree|shutil\.copy|shutil\.move|sendfile' "$PN" && ok || bad "the tool contains a copy primitive"
+
+# ── one quarantine per filesystem: a clone is only ever moved within its own ────────────────────────────────────
+OTHER=""; for cand in /dev/shm /run/user/$(id -u) /var/tmp; do
+  [ -d "$cand" ] && [ -w "$cand" ] && [ "$(stat -c %d "$cand")" != "$(stat -c %d "$T")" ] && { OTHER="$cand"; break; }
+done
+if [ -n "$OTHER" ]; then
+  QO=$(mktemp -d "$OTHER/prune-nights-q.XXXXXX"); trap 'rm -rf -- "$QO"; for p in "${BG[@]:-}"; do [ -n "$p" ] && kill "$p" 2>/dev/null; done; chmod -R u+rwx "$T" 2>/dev/null; rm -rf -- "$T"' EXIT
+  N9=2026-11-01; mkclone $N9 lonely
+  PATH="$T/ghbin:$PATH" DREAMTEAM_PRUNE_QUIET_HOURS=0 python3 -I "$PN" --quarantine "$QO" "$B" "$TONIGHT" > "$T/out/res.json" 2>/dev/null
+  kept_as $N9/lonely "no quarantine dir on its filesystem: not moved"
+  [ "$(jq -c '.no_quarantine' "$T/out/res.json" | grep -c "$N9/lonely")" = 1 ] && [ -z "$(ls -A "$QO")" ] && ok || bad "a clone was moved to a quarantine on another filesystem: $(ls -A "$QO" | tr '\n' ' ') $(jq -c .no_quarantine "$T/out/res.json")"
+  PATH="$T/ghbin:$PATH" DREAMTEAM_PRUNE_QUIET_HOURS=0 python3 -I "$PN" --quarantine "$QO" --quarantine "$Q" "$B" "$TONIGHT" > "$T/out/res.json" 2>/dev/null
+  goes $N9/lonely; [ -z "$(ls -A "$QO")" ] && [ "$(jq '.quarantine | length' "$T/out/res.json")" = 2 ] && [ "$(jq '.no_quarantine | length' "$T/out/res.json")" = 0 ] && ok || bad "with a quarantine on each filesystem: $(ls -A "$QO" | tr '\n' ' ')"
+  # expiry runs in EVERY quarantine dir
+  mkdir -p "$QO/2026-10-01__far__q20261101" "$Q/2026-10-01__near__q20261101"
+  PATH="$T/ghbin:$PATH" DREAMTEAM_PRUNE_QUIET_HOURS=0 python3 -I "$PN" --quarantine "$QO" --quarantine "$Q" "$B" "$TONIGHT" > "$T/out/res.json" 2>/dev/null
+  [ ! -e "$QO/2026-10-01__far__q20261101" ] && [ ! -e "$Q/2026-10-01__near__q20261101" ] && [ "$(jq '.expired | length' "$T/out/res.json")" = 2 ] && ok || bad "expiry did not run in every quarantine dir: $(jq -c .expired "$T/out/res.json")"
+else
+  echo "  note: no second writable filesystem here; the other-filesystem cases were skipped"
+fi
+# two quarantine dirs on ONE filesystem is a configuration mistake: refused, nothing moved
+mkclone 2026-10-30 twoq; mkdir -p "$T/q-second"
+PATH="$T/ghbin:$PATH" python3 -I "$PN" --quarantine "$Q" --quarantine "$T/q-second" "$B" "$TONIGHT" >/dev/null 2>&1; [ "$?" = 2 ] && [ -d "$B/2026-10-30/twoq/.git" ] && ok || bad "two quarantines on one filesystem were accepted"
 
 # ── the quarantine itself: expiry by the date in the name, the free-space floor, name collisions ────────────────
 mkdir -p "$Q/2026-10-01__old__q20261101" "$Q/2026-10-20__edge__q20261106" "$Q/2026-10-21__young__q20261107" "$Q/not-ours" "$Q/2026-10-01__x__q2026"
@@ -340,12 +363,20 @@ prune
 # under the floor: nothing is moved or judged, the result says so, and expiry still runs (it is what frees space)
 N7=2026-11-04; mkclone $N7 floor; mkdir -p "$Q/2026-10-02__old2__q20261101"; : > "$T/gh.calls"
 DREAMTEAM_PRUNE_FREE_PCT=9 prune
-[ "$(jq -c '.quarantine | [.refused, .free_pct]' "$T/out/res.json")" = '[true,9]' ] && [ -d "$B/$N7/floor/.git" ] && [ "$(jq '.moved | length' "$T/out/res.json")" = 0 ] && ok || bad "under the floor: $(jq -c '[.quarantine, .moved]' "$T/out/res.json")"
+[ "$(jq -c '.quarantine[0] | [.refused, .free_pct]' "$T/out/res.json")" = '[true,9]' ] && [ -d "$B/$N7/floor/.git" ] && [ "$(jq '.moved | length' "$T/out/res.json")" = 0 ] && ok || bad "under the floor: $(jq -c '[.quarantine, .moved]' "$T/out/res.json")"
 [ ! -e "$Q/2026-10-02__old2__q20261101" ] && [ ! -s "$T/gh.calls" ] && ok || bad "under the floor: expiry did not run, or clones were judged"
 # a free share that cannot be READ is a refusal too (unknown is never "enough room")
 DREAMTEAM_PRUNE_FREE_PCT=unreadable prune
-[ "$(jq -c '.quarantine | [.refused, .free_pct]' "$T/out/res.json")" = '[true,null]' ] && [ -d "$B/$N7/floor/.git" ] && ok || bad "an unreadable free share: $(jq -c '[.quarantine, .moved]' "$T/out/res.json")"
+[ "$(jq -c '.quarantine[0] | [.refused, .free_pct]' "$T/out/res.json")" = '[true,null]' ] && [ -d "$B/$N7/floor/.git" ] && ok || bad "an unreadable free share: $(jq -c '[.quarantine, .moved]' "$T/out/res.json")"
 DREAMTEAM_PRUNE_FREE_PCT=10 prune; goes $N7/floor                                                # exactly at the floor is enough
+# the floor is read again before EVERY move: room for the first clone, not for the second
+N8=2026-11-13; mkclone $N8 a-first; mkclone $N8 b-second; mkclone $N8 c-third; : > "$T/gh.calls"
+DREAMTEAM_PRUNE_FREE_PCT_SEQ="40,40,9" prune
+goes $N8/a-first
+kept_as $N8/b-second "its quarantine went under the free-space floor"
+kept_as $N8/c-third "not looked at: its quarantine is under the free-space floor"
+[ "$(jq -c '.quarantine[0] | [.refused, .free_pct]' "$T/out/res.json")" = '[true,9]' ] && ! ls -a "$B/$N8" | grep -q '^\.pruning-' && ok || bad "floor mid-run: $(jq -c .quarantine "$T/out/res.json") $(ls -a "$B/$N8" | tr '\n' ' ')"
+prune; goes $N8/b-second; goes $N8/c-third                                                       # control: with room, both go
 # a name already in the quarantine is never overwritten: the newcomer gets a numbered name
 mkclone $N7 twin; mkdir -p "$Q/${N7}__twin__q20261120"; echo first > "$Q/${N7}__twin__q20261120/mark"
 prune; [ "$(cat "$Q/${N7}__twin__q20261120/mark")" = first ] && [ -d "$Q/${N7}__twin__q20261120-2/.git" ] && ok || bad "a quarantine name collision: $(ls "$Q" | grep twin | tr '\n' ' ')"
@@ -361,11 +392,19 @@ python3 -I "$PN" --quarantine "$Q" --nope "$B" "$TONIGHT" >/dev/null 2>&1; [ "$?
 python3 -I "$PN" --quarantine "$Q" "$T/nowhere" "$TONIGHT" >/dev/null 2>&1; [ "$?" = 2 ] && ok || bad "a missing base not 2"
 ln -s "$B" "$T/wtlink"; mkclone 2026-11-05 vialink
 PATH="$T/ghbin:$PATH" python3 -I "$PN" --quarantine "$Q" "$T/wtlink" "$TONIGHT" >/dev/null 2>&1; [ "$?" = 2 ] && [ -d "$B/2026-11-05/vialink/.git" ] && ok || bad "a symlinked base was followed"
+# a refused quarantine path is not CREATED on the way to being refused
+mkdir "$T/realq"; ln -s "$T/realq" "$T/qanc"
+PATH="$T/ghbin:$PATH" python3 -I "$PN" --quarantine "$T/qanc/new/deep" "$B" "$TONIGHT" >/dev/null 2>&1; rc=$?
+[ "$rc" = 2 ] && [ -z "$(ls -A "$T/realq")" ] && ok || bad "a quarantine behind a symlinked ancestor: rc $rc, created: $(ls -A "$T/realq" | tr '\n' ' ')"
+PATH="$T/ghbin:$PATH" python3 -I "$PN" --quarantine "$B/inside-q2/deep" "$B" "$TONIGHT" >/dev/null 2>&1; rc=$?
+[ "$rc" = 2 ] && [ ! -e "$B/inside-q2" ] && ok || bad "a quarantine inside the base was created before being refused (rc $rc)"
+PATH="$T/ghbin:$PATH" python3 -I "$PN" --dry-run --quarantine "$T/absent-q" "$B" "$TONIGHT" >/dev/null 2>&1; rc=$?
+[ "$rc" = 2 ] && [ ! -e "$T/absent-q" ] && ok || bad "a dry run created its quarantine (rc $rc)"
 # the quarantine must be a plain directory OUTSIDE the base, with no symlink in its path
 PATH="$T/ghbin:$PATH" python3 -I "$PN" --quarantine "$B/inside-q" "$B" "$TONIGHT" >/dev/null 2>&1; [ "$?" = 2 ] && [ -d "$B/2026-11-05/vialink/.git" ] && ok || bad "a quarantine inside the base was accepted"
 ln -s "$Q" "$T/qlink"; PATH="$T/ghbin:$PATH" python3 -I "$PN" --quarantine "$T/qlink" "$B" "$TONIGHT" >/dev/null 2>&1; [ "$?" = 2 ] && [ -d "$B/2026-11-05/vialink/.git" ] && ok || bad "a symlinked quarantine was accepted"
 PATH="$T/ghbin:$PATH" DREAMTEAM_PRUNE_QUIET_HOURS=0 python3 -I "$PN" --quarantine "$T/newq/deep" --keep-days 30 --min-free-pct 0 "$B" "$TONIGHT" > "$T/out/res.json" 2>/dev/null
-[ "$?" = 0 ] && [ -d "$T/newq/deep/2026-11-05__vialink__q20261120/.git" ] && [ "$(jq -c '.quarantine | [.keep_days, .min_free_pct]' "$T/out/res.json")" = '[30,0]' ] && ok || bad "a new quarantine dir was not created and used: $(ls "$T/newq/deep" 2>&1 | tr '\n' ' ')"
+[ "$?" = 0 ] && [ -d "$T/newq/deep/2026-11-05__vialink__q20261120/.git" ] && [ "$(jq -c '.quarantine[0] | [.keep_days, .min_free_pct]' "$T/out/res.json")" = '[30,0]' ] && ok || bad "a new quarantine dir was not created and used: $(ls "$T/newq/deep" 2>&1 | tr '\n' ' ')"
 
 echo "prune-nights: $pass passed, $fail failed"
 [ "$fail" = 0 ]

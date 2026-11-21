@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
-"""dreamteam — move the nightly's OLD per-night clones off the small disk, then delete them by age (#250).
+"""dreamteam — move the nightly's OLD per-night clones into a quarantine, then delete them from there by age (#250).
 
-    prune_nights.py [--dry-run] --quarantine <dir> [--keep-days 14] [--min-free-pct 10] <wt_base> <tonight YYYY-MM-DD>
+    prune_nights.py [--dry-run] --quarantine <dir> [--quarantine <dir> ...] [--keep-days 14] [--min-free-pct 10]
+                    <wt_base> <tonight YYYY-MM-DD>
 
 The nightly clones each repo into <wt_base>/<night>/<name> and never removed them (1.8 GB a night on a small root).
-The design is MOVE-THEN-DELETE (the lead, 2026-11-20, after three review rounds on a prove-then-delete version):
-  1. Quarantine entries older than --keep-days are deleted (by the date in their name, never by mtime).
-  2. If the quarantine disk has less than --min-free-pct free, NOTHING is moved and the result says so
-     ("quarantine": {"refused": true, "free_pct": N}); the nightly puts that in its CHECK line.
-  3. Otherwise every old clone the JUDGE selects is moved to <quarantine>/<night>__<name>__q<YYYYMMDD>, where it
-     stays whole for --keep-days. A clone the judge does not select stays where it is, named with its reason.
-So nothing is destroyed on the night it is selected: a wrong selection costs a move, and the clone can be moved
-back by hand for two weeks. The judge below is therefore a SELECTOR, not a proof. It is kept as strict as the
-reviews made it, because the stricter it is, the less often a clone someone still needs is moved at all.
+The design is MOVE-THEN-DELETE, RENAME ONLY (the lead, 2026-11-20, after four review rounds):
+  1. In every quarantine dir, entries older than --keep-days are deleted (by the date in their name, never mtime).
+  2. A quarantine dir whose filesystem has less than --min-free-pct free takes nothing; the result says so and the
+     nightly puts it in its CHECK line. The reading is taken again before every single move.
+  3. Each old clone the SELECTOR passes is moved, by ONE rename, to <quarantine>/<night>__<name>__q<YYYYMMDD> in
+     the quarantine dir that lies on the SAME FILESYSTEM as the clone. There it stays whole for --keep-days.
+     A clone whose filesystem has no quarantine dir is not moved at all: it stays, and is named in the result.
+Nothing is ever copied, and nothing is deleted on the night it is selected: a rename is atomic, so a clone is in
+its night or in the quarantine, never half in both, and a wrong selection can be undone by hand for two weeks.
+What that costs, stated plainly: a quarantine on the clone's own filesystem frees no space on the night of the
+move. The space comes back when the entry expires.
+The selector below is therefore a SELECTOR, not a proof. It is kept as strict as the reviews made it, because the
+stricter it is, the less often a clone someone still needs is moved at all.
 
 Which nights. A night is a directory directly under <wt_base> whose name is a real calendar date earlier than
 <tonight>. Tonight is never touched, nor is the newest earlier night (the previous night's clones are the ones a
@@ -55,35 +60,35 @@ not on the remote any more); a clone whose history was amended or rebased (the r
 Ignored files (build output) are not looked at: these are the nightly's own fresh clones.
 
 How a selected clone is moved.
-  - Every directory is opened O_NOFOLLOW and used by descriptor, never by a re-resolved path.
+  - Every directory is opened O_NOFOLLOW and used by descriptor.
   - After the first judgment the clone is RENAMED inside its night to `.pruning-<name>-<random>`. The renamed
     directory must be the inode that was judged; the process table is scanned for a working directory, an open
     file or a mapped file inside it; it is JUDGED AGAIN in full; scanned once more; and the name is re-checked
     without following symlinks (still that directory, still inside the night that was opened).
-  - Then it goes to the quarantine. On the same filesystem that is one rename. Across filesystems (the usual case:
-    small root to big disk) it is copied to `<final name>.partial` with `cp -a` (symlinks kept as symlinks),
-    the copy's manifest (every path with its type, size, mtime, link target) must equal the source's, the copy is
-    renamed to its final name, and ONLY THEN is the source emptied through its own descriptor. A copy that does
-    not match is removed and the clone stays where it was.
+  - The quarantine's free share is read again, and then ONE rename, relative to the two opened directories, takes
+    it to its final name in the quarantine. If the kernel says the two are not on one filesystem after all, it is
+    not moved. There is no other way a clone leaves its night.
   - Whenever a step says no, the directory is renamed back if its name is free; otherwise it stays under the
     `.pruning-…` name and the next run judges it like any other entry.
   This is not a lock (nothing else in the fleet locks a clone). A process of another user, or one of the owner's
   own that hides its state (non-dumpable: measured 2026-11-20, 15 of 284 on the server, among them the systemd
   user manager and ssh-agent), is invisible to the scans, and a process could open the set-aside directory
-  between the last scan and the move. With move-then-delete the cost of that is a clone found in quarantine
-  instead of in its night, for 14 days.
-  The quarantine: an absolute directory with no symlink in its path, outside <wt_base>, created if absent. Only
-  entries named `<YYYY-MM-DD>__<name>__q<YYYYMMDD>` that are real directories are ever deleted from it, when the
-  q-date is --keep-days or more before <tonight>. Anything else in it is left alone.
+  between the last scan and the rename. The cost of that is a clone found whole in the quarantine instead of in
+  its night, for 14 days; a process that had it open keeps working in it there.
+  A quarantine dir: absolute, no symlink anywhere in its path, outside <wt_base>. Its path is checked BEFORE
+  anything is created, and missing components are created one by one inside directories already opened without
+  following links. Only entries named `<YYYY-MM-DD>__<name>__q<YYYYMMDD>` that are real directories are ever
+  deleted from it, when the q-date is --keep-days or more before <tonight>. Anything else in it is left alone.
   A night directory is removed only when it has become empty.
 
 Output: one JSON object on stdout:
     {"tonight": "...", "protected": [...], "moved": ["<night>/<name>", ...], "expired": ["<quarantine entry>", ...],
      "kept": [{"clone": "<night>/<name>", "why": "..."}], "ignored": ["<name>", ...], "dry_run": false,
-     "quarantine": {"dir": "...", "free_pct": 37, "min_free_pct": 10, "keep_days": 14, "refused": false}}
+     "no_quarantine": ["<night>/<name>", ...],        (clones on a filesystem that has no quarantine dir)
+     "quarantine": [{"dir": "...", "free_pct": 37, "min_free_pct": 10, "keep_days": 14, "refused": false}, ...]}
 With --dry-run nothing is renamed, moved or removed (the forge is still asked: that reads only); "moved" and
 "expired" then list what would be.
-Exit: 0 the object was printed · 2 <wt_base> or the quarantine is not a plain directory we can use · 22 bad arguments.
+Exit: 0 the object was printed · 2 <wt_base> or a quarantine is not a plain directory we can use · 22 bad arguments.
 """
 import datetime
 import errno
@@ -100,14 +105,18 @@ import urllib.parse
 
 DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 NOFOLLOW_DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+# Git reads ONLY the clone's own config, which the selector has checked key by key. The runner's global and system
+# config and attributes are switched off: a filter defined there could be turned on by a clone's .gitattributes.
 ENV = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0", GIT_NO_LAZY_FETCH="1",
-           GIT_NO_REPLACE_OBJECTS="1", LC_ALL="C")
+           GIT_NO_REPLACE_OBJECTS="1", GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1", GIT_ATTR_NOSYSTEM="1",
+           LC_ALL="C")
 for _k in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
            "GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_OBJECT_DIRECTORY",
            "GIT_GRAFT_FILE", "GIT_SHALLOW_FILE", "GIT_REPLACE_REF_BASE"):
     ENV.pop(_k, None)
 GIT = ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "gc.auto=0",
-       "-c", "protocol.allow=never", "-c", "core.useReplaceRefs=false"]
+       "-c", "protocol.allow=never", "-c", "core.useReplaceRefs=false", "-c", "core.attributesFile=/dev/null"]
+GH_ENV = dict(os.environ)                              # the forge is asked with the runner's own environment and login
 # The local config keys a clone may have. Everything else keeps it (rule 2).
 CONFIG_OK = re.compile(r"^(core\.(repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode|symlinks)"
                        r"|remote\.origin\.(url|fetch)|branch\..+\.(remote|merge)|user\.(name|email))$")
@@ -127,7 +136,7 @@ def number(name, default, lo, hi):
 
 TIMEOUT = number("DREAMTEAM_PRUNE_GIT_TIMEOUT", "120", 1, 3600)
 QUIET = number("DREAMTEAM_PRUNE_QUIET_HOURS", "6", 0, 24 * 365) * 3600
-COPY_TIMEOUT = number("DREAMTEAM_PRUNE_COPY_TIMEOUT", "7200", 1, 86400)
+READS = [0]                                            # how often the free share was read (test seam)
 FORGE = {}                                             # (owner/name, tip, branch) → True/False/None, for this run
 
 
@@ -160,7 +169,7 @@ def forge_has(repo, tip, branch):
         return FORGE[key]
     url = f"repos/{repo}/compare/{tip}...{urllib.parse.quote(branch, safe='')}"
     try:
-        p = subprocess.run(["gh", "api", url, "--jq", ".status"], cwd="/", env=ENV, stdin=subprocess.DEVNULL,
+        p = subprocess.run(["gh", "api", url, "--jq", ".status"], cwd="/", env=GH_ENV, stdin=subprocess.DEVNULL,
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=TIMEOUT)
     except (OSError, subprocess.TimeoutExpired):
         FORGE[key] = None
@@ -185,7 +194,7 @@ def forge_tags(repo):
         ans = None
         try:
             p = subprocess.run(["gh", "api", "--paginate", f"repos/{repo}/git/matching-refs/tags/",
-                                "--jq", '.[] | "\\(.ref) \\(.object.sha)"'], cwd="/", env=ENV, stdin=subprocess.DEVNULL,
+                                "--jq", '.[] | "\\(.ref) \\(.object.sha)"'], cwd="/", env=GH_ENV, stdin=subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=TIMEOUT)
             if p.returncode == 0:
                 ans = {}
@@ -207,7 +216,7 @@ def default_branch(repo):
     key = (repo, "", "")
     if key not in FORGE:
         try:
-            p = subprocess.run(["gh", "api", f"repos/{repo}", "--jq", ".default_branch"], cwd="/", env=ENV,
+            p = subprocess.run(["gh", "api", f"repos/{repo}", "--jq", ".default_branch"], cwd="/", env=GH_ENV,
                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=TIMEOUT)
             out = p.stdout.decode("utf-8", "replace").strip()
             FORGE[key] = out if p.returncode == 0 and re.match(r"^[A-Za-z0-9._/-]{1,200}$", out) and not out.startswith("-") else None
@@ -440,83 +449,24 @@ def judge(path, clone_fd, now, dry):
     return None
 
 
-def empty_through(fd):
-    """Remove everything inside the directory behind `fd`, through the descriptor."""
-    for entry in os.listdir(fd):
-        st = os.stat(entry, dir_fd=fd, follow_symlinks=False)
-        if stat.S_ISDIR(st.st_mode):
-            shutil.rmtree(entry, dir_fd=fd)
-        else:
-            os.unlink(entry, dir_fd=fd)
-
-
-def manifest(root):
-    """Every entry below `root` as (relative path, type, size, mtime, link target): what a faithful copy must share.
-    Nothing is followed. Sizes and times of directories are not compared (they differ between filesystems)."""
-    out = []
-    for cur, dirs, files in os.walk(root, followlinks=False):
-        rel = os.path.relpath(cur, root)
-        for n in sorted(dirs) + sorted(files):
-            pth = os.path.join(cur, n)
-            st = os.lstat(pth)
-            r = n if rel == "." else os.path.join(rel, n)
-            if stat.S_ISLNK(st.st_mode):
-                out.append((r, "l", 0, 0, os.readlink(pth)))
-            elif stat.S_ISDIR(st.st_mode):
-                out.append((r, "d", 0, 0, ""))
-            elif stat.S_ISREG(st.st_mode):
-                out.append((r, "f", st.st_size, st.st_mtime_ns, ""))
-            else:
-                out.append((r, "?", 0, 0, ""))
-    out.sort()
-    return out
-
-
-def to_quarantine(night_fd, night_path, tomb, tomb_fd, q, label_night, name):
-    """Move the set-aside directory into the quarantine. None when it is there under its final name and gone from
-    the night; else the reason it is still in the night (untouched)."""
+def to_quarantine(night_fd, tomb, q, label_night, name):
+    """ONE rename from the night into the quarantine on the same filesystem. None when it is there; else why not
+    (and then nothing has changed: a rename either happens whole or not at all)."""
     clean = name[len(".pruning-"):] if name.startswith(".pruning-") else name
     final = f"{label_night}__{clean}__q{q['stamp']}"
     n = 1
-    while os.path.lexists(os.path.join(q["path"], final)) or os.path.lexists(os.path.join(q["path"], final + ".partial")):
+    while os.path.lexists(os.path.join(q["path"], final)):
         n += 1
         final = f"{label_night}__{clean}__q{q['stamp']}-{n}"
         if n > 50:
-            return "the quarantine already holds 50 copies under its name"
+            return "the quarantine already holds 50 entries under its name"
     try:
         os.rename(tomb, final, src_dir_fd=night_fd, dst_dir_fd=q["fd"])
-        return None                                    # same filesystem: one rename, nothing to copy
+        return None
     except OSError as e:
-        if e.errno != errno.EXDEV:
-            return "it could not be moved to the quarantine"
-    # another filesystem: copy, compare, publish under the final name, and only then empty the source
-    part = final + ".partial"
-    src, dst = os.path.join(night_path, tomb), os.path.join(q["path"], part)
-    cmd = ["cp", "-a", "--no-target-directory", "--", src, dst]
-    for pre in (["nice", "-n", "15"], ["ionice", "-c3"]):
-        if shutil.which(pre[0]):
-            cmd = pre + cmd
-    try:
-        cp = subprocess.run(cmd, env=ENV, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL, timeout=COPY_TIMEOUT)
-        same = cp.returncode == 0 and manifest(src) == manifest(dst)
-    except (OSError, subprocess.TimeoutExpired):
-        same = False
-    if not same:
-        try:
-            shutil.rmtree(part, dir_fd=q["fd"])
-        except OSError:
-            pass
-        return "its copy in the quarantine did not match it (the copy was removed)"
-    try:
-        os.rename(part, final, src_dir_fd=q["fd"], dst_dir_fd=q["fd"])
-    except OSError:
-        return f"its copy could not be given its final name (it is {part} in the quarantine)"
-    try:
-        empty_through(tomb_fd)
-    except OSError:
-        return f"it is in the quarantine as {final}, but its original could not be fully removed (the rest is {tomb})"
-    return None
+        if e.errno == errno.EXDEV:
+            return "its quarantine is not on its filesystem after all (nothing is ever copied)"
+        return "it could not be moved to the quarantine"
 
 
 def expire(q, tonight, keep_days, dry):
@@ -545,6 +495,12 @@ def expire(q, tonight, keep_days, dry):
 
 def free_pct(q):
     """Whole percent of the quarantine's filesystem that an ordinary user can still write, or None."""
+    seq = os.environ.get("DREAMTEAM_PRUNE_FREE_PCT_SEQ", "")
+    if seq:                                            # test seam: one reading per call, the last one repeats
+        vals = seq.split(",")
+        i = min(READS[0], len(vals) - 1)
+        READS[0] += 1
+        return int(vals[i]) if vals[i].isdigit() else None
     forced = os.environ.get("DREAMTEAM_PRUNE_FREE_PCT", "")
     if forced == "unreadable":
         return None                                    # test seam: a statvfs that does not answer
@@ -589,7 +545,7 @@ def put_back(night_fd, night_path, tomb, name):
         return f"; it stays as {tomb}"
 
 
-def consider(night_fd, night_path, night, name, now, dry, res, q):
+def consider(night_fd, night_path, night, name, now, dry, res, qs):
     label = f"{night}/{name}"
     keep = lambda why: res["kept"].append({"clone": label, "why": why})   # noqa: E731
     try:
@@ -605,6 +561,14 @@ def consider(night_fd, night_path, night, name, now, dry, res, q):
     except OSError:
         return keep("it could not be opened")
     try:
+        # its quarantine is the one on ITS filesystem (a rename cannot cross one, and nothing is ever copied)
+        dev = os.fstat(clone_fd).st_dev
+        q = next((x for x in qs if x["dev"] == dev), None)
+        if q is None:
+            res["no_quarantine"].append(label)
+            return keep("no quarantine dir on its filesystem: not moved")
+        if q["full"]:
+            return keep("not looked at: its quarantine is under the free-space floor")
         path = os.path.join(night_path, name)
         try:
             if not os.path.samestat(os.stat(path, follow_symlinks=False), os.fstat(clone_fd)):
@@ -643,15 +607,19 @@ def consider(night_fd, night_path, night, name, now, dry, res, q):
                 return keep(moved)                     # the judgment above may have followed a symlink: it counts for nothing
             if why is not None:
                 return keep(why + " (found after it was set aside)" + put_back(night_fd, night_path, tomb, name))
-            why = to_quarantine(night_fd, night_path, tomb, tomb_fd, q, night, name)
+            # the floor, read again before EVERY move: the moves before this one, or anything else, may have used
+            # the room. Under it (or unreadable): this clone goes back, and no later one is even judged.
+            pct = free_pct(q)
+            q["report"]["free_pct"] = pct
+            if pct is None or pct < q["min_free"]:
+                q["report"]["refused"] = True
+                q["full"] = True
+                return keep("its quarantine went under the free-space floor" + put_back(night_fd, night_path, tomb, name))
+            if not still_there(night_fd, night_path, tomb, tomb_fd, judged):
+                return keep(moved)
+            why = to_quarantine(night_fd, tomb, q, night, name)
             if why is not None:
-                back = "" if "quarantine as" in why else put_back(night_fd, night_path, tomb, name)
-                return keep(why + back)
-            try:                                       # after a copy the emptied original is still there: remove it
-                if os.path.samestat(os.stat(tomb, dir_fd=night_fd, follow_symlinks=False), judged):
-                    os.rmdir(tomb, dir_fd=night_fd)
-            except OSError:
-                pass                                   # moved by rename (nothing left), or not ours: nothing to do
+                return keep(why + put_back(night_fd, night_path, tomb, name))
             res["moved"].append(label)
         finally:
             os.close(tomb_fd)
@@ -661,24 +629,24 @@ def consider(night_fd, night_path, night, name, now, dry, res, q):
 
 
 def main(argv):
-    usage = ("usage: prune_nights.py [--dry-run] --quarantine <absolute dir> [--keep-days N] [--min-free-pct N] "
+    usage = ("usage: prune_nights.py [--dry-run] --quarantine <absolute dir> [--quarantine ...] [--keep-days N] [--min-free-pct N] "
              "<absolute wt_base> <tonight YYYY-MM-DD>")
-    args, dry, qdir, keep_days, min_free = argv[1:], False, None, 14, 10
+    args, dry, qdirs, keep_days, min_free = argv[1:], False, [], 14, 10
     try:
         while args and args[0].startswith("--"):
             opt = args.pop(0)
             if opt == "--dry-run":
                 dry = True
             elif opt == "--quarantine":
-                qdir = args.pop(0)
+                qdirs.append(args.pop(0))
             elif opt == "--keep-days":
                 keep_days = int(args.pop(0))
             elif opt == "--min-free-pct":
                 min_free = int(args.pop(0))
             else:
                 raise ValueError(opt)
-        if (len(args) != 2 or not os.path.isabs(args[0]) or not real_date(args[1]) or not qdir
-                or not os.path.isabs(qdir) or not 1 <= keep_days <= 3650 or not 0 <= min_free <= 99):
+        if (len(args) != 2 or not os.path.isabs(args[0]) or not real_date(args[1]) or not qdirs
+                or not all(os.path.isabs(d) for d in qdirs) or not 1 <= keep_days <= 3650 or not 0 <= min_free <= 99):
             raise ValueError("arguments")
     except (ValueError, IndexError):
         print(usage, file=sys.stderr)
@@ -695,31 +663,49 @@ def main(argv):
     except OSError:
         print(f"prune_nights: {base} is not a plain directory that can be opened", file=sys.stderr)
         return 2
-    # the quarantine: no symlink anywhere in its path, outside the base (and the base outside it), created if absent
-    qnorm = os.path.normpath(qdir)
-    try:
-        if not dry:
-            os.makedirs(qnorm, mode=0o700, exist_ok=True)
-        if os.path.realpath(qnorm) != qnorm:
-            raise OSError("a symlink in the path")
-        inside = lambda a, b: a == b or a.startswith(b + "/")   # noqa: E731
-        if inside(qnorm, base_real) or inside(base_real, qnorm):
-            raise OSError("inside the base")
-        q = {"fd": os.open(qnorm, NOFOLLOW_DIR), "path": qnorm, "stamp": tonight.replace("-", "")}
-    except OSError:
-        print(f"prune_nights: the quarantine {qdir} is not a plain directory outside {base} that can be used", file=sys.stderr)
-        return 2
+    # the quarantines: each validated BEFORE anything is created, one per filesystem
+    qs, seen_dev = [], set()
+    inside = lambda a, b: a == b or a.startswith(b + "/")   # noqa: E731
+    for qdir in qdirs:
+        qnorm = os.path.normpath(qdir)
+        try:
+            # containment first, on the names alone: a refused path must not have been created on the way to refusal
+            if inside(qnorm, base_real) or inside(base_real, qnorm) or inside(qnorm, os.path.normpath(base)):
+                raise OSError("inside the base")
+            # then component by component from the root, never through a symlink; a missing component is created
+            # (not in a dry run) inside the directory already opened, so nothing can be made behind a link
+            qfd = os.open("/", NOFOLLOW_DIR)
+            for comp in [c for c in qnorm.split("/") if c]:
+                try:
+                    nxt = os.open(comp, NOFOLLOW_DIR, dir_fd=qfd)
+                except FileNotFoundError:
+                    if dry:
+                        raise OSError("absent, and a dry run creates nothing") from None
+                    os.mkdir(comp, mode=0o700, dir_fd=qfd)
+                    nxt = os.open(comp, NOFOLLOW_DIR, dir_fd=qfd)
+                os.close(qfd)
+                qfd = nxt
+            if os.path.realpath(qnorm) != qnorm or not os.path.samestat(os.stat(qnorm), os.fstat(qfd)):
+                raise OSError("its path does not lead to it")
+            dev = os.fstat(qfd).st_dev
+            if dev in seen_dev:
+                raise OSError("a second quarantine on one filesystem")
+            seen_dev.add(dev)
+        except OSError as e:
+            print(f"prune_nights: the quarantine {qdir} cannot be used ({e}); nothing was moved", file=sys.stderr)
+            return 2
+        qs.append({"fd": qfd, "path": qnorm, "dev": dev, "stamp": tonight.replace("-", ""), "min_free": min_free, "full": False,
+                   "report": {"dir": qnorm, "free_pct": None, "min_free_pct": min_free, "keep_days": keep_days, "refused": False}})
 
     res = {"tonight": tonight, "protected": [tonight], "moved": [], "expired": [], "kept": [], "ignored": [], "dry_run": dry,
-           "quarantine": {"dir": qnorm, "free_pct": None, "min_free_pct": min_free, "keep_days": keep_days, "refused": False}}
-    res["expired"] = expire(q, tonight, keep_days, dry)        # first: it frees the space the floor is about
-    pct = free_pct(q)
-    res["quarantine"]["free_pct"] = pct
-    if pct is None or pct < min_free:
-        res["quarantine"]["refused"] = True                    # nothing is moved, and nothing is judged
-        os.close(q["fd"]); os.close(base_fd)
-        print(json.dumps(res, ensure_ascii=True))
-        return 0
+           "no_quarantine": [], "quarantine": [q["report"] for q in qs]}
+    for q in qs:
+        res["expired"] += expire(q, tonight, keep_days, dry)   # first: it frees the space the floor is about
+        pct = free_pct(q)
+        q["report"]["free_pct"] = pct
+        if pct is None or pct < min_free:
+            q["report"]["refused"] = True                      # this quarantine takes nothing tonight
+            q["full"] = True
     nights = []
     for name in sorted(os.listdir(base_fd)):
         try:
@@ -744,7 +730,7 @@ def main(argv):
             continue
         try:
             for name in sorted(os.listdir(night_fd)):
-                consider(night_fd, os.path.join(base_real, night), night, name, now, dry, res, q)
+                consider(night_fd, os.path.join(base_real, night), night, name, now, dry, res, qs)
             if not dry:
                 try:
                     os.rmdir(night, dir_fd=base_fd)    # only an emptied night goes
@@ -752,7 +738,8 @@ def main(argv):
                     pass
         finally:
             os.close(night_fd)
-    os.close(q["fd"])
+    for q in qs:
+        os.close(q["fd"])
     os.close(base_fd)
     print(json.dumps(res, ensure_ascii=True))
     return 0

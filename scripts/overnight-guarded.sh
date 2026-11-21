@@ -181,13 +181,21 @@ guard_line() {
         pr_m=$(jq -r '.prune.min_free_pct | if type == "number" then floor | tostring else "?" end' <<<"$snap")
         pr_x=$(jq -r '.prune.expired | if type == "number" then floor else 0 end' <<<"$snap")
         [ "$st" = ok ] && st=warn
-        fact="$fact; old clones NOT moved: the quarantine disk has ${pr_f} (floor ${pr_m}%), expired $pr_x from it"
+        fact="$fact; old clones NOT all moved: a quarantine disk has ${pr_f} (floor ${pr_m}%), moved $(jq -r '.prune.moved | if type == "number" then floor else 0 end' <<<"$snap"), expired $pr_x"
       elif jq -e '.prune | type == "object" and (.moved | type) == "number" and (.kept | type) == "number" and (.expired | type) == "number"' <<<"$snap" >/dev/null 2>&1; then
         pr_n=$(jq -r '.prune.moved | floor' <<<"$snap"); pr_k=$(jq -r '.prune.kept | floor' <<<"$snap"); pr_x=$(jq -r '.prune.expired | floor' <<<"$snap")
         if [ "$pr_n" != 0 ] || [ "$pr_k" != 0 ] || [ "$pr_x" != 0 ]; then
           pr_first=$(jq -r '.prune.kept_list[0]? | select(. != null) | "\(.clone): \(.why)"' <<<"$snap" 2>/dev/null | tr -cd 'A-Za-z0-9 ._:()/,-' | cut -c1-110)
           fact="$fact; old clones: moved $pr_n to quarantine, kept $pr_k${pr_first:+ (first: $pr_first)}, expired $pr_x"
         fi
+      fi
+      # clones on a filesystem with no quarantine dir are never moved: named, and an ok line turns to warn
+      local pr_q pr_qf
+      pr_q=$(jq -r '.prune.no_quarantine? | if type == "number" then floor else 0 end' <<<"$snap" 2>/dev/null); pr_q=${pr_q:-0}
+      if [ "$pr_q" != 0 ]; then
+        pr_qf=$(jq -r '.prune.no_quarantine_first? // "" | tostring' <<<"$snap" 2>/dev/null | tr -cd 'A-Za-z0-9 ._/-' | cut -c1-80)
+        [ "$st" = ok ] && st=warn
+        fact="$fact; $pr_q old clone(s) on a filesystem with no quarantine dir${pr_qf:+ (first: $pr_qf)}"
       fi
       # ...and a prune whose result could not be written into the record (the marker prune_old_nights leaves)
       if [ -e "${DREAMTEAM_PRUNE_MARKER:-$STATE/overnight-runs/${rid//[^A-Za-z0-9-]/}/prune-unrecorded}" ] && [[ "$fact" != *"old clones"* ]]; then
@@ -419,13 +427,16 @@ repo_rec() { # rid repo json-patch
 }
 
 # prune_old_nights (#250): after FINISHED, the per-night clones under wt_base from nights BEFORE the previous one are
-# MOVED to a quarantine dir on the big disk and deleted from there after 14 days (move-then-delete: the lead,
-# 2026-11-20). All of the selecting, moving and expiring is scripts/lib/prune_nights.py (its header is the contract);
+# MOVED, by one rename, to the quarantine dir on THEIR OWN filesystem and deleted from there after 14 days
+# (move-then-delete, rename only, nothing is ever copied: the lead, 2026-11-20). A clone whose filesystem has no
+# quarantine dir is not moved, and the line names it. All of the selecting, moving and expiring is scripts/lib/prune_nights.py (its header is the contract);
 # this function only runs it and writes what it did into THIS run's guard record as .prune, which guard_line then puts
 # in the CHECK line:
-#   {moved: N, expired: E, kept: M, kept_list: [{clone, why}, ...first 20], protected: [...], free_pct: P,
-#    min_free_pct: F, refused: true|false}      or   {error: "<why it did not run>"}
-# The quarantine dir is config `overnight.prune_quarantine` (a per-host value: set it in this host's overlay), with
+#   {moved: N, expired: E, kept: M, kept_list: [{clone, why}, ...first 20], protected: [...], free_pct: P (the
+#    lowest among the quarantines), min_free_pct: F, refused: true|false (any quarantine under its floor),
+#    no_quarantine: K, no_quarantine_first: "<night>/<name>"}      or   {error: "..."}   or   {unconfigured: true}
+# The quarantine dirs are config `overnight.prune_quarantine`: ONE absolute path or a LIST of them, one per filesystem
+# that holds night clones (a per-host value: set it in this host's overlay), with
 # `overnight.prune_keep_days` (14) and `overnight.prune_min_free_pct` (10). No quarantine configured = nothing is
 # moved and the line says so in words, without changing its status (a known off state on that host; a prune that is
 # configured and fails, or is refused for lack of space, does turn ok into warn). A night killed by a signal does not prune. No wt_base yet = nothing to do.
@@ -439,32 +450,38 @@ prune_old_nights() { # rid wt_base night
   # guard_line reads it. If the marker itself cannot be written, nothing is pruned: no deletion without a way to say so.
   local unrec="${DREAMTEAM_PRUNE_MARKER:-$STATE/overnight-runs/${rid//[^A-Za-z0-9-]/}/prune-unrecorded}"
   local -a cmd; read -r -a cmd <<< "${DREAMTEAM_PRUNE_CMD:-python3 -I $ROOT/scripts/lib/prune_nights.py}"
-  local qdir keep_days min_free
-  qdir="${DREAMTEAM_PRUNE_QUARANTINE:-$(oc prune_quarantine "")}"
+  local keep_days min_free qd; local -a qdirs=() qargs=()
+  # one path or a list (config), or colon-separated (env, tests); only absolute paths count
+  if [ -n "${DREAMTEAM_PRUNE_QUARANTINE:-}" ]; then IFS=: read -r -a qdirs <<< "$DREAMTEAM_PRUNE_QUARANTINE"
+  else mapfile -t qdirs < <(jq -r '.overnight.prune_quarantine // empty | if type == "array" then .[] else . end | strings' <<<"$CFGJSON" 2>/dev/null); fi
+  for qd in "${qdirs[@]}"; do case "$qd" in /*) qargs+=(--quarantine "$qd") ;; esac; done
   keep_days=$(oc prune_keep_days 14); [[ "$keep_days" =~ ^[0-9]{1,4}$ ]] && [ "$keep_days" -ge 1 ] || keep_days=14
   min_free=$(oc prune_min_free_pct 10); [[ "$min_free" =~ ^[0-9]{1,2}$ ]] || min_free=10
   doc=""; rc=0
-  case "$qdir" in
-    /*) ;;
-    *) rc=-1; doc=$(jq -cn '{unconfigured: true}')
-       log "runner $rid: old night clones not moved: no quarantine dir configured" ;;
-  esac
+  if [ "${#qargs[@]}" -eq 0 ]; then
+    rc=-1; doc=$(jq -cn '{unconfigured: true}')
+    log "runner $rid: old night clones not moved: no quarantine dir configured"
+  fi
   if [ "$rc" -ne 0 ]; then :
   elif printf 'started %s\n' "$(date -Iseconds)" > "$unrec" 2>/dev/null; then
-    res=$("${cmd[@]}" --quarantine "$qdir" --keep-days "$keep_days" --min-free-pct "$min_free" "$wt" "$night" 2>>"$LOG"); rc=$?
+    res=$("${cmd[@]}" "${qargs[@]}" --keep-days "$keep_days" --min-free-pct "$min_free" "$wt" "$night" 2>>"$LOG"); rc=$?
   else
     rc=-1; doc=$(jq -cn '{error: "not run: the marker that says a prune started could not be written"}')
     log "runner $rid: old night clones not pruned (the started-marker could not be written)"
   fi
   if [ "$rc" -eq 0 ]; then
     doc=$(jq -c 'select(type == "object" and (.moved | type) == "array" and (.kept | type) == "array"
-                        and (.expired | type) == "array" and (.quarantine | type) == "object"
-                        and (.quarantine.refused | type) == "boolean")
+                        and (.expired | type) == "array" and (.no_quarantine | type) == "array"
+                        and (.quarantine | type) == "array" and (.quarantine | length) >= 1
+                        and all(.quarantine[]; type == "object" and (.refused | type) == "boolean"))
                  | {moved: (.moved | length), expired: (.expired | length), kept: (.kept | length),
                     kept_list: [.kept[:20][] | {clone: (.clone | tostring), why: (.why | tostring)}], protected: (.protected // []),
-                    free_pct: (.quarantine.free_pct | if type == "number" then floor else null end),
-                    min_free_pct: (.quarantine.min_free_pct | if type == "number" then floor else null end),
-                    refused: .quarantine.refused}' <<<"$res" 2>/dev/null)
+                    refused: any(.quarantine[]; .refused),
+                    free_pct: (if any(.quarantine[]; (.free_pct | type) != "number") then null
+                               else ([.quarantine[] | select(.refused) | .free_pct] | if length > 0 then min else null end)
+                                    // ([.quarantine[].free_pct] | min) | floor end),
+                    min_free_pct: (.quarantine[0].min_free_pct | if type == "number" then floor else null end),
+                    no_quarantine: (.no_quarantine | length), no_quarantine_first: (.no_quarantine[0] // "" | tostring)}' <<<"$res" 2>/dev/null)
   fi
   [ -n "$doc" ] || doc=$(jq -cn --arg e "the prune tool exited $rc or printed no result" '{error: $e}')
   # a tool that failed says so in the record; only then is its marker no longer the only trace
