@@ -900,6 +900,61 @@ FAKE_SESSION=gone rec started "$OLD" "guard passed" '[{"repo":"a/x","status":"st
 ( FAKE_NOTIFY_SLEEP=2 FAKE_SESSION=gone run_g --watch >/dev/null ) & ( FAKE_NOTIFY_SLEEP=2 FAKE_SESSION=gone run_g --watch >/dev/null ) & wait
 [ "$(wc -l < "$TMP/notify.txt")" = 1 ] && pass "--watch: two concurrent watches send once" || fail "watch concurrent: $(wc -l < "$TMP/notify.txt") sends"
 
+# ── #250/#255: after FINISHED the runner prunes old night clones (scripts/lib/prune_nights.py, tested on real repos in
+# test-prune-nights.sh). Here: the WIRING. The tool is called once, after FINISHED, with the plan's wt_base and night;
+# its result lands in THIS run's guard record; and the CHECK LINE says it (the round-1 review: JSON storage alone
+# proves nothing about the line).
+cat > "$BIN/prune-stub" <<'S'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$PRUNE_LOG"
+grep -q '^FINISHED ' "$DREAMTEAM_STATE/overnight-pending.md" 2>/dev/null && echo after-finished >> "$PRUNE_LOG"
+[ -n "${PRUNE_RC:-}" ] && exit "$PRUNE_RC"
+printf '%s\n' "${PRUNE_OUT:-{\"pruned\":[],\"kept\":[],\"protected\":[]}}"
+S
+chmod +x "$BIN/prune-stub"
+PO='{"pruned":["2026-11-10/a","2026-11-10/b"],"kept":[{"clone":"2026-11-10/realmwatch","why":"1 commit(s) the remote does not hold"},{"clone":"2026-11-11/x","why":"a detached HEAD"}],"protected":["t","p"]}'
+reset; rm -rf "$TMP/checks"; mkqueue jphein/realmwatch:2; : > "$TMP/prune.log"
+FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 DREAMTEAM_PRUNE_CMD="$BIN/prune-stub" PRUNE_LOG="$TMP/prune.log" PRUNE_OUT="$PO" run_g >/dev/null
+NIGHTP=$(pj .night)
+[ "$(grep -c "^$TMP/wt $NIGHTP\$" "$TMP/prune.log")" = 1 ] && pass "prune: the tool is called once with the plan's wt_base and night" || fail "prune call: $(cat "$TMP/prune.log")"
+grep -qx after-finished "$TMP/prune.log" && pass "prune: it runs AFTER the FINISHED line is written" || fail "prune ran before FINISHED"
+[ "$(gj '.prune | "\(.pruned) \(.kept) \(.kept_list[0].clone) \(.kept_list | length)"')" = "2 2 2026-11-10/realmwatch 2" ] && pass "prune: counts and the kept list are in this run's guard record" || fail "prune record: $(gj -c .prune)"
+[[ "$(cl)" == "CHECK nightly-guarded ok · "*"finished 1, stopped 0, skipped 0"*"; old clones: pruned 2, kept 2 (first: 2026-11-10/realmwatch: 1 commit(s) the remote does not hold)"* ]] \
+  && pass "prune: the CHECK line says how many went, how many stayed, and the first reason" || fail "prune line: '$(cl)'"
+[[ "$(cl)" =~ $NSHAPE ]] && pass "prune: the line keeps its three-part shape" || fail "prune line shape: '$(cl)'"
+# a tool that fails is said in the line and turns ok into warn (disk is not being freed and nobody would know)
+reset; rm -rf "$TMP/checks"; mkqueue jphein/realmwatch:2
+FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 DREAMTEAM_PRUNE_CMD="$BIN/prune-stub" PRUNE_LOG="$TMP/prune.log" PRUNE_RC=2 run_g >/dev/null
+[[ "$(cl)" == "CHECK nightly-guarded warn · "*"finished 1, stopped 0, skipped 0"*"; old clones NOT pruned (the prune tool exited 2 or printed no result)"* ]] \
+  && pass "prune: a tool that fails → warn, said in the line" || fail "prune fail line: '$(cl)'"
+[ "$(gj '.prune.error')" = "the prune tool exited 2 or printed no result" ] && pass "prune: the failure is in the record" || fail "prune fail record: $(gj -c .prune)"
+# output that is not the tool's object is a failure too, never read as "nothing to prune"
+reset; rm -rf "$TMP/checks"; mkqueue jphein/realmwatch:2
+FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 DREAMTEAM_PRUNE_CMD="$BIN/prune-stub" PRUNE_LOG="$TMP/prune.log" PRUNE_OUT='{"pruned":3}' run_g >/dev/null
+[[ "$(cl)" == "CHECK nightly-guarded warn · "*"old clones NOT pruned"* ]] && pass "prune: malformed tool output → warn, not a quiet zero" || fail "prune malformed: '$(cl)'"
+# nothing old to look at: the line is exactly as it was before this feature (quiet)
+reset; rm -rf "$TMP/checks"; mkqueue jphein/realmwatch:2
+FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 DREAMTEAM_PRUNE_CMD="$BIN/prune-stub" PRUNE_LOG="$TMP/prune.log" run_g >/dev/null
+[[ "$(cl)" == "CHECK nightly-guarded ok · "*"finished 1, stopped 0, skipped 0"* ]] && [[ "$(cl)" != *"old clones"* ]] && pass "prune: nothing pruned and nothing kept → the line does not mention it" || fail "prune quiet: '$(cl)'"
+# the switch: DREAMTEAM_PRUNE_NIGHTS=0 never calls the tool
+reset; rm -rf "$TMP/checks"; mkqueue jphein/realmwatch:2; : > "$TMP/prune.log"
+FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 DREAMTEAM_PRUNE_NIGHTS=0 DREAMTEAM_PRUNE_CMD="$BIN/prune-stub" PRUNE_LOG="$TMP/prune.log" run_g >/dev/null
+[ ! -s "$TMP/prune.log" ] && [ "$(gj '.prune // "none"')" = none ] && pass "prune: DREAMTEAM_PRUNE_NIGHTS=0 → the tool is not called" || fail "prune switch: $(cat "$TMP/prune.log")"
+# the REAL tool through the nightly, on a real old clone (real git for the tool only: the nightly's own git is the stub)
+REALGIT=$(PATH="${PATH#"$BIN:"}" command -v git)
+reset; rm -rf "$TMP/checks" "$TMP/pr-remote.git"; mkqueue jphein/realmwatch:2
+( export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid
+  "$REALGIT" init -q --bare -b main "$TMP/pr-remote.git"; "$REALGIT" init -q -b main "$TMP/pr-seed"; "$REALGIT" -C "$TMP/pr-seed" commit -q --allow-empty -m one
+  "$REALGIT" -C "$TMP/pr-seed" push -q "$TMP/pr-remote.git" main; rm -rf "$TMP/pr-seed"
+  mkdir -p "$TMP/wt/2001-01-01" "$TMP/wt/2001-01-02" "$TMP/wt/2001-01-03"
+  "$REALGIT" clone -q "$TMP/pr-remote.git" "$TMP/wt/2001-01-01/gone"; "$REALGIT" clone -q "$TMP/pr-remote.git" "$TMP/wt/2001-01-01/stays"
+  "$REALGIT" -C "$TMP/wt/2001-01-01/stays" commit -q --allow-empty -m local
+  "$REALGIT" clone -q "$TMP/pr-remote.git" "$TMP/wt/2001-01-03/prev" ) >/dev/null 2>&1
+printf '#!/bin/sh\nPATH="%s:$PATH" DREAMTEAM_PRUNE_QUIET_HOURS=0 exec python3 -I "%s/scripts/lib/prune_nights.py" "$@"\n' "$(dirname "$REALGIT")" "$ROOT" > "$BIN/prune-real"; chmod +x "$BIN/prune-real"
+FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 DREAMTEAM_PRUNE_CMD="$BIN/prune-real" run_g >/dev/null
+{ [ ! -e "$TMP/wt/2001-01-01/gone" ] && [ -d "$TMP/wt/2001-01-01/stays/.git" ] && [ -d "$TMP/wt/2001-01-03/prev/.git" ]; } \
+  && pass "prune (real tool via the nightly): the clean old clone is gone, the unpushed one and the previous night stay" || fail "prune real: $(ls "$TMP/wt" "$TMP/wt/2001-01-01" 2>&1 | tr '\n' ' ') $(gj -c .prune)"
+[[ "$(cl)" == *"; old clones: pruned 1, kept 1 (first: 2001-01-01/stays: 1 commit(s) the remote does not hold)"* ]] && pass "prune (real tool): the line names the kept clone and why" || fail "prune real line: '$(cl)'"
 [ ! -s "$TMP/launch-attempts.txt" ] && pass "no test attempted a real scope/tmux launch" || fail "a test reached the launch: $(head -3 "$TMP/launch-attempts.txt")"
 echo "─────────────────────────────────────────────────────────────────"
 echo "SUMMARY: $PASS passed, $FAIL failed, $((PASS+FAIL)) total"

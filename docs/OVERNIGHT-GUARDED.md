@@ -134,6 +134,31 @@ the clone's real default branch (`origin/HEAD`) and main/master/trunk/production
    - The 07:03 `morning-briefing.sh` adds a "Nightly sweep" line with one clause per repo (status, PRs opened,
      merged, reason), and a started run counts as overnight activity.
 
+## Old night clones (#250)
+
+Each night's clones live in `~/srv/wt/overnight/<night>/<name>` and were never removed (1.8 GB a night on a small
+root). After the FINISHED line the runner now calls `scripts/lib/prune_nights.py <wt_base> <night>`; its header is
+the contract. In short:
+
+- **Nights:** only real calendar dates earlier than tonight are nights. Tonight and the newest earlier night are
+  never touched (the previous night's clones are what a person reads in the morning). Anything else under the base
+  (other names, impossible or future dates, symlinks, files) is left alone.
+- **Clones:** one goes only when every check answered and none found something that exists only there: a real
+  directory with a `.git` directory; quiet for 6 hours and no process working in it; git answering for that
+  directory with every call exiting 0; HEAD on a branch; `status --untracked-files=all` empty; no stash; a remote,
+  fetched successfully just now, that holds every commit of HEAD and of every local branch.
+- **So this is kept, on purpose:** a clone whose fix branch was squash-merged and deleted on the remote (its commits
+  are no longer on the remote). The line names it. Nothing asks the forge whether a pull request merged.
+- **How:** descriptors opened without following symlinks; the clone is renamed to `.pruning-<name>-<random>` inside
+  its night, the renamed directory must be the one that was judged, then it is removed. There is no lock shared
+  with clone users (nothing else takes one); the header says what stands in for it.
+- **Where it shows:** the guard record's `.prune` (`pruned`, `kept`, `kept_list` with a reason each) and the CHECK
+  line: `…; old clones: pruned N, kept M (first: <night>/<name>: <why>)`. A prune that could not run is
+  `old clones NOT pruned (…)` and turns an ok line to warn. Nothing old to look at: the line says nothing.
+- `DREAMTEAM_PRUNE_NIGHTS=0` turns it off. A night ended by a signal does not prune. By hand, to see what would go:
+  `python3 -I scripts/lib/prune_nights.py --dry-run ~/srv/wt/overnight $(date -d '12 hours ago' +%F)` (no fetch in a
+  dry run, so it judges by the clone's last knowledge of its remote).
+
 ## The 2026-11-16 night, and the watch
 
 The first guarded night (`nightly-20261116-233001`) died at 23:41, 11 minutes in, with one repo begun and no FINISHED

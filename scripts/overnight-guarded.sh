@@ -165,6 +165,20 @@ guard_line() {
           fi
         fi
       fi
+      # old night clones (#250): what the runner's prune did goes in the LINE, not only in the record. A prune that
+      # could not run turns an ok into warn (disk is not being freed and nobody would know); kept clones are named
+      # by the first one and its reason. Nothing is said when there was nothing old to look at.
+      local pr_e pr_n pr_k pr_first
+      pr_e=$(jq -r '.prune.error? // empty | tostring' <<<"$snap" 2>/dev/null | tr -cd 'A-Za-z0-9 ._:()-' | cut -c1-70)
+      if [ -n "$pr_e" ]; then
+        [ "$st" = ok ] && st=warn; fact="$fact; old clones NOT pruned ($pr_e)"
+      elif jq -e '.prune | type == "object" and (.pruned | type) == "number" and (.kept | type) == "number"' <<<"$snap" >/dev/null 2>&1; then
+        pr_n=$(jq -r '.prune.pruned | floor' <<<"$snap"); pr_k=$(jq -r '.prune.kept | floor' <<<"$snap")
+        if [ "$pr_n" != 0 ] || [ "$pr_k" != 0 ]; then
+          pr_first=$(jq -r '.prune.kept_list[0]? | select(. != null) | "\(.clone): \(.why)"' <<<"$snap" 2>/dev/null | tr -cd 'A-Za-z0-9 ._:()/,-' | cut -c1-110)
+          fact="$fact; old clones: pruned $pr_n, kept $pr_k${pr_first:+ (first: $pr_first)}"
+        fi
+      fi
       # the run-level marker the runner's signal handler writes (independent of any repo record)
       if [ -s "$STATE/overnight-runs/${rid//[^A-Za-z0-9-]/}/killed" ]; then
         killedwhy="runner killed ($(head -c 20 "$STATE/overnight-runs/${rid//[^A-Za-z0-9-]/}/killed" | cut -d' ' -f1 | tr -cd 'A-Z'))"
@@ -390,6 +404,35 @@ repo_rec() { # rid repo json-patch
       end' "$g" 2>/dev/null) && [ -n "$out" ] && printf '%s\n' "$out" > "$g.tmp" && mv -f "$g.tmp" "$g"
 }
 
+# prune_old_nights (#250): after FINISHED, the per-night clones under wt_base from nights BEFORE the previous one are
+# removed, each only when nothing can be lost with it. All of the judging and deleting is scripts/lib/prune_nights.py
+# (its header is the contract: which nights, which clones, how a directory is removed); this function only runs it and
+# writes what it did into THIS run's guard record as .prune, which guard_line then puts in the CHECK line:
+#   {pruned: N, kept: M, kept_list: [{clone, why}, ...first 20], protected: [...]}   or   {error: "<why it did not run>"}
+# A night that was killed by a signal does not prune (it has seconds left). No wt_base yet = nothing to prune.
+# DREAMTEAM_PRUNE_NIGHTS=0 turns it off; DREAMTEAM_PRUNE_CMD replaces the tool (tests).
+prune_old_nights() { # rid wt_base night
+  local rid="$1" wt="$2" night="$3" g="$STATE/overnight-guard.json" res rc doc out tmp
+  [ "${DREAMTEAM_PRUNE_NIGHTS:-1}" = 1 ] || { log "runner $rid: pruning of old night clones is off (DREAMTEAM_PRUNE_NIGHTS)"; return 0; }
+  [ -d "$wt" ] || return 0
+  local -a cmd; read -r -a cmd <<< "${DREAMTEAM_PRUNE_CMD:-python3 -I $ROOT/scripts/lib/prune_nights.py}"
+  res=$("${cmd[@]}" "$wt" "$night" 2>>"$LOG"); rc=$?
+  doc=""
+  if [ "$rc" -eq 0 ]; then
+    doc=$(jq -c 'select(type == "object" and (.pruned | type) == "array" and (.kept | type) == "array")
+                 | {pruned: (.pruned | length), kept: (.kept | length),
+                    kept_list: [.kept[:20][] | {clone: (.clone | tostring), why: (.why | tostring)}], protected: (.protected // [])}' <<<"$res" 2>/dev/null)
+  fi
+  [ -n "$doc" ] || doc=$(jq -cn --arg e "the prune tool exited $rc or printed no result" '{error: $e}')
+  tmp=$(mktemp "$STATE/.overnight-guard.json.XXXXXX" 2>/dev/null) || { log "runner $rid: prune result not recorded (no temp file)"; return 0; }
+  if out=$(jq -c --arg rid "$rid" --argjson p "$doc" 'if .run_id != $rid then . else .prune = $p end' "$g" 2>/dev/null) && [ -n "$out" ] \
+     && printf '%s\n' "$out" > "$tmp" && mv -f -- "$tmp" "$g"; then
+    log "runner $rid: old night clones: $(jq -r 'if .error then "not pruned (" + .error + ")" else "pruned \(.pruned), kept \(.kept)" end' <<<"$doc")"
+  else
+    rm -f -- "$tmp"; log "runner $rid: prune result not recorded"
+  fi
+}
+
 run_runner() {
   local dir="$1" plan="$1/plan.json"
   [ -f "$plan" ] || { log "runner: no plan at $plan"; return 0; }
@@ -561,6 +604,7 @@ End your reply with ONE line: SWEEP-RESULT {\"opened\":[N, ...PRs this run opene
       | .too_large = ([$rs[].too_large // [] | .[]])' "$STATE/sweep-results.json" 2>/dev/null) && [ -n "$sw" ] && write_sweep "$sw"
   echo "FINISHED $rid at $(date '+%F %H:%M %Z'): $done_n of $n repo(s) swept.${stop_reason:+ Stopped: $stop_reason.}" >> "$STATE/overnight-pending.md"
   log "runner $rid: finished $done_n of $n repo(s)"
+  [ -n "$RUNNER_SIG" ] || prune_old_nights "$rid" "$wt" "$night"
   guard_line
 }
 
