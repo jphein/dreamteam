@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
-"""dreamteam — remove the nightly's OLD per-night clones, and only the ones nothing can be lost with (#250).
+"""dreamteam — move the nightly's OLD per-night clones off the small disk, then delete them by age (#250).
 
-    prune_nights.py [--dry-run] <wt_base> <tonight YYYY-MM-DD>
+    prune_nights.py [--dry-run] --quarantine <dir> [--keep-days 14] [--min-free-pct 10] <wt_base> <tonight YYYY-MM-DD>
 
 The nightly clones each repo into <wt_base>/<night>/<name> and never removed them (1.8 GB a night on a small root).
-This deletes directories, so every rule below is a reason to KEEP: a clone goes only when every check answered,
-and answered "nothing here exists only here". Anything unclear is kept and named.
+The design is MOVE-THEN-DELETE (the lead, 2026-11-20, after three review rounds on a prove-then-delete version):
+  1. Quarantine entries older than --keep-days are deleted (by the date in their name, never by mtime).
+  2. If the quarantine disk has less than --min-free-pct free, NOTHING is moved and the result says so
+     ("quarantine": {"refused": true, "free_pct": N}); the nightly puts that in its CHECK line.
+  3. Otherwise every old clone the JUDGE selects is moved to <quarantine>/<night>__<name>__q<YYYYMMDD>, where it
+     stays whole for --keep-days. A clone the judge does not select stays where it is, named with its reason.
+So nothing is destroyed on the night it is selected: a wrong selection costs a move, and the clone can be moved
+back by hand for two weeks. The judge below is therefore a SELECTOR, not a proof. It is kept as strict as the
+reviews made it, because the stricter it is, the less often a clone someone still needs is moved at all.
 
 Which nights. A night is a directory directly under <wt_base> whose name is a real calendar date earlier than
 <tonight>. Tonight is never touched, nor is the newest earlier night (the previous night's clones are the ones a
@@ -13,7 +20,7 @@ person still reads in the morning). Names that are not a date, impossible dates 
 earlier than tonight, symlinks and plain files are not nights: left alone and listed under "ignored".
 
 Which clones. Inside a prunable night EVERY entry is judged the same way, whatever its name (a `.pruning-…` name
-left by an interrupted run earns nothing). It is deleted only when ALL of this holds:
+left by an interrupted run earns nothing). It is selected (moved to quarantine) only when ALL of this holds:
   1. It is a real directory (a symlink is never followed and never removed) with a plain `.git` directory whose
      storage is its own: `objects` and `refs` are real directories, `HEAD` and `config` are plain files, and there
      is no `commondir`, `objects/info/alternates`, `worktrees` or `modules`.
@@ -29,41 +36,57 @@ left by an interrupted run earns nothing). It is deleted only when ALL of this h
      is changed by judging it and no local ref can be moved before it is compared.
   5. HEAD is on a branch; `git status --untracked-files=all` prints nothing; no index entry is marked
      assume-unchanged or skip-worktree (status cannot see changes to those); there is no stash.
-  6. Every commit this clone holds in ANY way (all refs, tags included, and every reflog) is reachable from its
-     remote-tracking branches (`rev-list --all --reflog --not --remotes` is empty).
+  6. Every commit reachable from any ref or reflog is reachable from its remote-tracking branches (`rev-list
+     --all --reflog --not --remotes` is empty), AND every COMMIT and TAG OBJECT in the object store, referenced or
+     not (a commit left dangling by a reset and an expired reflog is still in the store), is reachable from the
+     remote-tracking branches or from a tag the forge has. History is read as it is: no grafts file, no shallow
+     file, no replace refs, replacement processing off.
   7. And those remote-tracking branches are true NOW: for each tip, the forge is asked, from outside the clone
      (`gh api …/compare/<tip>...<branch>`, run in `/`), whether that commit is still on the default branch or on
-     the branch of the same name. A tip the forge does not confirm (branch deleted, history rewritten, a ref
-     someone pointed at a local commit, or the forge unreachable) keeps the clone.
-  6 and 7 together are the proof: every commit is under a tracking tip, and every tracking tip is on the remote.
+     the branch of the same name; and every local tag must be a tag the forge lists with the same object. A tip or
+     tag the forge does not confirm (deleted, rewritten, pointed at a local commit, or the forge unreachable)
+     keeps the clone.
+  6 and 7 together are the proof: every commit is under a tracking tip or a remote tag, and each of those is on
+  the remote now.
+  NOT covered, by decision: blobs and trees that no commit holds (content that was staged and then dropped). They
+  are in no commit, `status` does not show them, and nothing short of keeping every clone would preserve them.
 What this keeps on purpose: a clone whose fix branch was squash-merged and deleted on the remote (its commits are
 not on the remote any more); a clone whose history was amended or rebased (the reflog holds the old commits).
 Ignored files (build output) are not looked at: these are the nightly's own fresh clones.
 
-How a clone is deleted, and what that does and does not guarantee.
+How a selected clone is moved.
   - Every directory is opened O_NOFOLLOW and used by descriptor, never by a re-resolved path.
-  - After the first judgment the clone is RENAMED inside its night to `.pruning-<name>-<random>`. From then on a
-    user coming by path finds nothing under the old name.
-  - The renamed directory is opened; it must be the inode that was judged. Then the process table is scanned for
-    any working directory or open file inside it, it is JUDGED AGAIN in full (so a write that landed between the
-    first judgment and the rename is seen), and scanned once more.
-  - Only then are its contents removed, THROUGH THAT DESCRIPTOR (so what is emptied is the judged directory, not
-    whatever now has its name), and the empty directory is removed only if the name still leads to that inode.
+  - After the first judgment the clone is RENAMED inside its night to `.pruning-<name>-<random>`. The renamed
+    directory must be the inode that was judged; the process table is scanned for a working directory, an open
+    file or a mapped file inside it; it is JUDGED AGAIN in full; scanned once more; and the name is re-checked
+    without following symlinks (still that directory, still inside the night that was opened).
+  - Then it goes to the quarantine. On the same filesystem that is one rename. Across filesystems (the usual case:
+    small root to big disk) it is copied to `<final name>.partial` with `cp -a` (symlinks kept as symlinks),
+    the copy's manifest (every path with its type, size, mtime, link target) must equal the source's, the copy is
+    renamed to its final name, and ONLY THEN is the source emptied through its own descriptor. A copy that does
+    not match is removed and the clone stays where it was.
   - Whenever a step says no, the directory is renamed back if its name is free; otherwise it stays under the
     `.pruning-…` name and the next run judges it like any other entry.
-  This is NOT a lock. Nothing else in the fleet takes a lock on a clone, so none can be shared. What remains
-  possible: a process of ANOTHER user (invisible in /proc), or one that opens the renamed directory by listing the
-  night between the last scan and the removal. The nightly allows one runner at a time, this runs inside it after
-  FINISHED, and only nights before the previous one are candidates; those are the reasons this window is accepted.
+  This is not a lock (nothing else in the fleet locks a clone). A process of another user, or one of the owner's
+  own that hides its state (non-dumpable: measured 2026-11-20, 15 of 284 on the server, among them the systemd
+  user manager and ssh-agent), is invisible to the scans, and a process could open the set-aside directory
+  between the last scan and the move. With move-then-delete the cost of that is a clone found in quarantine
+  instead of in its night, for 14 days.
+  The quarantine: an absolute directory with no symlink in its path, outside <wt_base>, created if absent. Only
+  entries named `<YYYY-MM-DD>__<name>__q<YYYYMMDD>` that are real directories are ever deleted from it, when the
+  q-date is --keep-days or more before <tonight>. Anything else in it is left alone.
   A night directory is removed only when it has become empty.
 
 Output: one JSON object on stdout:
-    {"tonight": "...", "protected": [...], "pruned": ["<night>/<name>", ...],
-     "kept": [{"clone": "<night>/<name>", "why": "..."}], "ignored": ["<name>", ...], "dry_run": false}
-With --dry-run nothing is renamed or removed (the forge is still asked: that reads only).
-Exit: 0 the object was printed · 2 <wt_base> is not a plain directory we can open · 22 bad arguments.
+    {"tonight": "...", "protected": [...], "moved": ["<night>/<name>", ...], "expired": ["<quarantine entry>", ...],
+     "kept": [{"clone": "<night>/<name>", "why": "..."}], "ignored": ["<name>", ...], "dry_run": false,
+     "quarantine": {"dir": "...", "free_pct": 37, "min_free_pct": 10, "keep_days": 14, "refused": false}}
+With --dry-run nothing is renamed, moved or removed (the forge is still asked: that reads only); "moved" and
+"expired" then list what would be.
+Exit: 0 the object was printed · 2 <wt_base> or the quarantine is not a plain directory we can use · 22 bad arguments.
 """
 import datetime
+import errno
 import json
 import os
 import re
@@ -77,18 +100,21 @@ import urllib.parse
 
 DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 NOFOLLOW_DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-ENV = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0", GIT_NO_LAZY_FETCH="1", LC_ALL="C")
+ENV = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0", GIT_NO_LAZY_FETCH="1",
+           GIT_NO_REPLACE_OBJECTS="1", LC_ALL="C")
 for _k in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-           "GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_OBJECT_DIRECTORY"):
+           "GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_OBJECT_DIRECTORY",
+           "GIT_GRAFT_FILE", "GIT_SHALLOW_FILE", "GIT_REPLACE_REF_BASE"):
     ENV.pop(_k, None)
 GIT = ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "gc.auto=0",
-       "-c", "protocol.allow=never"]
+       "-c", "protocol.allow=never", "-c", "core.useReplaceRefs=false"]
 # The local config keys a clone may have. Everything else keeps it (rule 2).
 CONFIG_OK = re.compile(r"^(core\.(repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode|symlinks)"
                        r"|remote\.origin\.(url|fetch)|branch\..+\.(remote|merge)|user\.(name|email))$")
 REMOTE_URL = re.compile(r"^https://github\.com/([A-Za-z0-9][A-Za-z0-9._-]{0,99})/([A-Za-z0-9._-]{1,100}?)(?:\.git)?$")
 FETCH_DEFAULT = "+refs/heads/*:refs/remotes/origin/*"
 SHA = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
+QNAME = re.compile(r"^(\d{4}-\d{2}-\d{2})__(.+)__q(\d{4})(\d{2})(\d{2})(?:-\d+)?$")
 
 
 def number(name, default, lo, hi):
@@ -101,6 +127,7 @@ def number(name, default, lo, hi):
 
 TIMEOUT = number("DREAMTEAM_PRUNE_GIT_TIMEOUT", "120", 1, 3600)
 QUIET = number("DREAMTEAM_PRUNE_QUIET_HOURS", "6", 0, 24 * 365) * 3600
+COPY_TIMEOUT = number("DREAMTEAM_PRUNE_COPY_TIMEOUT", "7200", 1, 86400)
 FORGE = {}                                             # (owner/name, tip, branch) → True/False/None, for this run
 
 
@@ -151,6 +178,31 @@ def forge_has(repo, tip, branch):
     return ans
 
 
+def forge_tags(repo):
+    """{tag name: object id} as the forge lists them now, or None when it could not be asked."""
+    key = (repo, "tags", "")
+    if key not in FORGE:
+        ans = None
+        try:
+            p = subprocess.run(["gh", "api", "--paginate", f"repos/{repo}/git/matching-refs/tags/",
+                                "--jq", '.[] | "\\(.ref) \\(.object.sha)"'], cwd="/", env=ENV, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=TIMEOUT)
+            if p.returncode == 0:
+                ans = {}
+                for line in p.stdout.decode("utf-8", "surrogateescape").split("\n"):
+                    if not line:
+                        continue
+                    ref, _, sha = line.rpartition(" ")
+                    if not ref.startswith("refs/tags/") or not SHA.match(sha):
+                        ans = None
+                        break
+                    ans[ref[len("refs/tags/"):]] = sha
+        except (OSError, subprocess.TimeoutExpired):
+            ans = None
+        FORGE[key] = ans
+    return FORGE[key]
+
+
 def default_branch(repo):
     key = (repo, "", "")
     if key not in FORGE:
@@ -165,8 +217,9 @@ def default_branch(repo):
 
 
 def users_of(real, skip_pid):
-    """A short text naming a process that has its working directory or an open file at or below `real`, else None.
-    "" + text is a reason to keep. Entries we may not read belong to other users and are skipped (stated limit)."""
+    """A short text naming a process that has its working directory, an open file or a mapped file at or below
+    `real`, else None. A process whose entries cannot be read (another user's, or one of ours that hides its state)
+    is skipped: the header states that limit and why "keep on any such process" is not an option."""
     prefix = real + "/"
     try:
         pids = [e for e in os.listdir("/proc") if e.isdigit() and int(e) != skip_pid]
@@ -190,6 +243,14 @@ def users_of(real, skip_pid):
                 continue
             if target == real or target.startswith(prefix):
                 return f"a process has a file open in it (pid {pid})"
+        try:
+            with open(f"/proc/{pid}/maps", encoding="utf-8", errors="surrogateescape") as mf:
+                for line in mf:
+                    at = line.find("/")
+                    if at != -1 and line[at:].rstrip("\n").startswith(prefix):
+                        return f"a process has a file of it mapped (pid {pid})"
+        except OSError:
+            continue
     return None
 
 
@@ -226,6 +287,10 @@ def layout(clone_fd):
     for rel in (".git/commondir", ".git/objects/info/alternates", ".git/worktrees", ".git/modules"):
         if kind(rel) is not None:
             return f"its storage is not its own ({rel} exists)"
+    # files that change what "parent" means: a graft can hang a local-only commit under a genuine remote tip
+    for rel in (".git/info/grafts", ".git/shallow", ".git/refs/replace"):
+        if kind(rel) is not None:
+            return f"its history is not read as it is ({rel} exists)"
     return None
 
 
@@ -324,6 +389,40 @@ def judge(path, clone_fd, now, dry):
         tips.append((parts[0], parts[2][len("refs/remotes/origin/"):]))
     if not tips:
         return "no remote-tracking branch"
+    # local tags: each must be a tag the forge lists, with the same object
+    rc, out = git(path, "for-each-ref", "--format=%(objectname) %(refname)", "refs/tags/")
+    if rc != 0:
+        return "git could not list the tags"
+    tag_ids = []
+    if out.strip():
+        there = forge_tags(repo)
+        if there is None:
+            return "the forge could not be asked"
+        for line in out.split("\n"):
+            if not line:
+                continue
+            sha, _, ref = line.partition(" ")
+            if not SHA.match(sha) or not ref.startswith("refs/tags/"):
+                return "a tag this tool cannot read"
+            if there.get(ref[len("refs/tags/"):]) != sha:
+                return "a tag the remote does not have"
+            tag_ids.append(sha)
+    # every commit and tag OBJECT in the store, referenced or not, must be under a tracking tip or a remote tag
+    rc, out = git(path, "rev-list", "--remotes", *tag_ids)
+    if rc != 0:
+        return "git could not walk the remote's history"
+    on_remote = set(out.split())
+    on_remote.update(tag_ids)
+    rc, out = git(path, "cat-file", "--batch-all-objects", "--unordered", "--batch-check=%(objecttype) %(objectname)")
+    if rc != 0:
+        return "git could not list the object store"
+    loose = 0
+    for line in out.split("\n"):
+        if line.startswith("commit ") or line.startswith("tag "):
+            if line.partition(" ")[2] not in on_remote:
+                loose += 1
+    if loose:
+        return f"{loose} commit or tag object(s) in its store that the remote does not hold"
     main = default_branch(repo)
     if main is None:
         return "the forge could not be asked"
@@ -351,6 +450,132 @@ def empty_through(fd):
             os.unlink(entry, dir_fd=fd)
 
 
+def manifest(root):
+    """Every entry below `root` as (relative path, type, size, mtime, link target): what a faithful copy must share.
+    Nothing is followed. Sizes and times of directories are not compared (they differ between filesystems)."""
+    out = []
+    for cur, dirs, files in os.walk(root, followlinks=False):
+        rel = os.path.relpath(cur, root)
+        for n in sorted(dirs) + sorted(files):
+            pth = os.path.join(cur, n)
+            st = os.lstat(pth)
+            r = n if rel == "." else os.path.join(rel, n)
+            if stat.S_ISLNK(st.st_mode):
+                out.append((r, "l", 0, 0, os.readlink(pth)))
+            elif stat.S_ISDIR(st.st_mode):
+                out.append((r, "d", 0, 0, ""))
+            elif stat.S_ISREG(st.st_mode):
+                out.append((r, "f", st.st_size, st.st_mtime_ns, ""))
+            else:
+                out.append((r, "?", 0, 0, ""))
+    out.sort()
+    return out
+
+
+def to_quarantine(night_fd, night_path, tomb, tomb_fd, q, label_night, name):
+    """Move the set-aside directory into the quarantine. None when it is there under its final name and gone from
+    the night; else the reason it is still in the night (untouched)."""
+    clean = name[len(".pruning-"):] if name.startswith(".pruning-") else name
+    final = f"{label_night}__{clean}__q{q['stamp']}"
+    n = 1
+    while os.path.lexists(os.path.join(q["path"], final)) or os.path.lexists(os.path.join(q["path"], final + ".partial")):
+        n += 1
+        final = f"{label_night}__{clean}__q{q['stamp']}-{n}"
+        if n > 50:
+            return "the quarantine already holds 50 copies under its name"
+    try:
+        os.rename(tomb, final, src_dir_fd=night_fd, dst_dir_fd=q["fd"])
+        return None                                    # same filesystem: one rename, nothing to copy
+    except OSError as e:
+        if e.errno != errno.EXDEV:
+            return "it could not be moved to the quarantine"
+    # another filesystem: copy, compare, publish under the final name, and only then empty the source
+    part = final + ".partial"
+    src, dst = os.path.join(night_path, tomb), os.path.join(q["path"], part)
+    cmd = ["cp", "-a", "--no-target-directory", "--", src, dst]
+    for pre in (["nice", "-n", "15"], ["ionice", "-c3"]):
+        if shutil.which(pre[0]):
+            cmd = pre + cmd
+    try:
+        cp = subprocess.run(cmd, env=ENV, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, timeout=COPY_TIMEOUT)
+        same = cp.returncode == 0 and manifest(src) == manifest(dst)
+    except (OSError, subprocess.TimeoutExpired):
+        same = False
+    if not same:
+        try:
+            shutil.rmtree(part, dir_fd=q["fd"])
+        except OSError:
+            pass
+        return "its copy in the quarantine did not match it (the copy was removed)"
+    try:
+        os.rename(part, final, src_dir_fd=q["fd"], dst_dir_fd=q["fd"])
+    except OSError:
+        return f"its copy could not be given its final name (it is {part} in the quarantine)"
+    try:
+        empty_through(tomb_fd)
+    except OSError:
+        return f"it is in the quarantine as {final}, but its original could not be fully removed (the rest is {tomb})"
+    return None
+
+
+def expire(q, tonight, keep_days, dry):
+    """Quarantine entries of OUR name shape whose q-date is keep_days or more before tonight: removed, and named."""
+    gone = []
+    today = datetime.date.fromisoformat(tonight)
+    for name in sorted(os.listdir(q["fd"])):
+        m = QNAME.match(name)
+        if not m or not real_date(m.group(1)):
+            continue
+        try:
+            qd = datetime.date(int(m.group(3)), int(m.group(4)), int(m.group(5)))
+            st = os.stat(name, dir_fd=q["fd"], follow_symlinks=False)
+        except (ValueError, OSError):
+            continue
+        if not stat.S_ISDIR(st.st_mode) or (today - qd).days < keep_days:
+            continue
+        if not dry:
+            try:
+                shutil.rmtree(name, dir_fd=q["fd"])
+            except OSError:
+                continue
+        gone.append(name)
+    return gone
+
+
+def free_pct(q):
+    """Whole percent of the quarantine's filesystem that an ordinary user can still write, or None."""
+    forced = os.environ.get("DREAMTEAM_PRUNE_FREE_PCT", "")
+    if forced == "unreadable":
+        return None                                    # test seam: a statvfs that does not answer
+    if forced.isdigit() and int(forced) <= 100:
+        return int(forced)                             # test seam: a disk cannot be filled in a test
+    try:
+        v = os.statvfs(q["fd"])
+        return int(v.f_bavail * 100 // v.f_blocks) if v.f_blocks else None
+    except OSError:
+        return None
+
+
+def still_there(night_fd, night_path, tomb, tomb_fd, judged):
+    """True when the set-aside NAME is still the judged directory (not followed), inside the night that was opened,
+    and both descriptors still live where they were opened. A move outside the night, or a symlink put at the
+    name, makes this False."""
+    try:
+        st = os.stat(tomb, dir_fd=night_fd, follow_symlinks=False)
+        if not stat.S_ISDIR(st.st_mode) or not os.path.samestat(st, judged):
+            return False
+        if not os.path.samestat(os.fstat(tomb_fd), judged):
+            return False
+        if os.readlink(f"/proc/self/fd/{tomb_fd}") != os.path.join(night_path, tomb):
+            return False
+        if os.readlink(f"/proc/self/fd/{night_fd}") != night_path:
+            return False
+        return os.path.samestat(os.stat(night_path, follow_symlinks=False), os.fstat(night_fd))
+    except OSError:
+        return False
+
+
 def put_back(night_fd, night_path, tomb, name):
     """After a refusal: the directory gets its name back when that name is free. Returns words for the report."""
     if tomb == name:
@@ -364,7 +589,7 @@ def put_back(night_fd, night_path, tomb, name):
         return f"; it stays as {tomb}"
 
 
-def consider(night_fd, night_path, night, name, now, dry, res):
+def consider(night_fd, night_path, night, name, now, dry, res, q):
     label = f"{night}/{name}"
     keep = lambda why: res["kept"].append({"clone": label, "why": why})   # noqa: E731
     try:
@@ -390,7 +615,7 @@ def consider(night_fd, night_path, night, name, now, dry, res):
         if why is not None:
             return keep(why)
         if dry:
-            res["pruned"].append(label)
+            res["moved"].append(label)
             return None
         judged = os.fstat(clone_fd)
         if name.startswith(".pruning-"):
@@ -409,20 +634,25 @@ def consider(night_fd, night_path, night, name, now, dry, res):
         try:
             if not os.path.samestat(os.fstat(tomb_fd), judged):
                 return keep("it was replaced while being judged" + put_back(night_fd, night_path, tomb, name))
+            moved = "it was moved or replaced after being set aside (left as it is)"
+            if not still_there(night_fd, night_path, tomb, tomb_fd, judged):
+                return keep(moved)
             # set aside: scan, judge again in full, scan again; any "no" puts it back
             why = users_of(tomb_path, os.getpid()) or judge(tomb_path, tomb_fd, now, dry) or users_of(tomb_path, os.getpid())
+            if not still_there(night_fd, night_path, tomb, tomb_fd, judged):
+                return keep(moved)                     # the judgment above may have followed a symlink: it counts for nothing
             if why is not None:
                 return keep(why + " (found after it was set aside)" + put_back(night_fd, night_path, tomb, name))
-            try:
-                empty_through(tomb_fd)
-            except OSError:
-                return keep(f"removal did not finish; the rest is {tomb}")
-            try:
+            why = to_quarantine(night_fd, night_path, tomb, tomb_fd, q, night, name)
+            if why is not None:
+                back = "" if "quarantine as" in why else put_back(night_fd, night_path, tomb, name)
+                return keep(why + back)
+            try:                                       # after a copy the emptied original is still there: remove it
                 if os.path.samestat(os.stat(tomb, dir_fd=night_fd, follow_symlinks=False), judged):
                     os.rmdir(tomb, dir_fd=night_fd)
             except OSError:
-                pass                                   # emptied; a directory of that name that is not ours stays
-            res["pruned"].append(label)
+                pass                                   # moved by rename (nothing left), or not ours: nothing to do
+            res["moved"].append(label)
         finally:
             os.close(tomb_fd)
     finally:
@@ -431,12 +661,27 @@ def consider(night_fd, night_path, night, name, now, dry, res):
 
 
 def main(argv):
-    args = argv[1:]
-    dry = False
-    if args and args[0] == "--dry-run":
-        dry, args = True, args[1:]
-    if len(args) != 2 or not os.path.isabs(args[0]) or not real_date(args[1]):
-        print("usage: prune_nights.py [--dry-run] <absolute wt_base> <tonight YYYY-MM-DD>", file=sys.stderr)
+    usage = ("usage: prune_nights.py [--dry-run] --quarantine <absolute dir> [--keep-days N] [--min-free-pct N] "
+             "<absolute wt_base> <tonight YYYY-MM-DD>")
+    args, dry, qdir, keep_days, min_free = argv[1:], False, None, 14, 10
+    try:
+        while args and args[0].startswith("--"):
+            opt = args.pop(0)
+            if opt == "--dry-run":
+                dry = True
+            elif opt == "--quarantine":
+                qdir = args.pop(0)
+            elif opt == "--keep-days":
+                keep_days = int(args.pop(0))
+            elif opt == "--min-free-pct":
+                min_free = int(args.pop(0))
+            else:
+                raise ValueError(opt)
+        if (len(args) != 2 or not os.path.isabs(args[0]) or not real_date(args[1]) or not qdir
+                or not os.path.isabs(qdir) or not 1 <= keep_days <= 3650 or not 0 <= min_free <= 99):
+            raise ValueError("arguments")
+    except (ValueError, IndexError):
+        print(usage, file=sys.stderr)
         return 22
     base, tonight = args
     if not getattr(shutil.rmtree, "avoids_symlink_attacks", False):
@@ -450,8 +695,31 @@ def main(argv):
     except OSError:
         print(f"prune_nights: {base} is not a plain directory that can be opened", file=sys.stderr)
         return 2
+    # the quarantine: no symlink anywhere in its path, outside the base (and the base outside it), created if absent
+    qnorm = os.path.normpath(qdir)
+    try:
+        if not dry:
+            os.makedirs(qnorm, mode=0o700, exist_ok=True)
+        if os.path.realpath(qnorm) != qnorm:
+            raise OSError("a symlink in the path")
+        inside = lambda a, b: a == b or a.startswith(b + "/")   # noqa: E731
+        if inside(qnorm, base_real) or inside(base_real, qnorm):
+            raise OSError("inside the base")
+        q = {"fd": os.open(qnorm, NOFOLLOW_DIR), "path": qnorm, "stamp": tonight.replace("-", "")}
+    except OSError:
+        print(f"prune_nights: the quarantine {qdir} is not a plain directory outside {base} that can be used", file=sys.stderr)
+        return 2
 
-    res = {"tonight": tonight, "protected": [tonight], "pruned": [], "kept": [], "ignored": [], "dry_run": dry}
+    res = {"tonight": tonight, "protected": [tonight], "moved": [], "expired": [], "kept": [], "ignored": [], "dry_run": dry,
+           "quarantine": {"dir": qnorm, "free_pct": None, "min_free_pct": min_free, "keep_days": keep_days, "refused": False}}
+    res["expired"] = expire(q, tonight, keep_days, dry)        # first: it frees the space the floor is about
+    pct = free_pct(q)
+    res["quarantine"]["free_pct"] = pct
+    if pct is None or pct < min_free:
+        res["quarantine"]["refused"] = True                    # nothing is moved, and nothing is judged
+        os.close(q["fd"]); os.close(base_fd)
+        print(json.dumps(res, ensure_ascii=True))
+        return 0
     nights = []
     for name in sorted(os.listdir(base_fd)):
         try:
@@ -476,7 +744,7 @@ def main(argv):
             continue
         try:
             for name in sorted(os.listdir(night_fd)):
-                consider(night_fd, os.path.join(base_real, night), night, name, now, dry, res)
+                consider(night_fd, os.path.join(base_real, night), night, name, now, dry, res, q)
             if not dry:
                 try:
                     os.rmdir(night, dir_fd=base_fd)    # only an emptied night goes
@@ -484,6 +752,7 @@ def main(argv):
                     pass
         finally:
             os.close(night_fd)
+    os.close(q["fd"])
     os.close(base_fd)
     print(json.dumps(res, ensure_ascii=True))
     return 0

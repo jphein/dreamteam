@@ -134,41 +134,55 @@ the clone's real default branch (`origin/HEAD`) and main/master/trunk/production
    - The 07:03 `morning-briefing.sh` adds a "Nightly sweep" line with one clause per repo (status, PRs opened,
      merged, reason), and a started run counts as overnight activity.
 
-## Old night clones (#250)
+## Old night clones (#250): move, then delete
 
 Each night's clones live in `~/srv/wt/overnight/<night>/<name>` and were never removed (1.8 GB a night on a small
-root). After the FINISHED line the runner now calls `scripts/lib/prune_nights.py <wt_base> <night>`; its header is
-the contract. In short:
+root). After the FINISHED line the runner calls `scripts/lib/prune_nights.py`; its header is the contract.
 
-- **Nights:** only real calendar dates earlier than tonight are nights. Tonight and the newest earlier night are
-  never touched (the previous night's clones are what a person reads in the morning). Anything else under the base
-  (other names, impossible or future dates, symlinks, files) is left alone.
-- **Clones:** one goes only when every check answered and none found something that exists only there:
-  - a real directory with a plain `.git` whose storage is its own (no alternates, no symlinked objects);
-  - a local config made only of the keys a fresh clone has (plus branch tracking and user.name/email), with one
-    remote, `origin`, at `https://github.com/<owner>/<name>`. An agent worked in these clones: any other key (a
-    filter, an ssh command, a helper, an include, a second remote) keeps the clone, and nothing from its config is
-    ever run;
-  - quiet for 6 hours, and no process with its working directory or an open file inside;
-  - HEAD on a branch, `status --untracked-files=all` empty, no index entry hidden from status, no stash;
-  - every commit it holds in any way (all refs, tags, every reflog) is under a remote-tracking branch, AND the forge
-    confirms now, asked from outside the clone, that each of those tracking tips is still on the remote.
-  **Nothing is fetched**: judging a clone changes nothing in it.
-- **So this is kept, on purpose:** a clone whose fix branch was squash-merged and deleted on the remote; a clone
-  whose history was amended or rebased (the reflog holds the old commits); any clone when the forge cannot be
-  asked. The line names the first one.
-- **How:** descriptors opened without following symlinks; the clone is renamed to `.pruning-<name>-<random>` inside
-  its night, must be the directory that was judged, is scanned and JUDGED AGAIN, and only then emptied through its
-  own descriptor. A `.pruning-…` name earns nothing: such a directory is judged like any other.
-- **Not a lock.** Nothing else in the fleet locks a clone, so none can be shared. The header says what remains
-  possible (another user's process; one that lists the night and opens the set-aside directory between the last
-  scan and the removal) and why it is accepted.
-- **Where it shows:** the guard record's `.prune` (`pruned`, `kept`, `kept_list` with a reason each) and the CHECK
-  line: `…; old clones: pruned N, kept M (first: <night>/<name>: <why>)`. A prune that could not run is
-  `old clones NOT pruned (…)`, and a result that could not be written into the record is `old clones: the prune ran
-  but its result is not in the record`; both turn an ok line to warn. Nothing old to look at: the line says nothing.
-- `DREAMTEAM_PRUNE_NIGHTS=0` turns it off. A night ended by a signal does not prune. By hand, to see what would go:
-  `python3 -I scripts/lib/prune_nights.py --dry-run ~/srv/wt/overnight $(date -d '12 hours ago' +%F)`.
+**Move-then-delete** (decided 2026-11-20, after three review rounds on a version that tried to prove a clone held
+nothing unique before deleting it): a selected clone is MOVED to a quarantine dir on the big disk and deleted from
+there 14 days later. Nothing is destroyed on the night it is selected, so a wrong selection costs a move.
+
+1. **Expire:** quarantine entries named `<night>__<name>__q<YYYYMMDD>` whose q-date is 14 days or more before
+   tonight are deleted (by the date in the name, never by mtime). Anything else in the quarantine is left alone.
+2. **Floor:** if the quarantine disk then has less than 10 % free, nothing is moved. The line says
+   `old clones NOT moved: the quarantine disk has N% free (floor 10%)` and an ok line turns to warn.
+3. **Select and move:** in nights before the previous one (tonight and the newest earlier night are never
+   touched), each clone the selector passes is moved to the quarantine; the others stay, each with its reason.
+
+**Configure it per host** (the path is host data, so it goes in that host's overlay, `config.<host>.json`):
+
+```json
+{ "overnight": { "prune_quarantine": "/absolute/dir/on/the/big/disk", "prune_keep_days": 14, "prune_min_free_pct": 10 } }
+```
+
+With no `prune_quarantine` nothing is moved and the line says `old clones stay (no quarantine dir configured:
+overnight.prune_quarantine)` without changing its status. The dir is created if absent; it must have no symlink
+in its path and lie outside the clone base.
+
+**The selector** passes a clone only when: it is a real directory with a plain `.git` holding its own storage; its
+local config has only the keys a fresh clone has (read as data, never run), with one remote, `origin`, at
+`https://github.com/<owner>/<name>`; it has been quiet for 6 hours with no process working in it or holding or
+mapping a file of it; HEAD is on a branch; `status --untracked-files=all` is empty; no index entry is hidden from
+status; no stash; no grafts, shallow file or replace refs; every commit and tag object it holds is under a
+remote-tracking branch or a tag the forge has; and the forge confirms now, asked from outside the clone, that each
+tracking tip is still on the remote. Nothing is fetched. So these STAY in their night, named in the line: a clone
+whose fix branch was squash-merged and deleted on the remote, one whose history was amended, any clone when the
+forge cannot be asked. They are the ones a person may still want; they also keep using the small disk.
+
+**The move:** renamed aside inside its night, re-opened and compared with what was judged, scanned, judged again,
+then one rename (same filesystem) or `cp -a` to `<name>.partial`, a manifest comparison, a rename to the final
+name and only then removal of the original. A copy that does not match is removed and the clone stays.
+
+**Where it shows:** the guard record's `.prune` and the CHECK line: `…; old clones: moved N to quarantine, kept M
+(first: <night>/<name>: <why>), expired E`. A tool that fails is `old clones NOT moved (…)` (warn). A marker is
+written in the run dir BEFORE the tool runs and removed once its result is recorded; if it is still there the line
+says `a prune started and its result is not in the record` (warn). If the marker cannot be written, the tool is not
+run. Nothing old to look at: the line says nothing.
+
+**By hand:** `DREAMTEAM_PRUNE_NIGHTS=0` turns it off. To see what would move:
+`python3 -I scripts/lib/prune_nights.py --dry-run --quarantine <dir> ~/srv/wt/overnight $(date -d '12 hours ago' +%F)`.
+To bring a clone back within the 14 days: `mv <quarantine>/<night>__<name>__q<date> ~/srv/wt/overnight/<night>/<name>`.
 
 ## The 2026-11-16 night, and the watch
 
