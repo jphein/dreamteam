@@ -954,6 +954,11 @@ fresh; jq '.overnight.prune_quarantine = ["/q/one", "relative/skipped", "/q/two"
 PRUNE_OUT='{"moved":["2026-11-10/a"],"expired":[],"kept":[],"protected":[],"no_quarantine":[],"quarantine":[{"free_pct":60,"min_free_pct":10,"refused":false},{"free_pct":4,"min_free_pct":10,"refused":true}]}' prun
 grep -q -- "^--quarantine /q/one --quarantine /q/two --keep-days 14 --min-free-pct 10 $TMP/wt " "$TMP/prune.log" && pass "prune: a list of quarantine dirs in the config → one --quarantine each, non-absolute entries dropped" || fail "prune list config: $(cat "$TMP/prune.log")"
 [[ "$(cl)" == "CHECK nightly-guarded warn · "*"; old clones NOT all moved: a quarantine disk has 4% free (floor 10%), moved 1, expired 0"* ]] && pass "prune: one of two quarantines under its floor → warn with ITS share, and what did move" || fail "prune two-quarantine line: '$(cl)'"
+# a quarantine dir moved or replaced during the run, and an old entry with a mount inside: warn, said in the line
+fresh; DREAMTEAM_PRUNE_QUARANTINE="$QD" PRUNE_OUT='{"moved":[],"expired":[],"kept":[],"protected":[],"no_quarantine":[],"quarantine":[{"free_pct":50,"min_free_pct":10,"refused":true,"relocated":true}]}' prun
+[[ "$(cl)" == "CHECK nightly-guarded warn · "*"; a quarantine dir was moved or replaced during the run (nothing more went into or out of it)"* ]] && pass "prune: a quarantine dir moved or replaced during the run → warn, said in the line" || fail "prune relocated line: '$(cl)'"
+fresh; DREAMTEAM_PRUNE_QUARANTINE="$QD" PRUNE_OUT='{"moved":[],"expired":[],"kept":[],"protected":[],"no_quarantine":[],"quarantine":[{"free_pct":50,"min_free_pct":10,"refused":false,"not_expired":["a","b"]}]}' prun
+[[ "$(cl)" == "CHECK nightly-guarded warn · "*"; 2 old quarantine entr(ies) not expired: something is mounted inside"* ]] && pass "prune: old entries not expired for a mount inside → warn, counted in the line" || fail "prune not-expired line: '$(cl)'"
 # nothing old to look at: the line is exactly as it was before this feature (quiet)
 fresh; DREAMTEAM_PRUNE_QUARANTINE="$QD" prun
 [[ "$(cl)" == "CHECK nightly-guarded ok · "*"finished 1, stopped 0, skipped 0"* ]] && [[ "$(cl)" != *"old clones"* ]] && pass "prune: nothing moved, kept or expired → the line does not mention it" || fail "prune quiet: '$(cl)'"

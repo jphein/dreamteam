@@ -68,6 +68,10 @@ How a selected clone is moved.
   - The quarantine's free share is read again, and then ONE rename, relative to the two opened directories, takes
     it to its final name in the quarantine. If the kernel says the two are not on one filesystem after all, it is
     not moved. There is no other way a clone leaves its night.
+  - All three renames (aside, back, into the quarantine) are renameat2(RENAME_NOREPLACE): none can replace
+    anything, not even an empty directory. Without that system call nothing is moved.
+  - The quarantine dir is re-checked before every move and every expiry (still the directory at its configured
+    path); moved or replaced, it takes and loses nothing more this run.
   - Whenever a step says no, the directory is renamed back if its name is free; otherwise it stays under the
     `.pruning-…` name and the next run judges it like any other entry.
   This is not a lock (nothing else in the fleet locks a clone). A process of another user, or one of the owner's
@@ -78,18 +82,23 @@ How a selected clone is moved.
   A quarantine dir: absolute, no symlink anywhere in its path, outside <wt_base>. Its path is checked BEFORE
   anything is created, and missing components are created one by one inside directories already opened without
   following links. Only entries named `<YYYY-MM-DD>__<name>__q<YYYYMMDD>` that are real directories are ever
-  deleted from it, when the q-date is --keep-days or more before <tonight>. Anything else in it is left alone.
+  deleted from it, when the q-date is --keep-days or more before <tonight>. Anything else in it is left alone,
+  and so is an old entry with something MOUNTED inside it (the delete would walk into the mount): it is named in
+  the result. A clone with a mount inside is not selected either.
   A night directory is removed only when it has become empty.
 
 Output: one JSON object on stdout:
     {"tonight": "...", "protected": [...], "moved": ["<night>/<name>", ...], "expired": ["<quarantine entry>", ...],
      "kept": [{"clone": "<night>/<name>", "why": "..."}], "ignored": ["<name>", ...], "dry_run": false,
      "no_quarantine": ["<night>/<name>", ...],        (clones on a filesystem that has no quarantine dir)
-     "quarantine": [{"dir": "...", "free_pct": 37, "min_free_pct": 10, "keep_days": 14, "refused": false}, ...]}
+     "quarantine": [{"dir": "...", "free_pct": 37, "min_free_pct": 10, "keep_days": 14, "refused": false,
+                     "relocated": true,              (only when the dir was moved or replaced during the run)
+                     "not_expired": ["<entry>", ...] (only when an old entry has something mounted inside)}, ...]}
 With --dry-run nothing is renamed, moved or removed (the forge is still asked: that reads only); "moved" and
 "expired" then list what would be.
 Exit: 0 the object was printed · 2 <wt_base> or a quarantine is not a plain directory we can use · 22 bad arguments.
 """
+import ctypes
 import datetime
 import errno
 import json
@@ -105,15 +114,13 @@ import urllib.parse
 
 DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 NOFOLLOW_DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-# Git reads ONLY the clone's own config, which the selector has checked key by key. The runner's global and system
-# config and attributes are switched off: a filter defined there could be turned on by a clone's .gitattributes.
-ENV = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0", GIT_NO_LAZY_FETCH="1",
-           GIT_NO_REPLACE_OBJECTS="1", GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1", GIT_ATTR_NOSYSTEM="1",
-           LC_ALL="C")
-for _k in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-           "GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_OBJECT_DIRECTORY",
-           "GIT_GRAFT_FILE", "GIT_SHALLOW_FILE", "GIT_REPLACE_REF_BASE"):
-    ENV.pop(_k, None)
+# Git reads ONLY the clone's own config, which the selector has checked key by key. Its environment is BUILT, not
+# inherited: a variable this tool does not name is not there. (Scrubbing the caller's environment missed
+# GIT_CONFIG_PARAMETERS, through which a filter can be defined that a clone's .gitattributes switches on.)
+ENV = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), "HOME": os.environ.get("HOME", "/"),
+       "LC_ALL": "C", "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_LAZY_FETCH": "1",
+       "GIT_NO_REPLACE_OBJECTS": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
+       "GIT_ATTR_NOSYSTEM": "1"}
 GIT = ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "gc.auto=0",
        "-c", "protocol.allow=never", "-c", "core.useReplaceRefs=false", "-c", "core.attributesFile=/dev/null"]
 GH_ENV = dict(os.environ)                              # the forge is asked with the runner's own environment and login
@@ -322,6 +329,8 @@ def judge(path, clone_fd, now, dry):
     busy = users_of(path, os.getpid())
     if busy:
         return busy
+    if mount_inside(path):
+        return "something is mounted inside it"
 
     # rule 2: the config, read as data, before any command that would act on it
     rc, out = git(path, "config", "--local", "--no-includes", "--null", "--list")
@@ -449,24 +458,66 @@ def judge(path, clone_fd, now, dry):
     return None
 
 
+_LIBC = ctypes.CDLL(None, use_errno=True)
+
+
+def rename_new(src_fd, src, dst_fd, dst):
+    """Rename that NEVER replaces: renameat2(..., RENAME_NOREPLACE). os.rename would silently destroy an empty
+    directory at the destination, and a check beforehand can go stale. No such call on this system = OSError."""
+    fn = getattr(_LIBC, "renameat2", None)
+    if fn is None:
+        raise OSError(errno.ENOSYS, "renameat2 is not available")
+    if fn(ctypes.c_int(src_fd), os.fsencode(src), ctypes.c_int(dst_fd), os.fsencode(dst), ctypes.c_uint(1)) != 0:
+        e = ctypes.get_errno()
+        raise OSError(e, os.strerror(e))
+
+
+def mount_inside(real):
+    """True when something is mounted at or below `real`, or the mount table cannot be read. A recursive delete
+    does not follow symlinks but it does walk into a mount, and what is mounted there is not ours to remove."""
+    src = os.environ.get("DREAMTEAM_PRUNE_MOUNTINFO", "/proc/self/mountinfo")   # test seam: a table from a file
+    prefix = real + "/"
+    try:
+        with open(src, encoding="utf-8", errors="surrogateescape") as fh:
+            for line in fh:
+                parts = line.split(" ")
+                if len(parts) < 5:
+                    return True
+                mp = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), parts[4])
+                if mp == real or mp.startswith(prefix):
+                    return True
+    except OSError:
+        return True
+    return False
+
+
+def q_intact(q):
+    """True while the opened quarantine dir is still the directory at its configured path. Moved away, replaced or
+    unreadable = False: nothing more is expired from it or moved into it this run."""
+    try:
+        if os.readlink(f"/proc/self/fd/{q['fd']}") != q["path"]:
+            return False
+        return os.path.samestat(os.stat(q["path"], follow_symlinks=False), os.fstat(q["fd"]))
+    except OSError:
+        return False
+
+
 def to_quarantine(night_fd, tomb, q, label_night, name):
     """ONE rename from the night into the quarantine on the same filesystem. None when it is there; else why not
     (and then nothing has changed: a rename either happens whole or not at all)."""
     clean = name[len(".pruning-"):] if name.startswith(".pruning-") else name
-    final = f"{label_night}__{clean}__q{q['stamp']}"
-    n = 1
-    while os.path.lexists(os.path.join(q["path"], final)):
-        n += 1
-        final = f"{label_night}__{clean}__q{q['stamp']}-{n}"
-        if n > 50:
-            return "the quarantine already holds 50 entries under its name"
-    try:
-        os.rename(tomb, final, src_dir_fd=night_fd, dst_dir_fd=q["fd"])
-        return None
-    except OSError as e:
-        if e.errno == errno.EXDEV:
-            return "its quarantine is not on its filesystem after all (nothing is ever copied)"
-        return "it could not be moved to the quarantine"
+    for n in range(1, 51):
+        final = f"{label_night}__{clean}__q{q['stamp']}" + ("" if n == 1 else f"-{n}")
+        try:
+            rename_new(night_fd, tomb, q["fd"], final)     # never replaces: a taken name is EEXIST, tried again
+            return None
+        except OSError as e:
+            if e.errno in (errno.EEXIST, errno.ENOTEMPTY):
+                continue
+            if e.errno == errno.EXDEV:
+                return "its quarantine is not on its filesystem after all (nothing is ever copied)"
+            return "it could not be moved to the quarantine"
+    return "the quarantine already holds 50 entries under its name"
 
 
 def expire(q, tonight, keep_days, dry):
@@ -483,6 +534,14 @@ def expire(q, tonight, keep_days, dry):
         except (ValueError, OSError):
             continue
         if not stat.S_ISDIR(st.st_mode) or (today - qd).days < keep_days:
+            continue
+        # re-checked before EVERY removal: the quarantine is still the directory at its path, and nothing is
+        # mounted inside the entry (a recursive delete would walk into the mount)
+        if not q_intact(q):
+            q["report"]["relocated"] = True
+            break
+        if mount_inside(os.path.join(q["path"], name)):
+            q["report"].setdefault("not_expired", []).append(name)
             continue
         if not dry:
             try:
@@ -537,11 +596,11 @@ def put_back(night_fd, night_path, tomb, name):
     if tomb == name:
         return ""
     try:
-        if os.path.lexists(os.path.join(night_path, name)):
-            return f"; it stays as {tomb}: its name was taken meanwhile"
-        os.rename(tomb, name, src_dir_fd=night_fd, dst_dir_fd=night_fd)
+        rename_new(night_fd, tomb, night_fd, name)         # never replaces whatever took the name meanwhile
         return ""
-    except OSError:
+    except OSError as e:
+        if e.errno in (errno.EEXIST, errno.ENOTEMPTY):
+            return f"; it stays as {tomb}: its name was taken meanwhile"
         return f"; it stays as {tomb}"
 
 
@@ -568,7 +627,8 @@ def consider(night_fd, night_path, night, name, now, dry, res, qs):
             res["no_quarantine"].append(label)
             return keep("no quarantine dir on its filesystem: not moved")
         if q["full"]:
-            return keep("not looked at: its quarantine is under the free-space floor")
+            return keep("not looked at: its quarantine takes nothing more this run"
+                        + (" (moved or replaced)" if q["report"].get("relocated") else " (under the free-space floor)"))
         path = os.path.join(night_path, name)
         try:
             if not os.path.samestat(os.stat(path, follow_symlinks=False), os.fstat(clone_fd)):
@@ -587,7 +647,7 @@ def consider(night_fd, night_path, night, name, now, dry, res, qs):
         else:
             tomb = f".pruning-{name}-{secrets.token_hex(6)}"
             try:
-                os.rename(name, tomb, src_dir_fd=night_fd, dst_dir_fd=night_fd)
+                rename_new(night_fd, name, night_fd, tomb)
             except OSError:
                 return keep("it could not be set aside")
         tomb_path = os.path.join(night_path, tomb)
@@ -617,6 +677,11 @@ def consider(night_fd, night_path, night, name, now, dry, res, qs):
                 return keep("its quarantine went under the free-space floor" + put_back(night_fd, night_path, tomb, name))
             if not still_there(night_fd, night_path, tomb, tomb_fd, judged):
                 return keep(moved)
+            if not q_intact(q):
+                q["report"]["relocated"] = True
+                q["report"]["refused"] = True
+                q["full"] = True
+                return keep("its quarantine dir was moved or replaced during the run" + put_back(night_fd, night_path, tomb, name))
             why = to_quarantine(night_fd, tomb, q, night, name)
             if why is not None:
                 return keep(why + put_back(night_fd, night_path, tomb, name))

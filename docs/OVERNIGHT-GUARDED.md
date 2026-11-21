@@ -176,9 +176,17 @@ from outside the clone, that each tracking tip is still on the remote. Nothing i
 night, named in the line: a clone whose fix branch was squash-merged and deleted on the remote, one whose history
 was amended, any clone when the forge cannot be asked.
 
+**Things it will not do** (each from a review finding, each tested): replace anything by a rename (all three
+renames are `renameat2(RENAME_NOREPLACE)`; without that call nothing moves); walk into a mount (an old entry with
+something mounted inside is not expired and is named; a clone with a mount inside is not selected; an unreadable
+mount table counts as a mount); go on using a quarantine dir that was moved or replaced during the run (it is
+re-checked before every move and every expiry); run git with anything inherited (its environment is built from a
+fixed list, with no global or system config).
+
 **Where it shows:** the guard record's `.prune` and the CHECK line: `…; old clones: moved N to quarantine, kept M
 (first: <night>/<name>: <why>), expired E`, and when it applies `; K old clone(s) on a filesystem with no
-quarantine dir (first: …)`. A tool that fails is `old clones NOT moved (…)` (warn). A marker is written in the run
+quarantine dir (first: …)`, `; a quarantine dir was moved or replaced during the run`, `; N old quarantine entr(ies)
+not expired: something is mounted inside` (each warn). A tool that fails is `old clones NOT moved (…)` (warn). A marker is written in the run
 dir BEFORE the tool runs and removed once its result is recorded; if it is still there the line says `a prune
 started and its result is not in the record` (warn). If the marker cannot be written, the tool is not run.
 

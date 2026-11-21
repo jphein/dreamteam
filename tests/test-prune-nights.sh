@@ -149,15 +149,18 @@ for _ in $(seq 1 50); do [ -s "$T/mapped.up" ] && break; sleep 0.1; done
 # a filter defined in the RUNNER's own git config, switched on by a clone's committed .gitattributes: never run
 mkclone $N inherit;    echo '* filter=evil' > "$(c inherit)/.gitattributes"; git -C "$(c inherit)" add .gitattributes; git -C "$(c inherit)" commit -q -m attrs
                        topush "$(c inherit)" main; touch -d '3 days ago' "$(c inherit)/f.txt"       # stat differs: git must re-read the file
-printf '[filter "evil"]\n\tclean = sh -c "touch %s/ran-inherited-filter; cat"\n\tsmudge = cat\n' "$T" > "$T/evil.gitconfig"
+printf '#!/bin/sh\ntouch "%s/ran-inherited-filter"\nexec cat\n' "$T" > "$T/evilfilter.sh"; chmod +x "$T/evilfilter.sh"   # a script: no quoting to lose
+printf '[filter "evil"]\n\tclean = %s/evilfilter.sh\n\tsmudge = cat\n' "$T" > "$T/evil.gitconfig"
+# the fixture must FIRE with a plain git, or the check after the prune proves nothing (it once did not: quotes lost)
+( cd "$(c inherit)" && GIT_CONFIG_GLOBAL="$T/evil.gitconfig" git status --porcelain >/dev/null 2>&1 ); [ -e "$T/ran-inherited-filter" ] && ok || bad "fixture: the inherited filter does not fire with a plain git"
+rm -f "$T/ran-inherited-filter"; touch -d '5 days ago' "$(c inherit)/f.txt"                      # stat differs again: git must re-read it
 # positive controls: a clean clone, and one whose remote main has simply moved on since the night
 mkclone $N good
 mkclone $N behind; git clone -q "$LAST_FORGE" "$T/adv"; git -C "$T/adv" commit -q --allow-empty -m later; git -C "$T/adv" push -q origin main
 snap_ahead=$(cd "$(c ahead)" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum)
 GIT_CONFIG_GLOBAL="$T/evil.gitconfig" prune
 [ ! -e "$T/ran-inherited-filter" ] && ok || bad "a filter from the runner's global git config was run on a clone"
-( cd "$(c inherit)" 2>/dev/null && GIT_CONFIG_GLOBAL="$T/evil.gitconfig" git status --porcelain >/dev/null 2>&1 ); [ -e "$T/ran-inherited-filter" ] && ok || { pruned $N/inherit && ok || bad "fixture: the inherited filter never fires, so the check above proves nothing"; }
-rm -f "$T/ran-inherited-filter"
+goes $N/inherit
 kept_as $N/dirty "uncommitted or untracked"
 kept_as $N/untracked "a config key this tool does not trust (status.showuntrackedfiles)"
 kept_as $N/untracked2 "uncommitted or untracked"
@@ -279,26 +282,41 @@ cat > "$T/drv.py" <<'EOP'
 import errno, importlib.util, os, shutil, sys
 spec = importlib.util.spec_from_file_location("pn", sys.argv[1]); pn = importlib.util.module_from_spec(spec); spec.loader.exec_module(pn)
 mode, extra, qdir = sys.argv[4], sys.argv[5], sys.argv[6]
-real_judge, real_users, real_rename, seen = pn.judge, pn.users_of, os.rename, {"n": 0}
+real_judge, real_users, real_new, real_expire, seen = pn.judge, pn.users_of, pn.rename_new, pn.expire, {"n": 0, "c": 0}
 def judge(path, fd, now, dry):
     why = real_judge(path, fd, now, dry)
     if why is None and mode == "swap" and path.endswith("/swap"):
-        real_rename(path, path + ".judged")            # the judged clone is moved away...
+        os.rename(path, path + ".judged")              # the judged clone is moved away...
         os.mkdir(path); shutil.copy(extra, path + "/newcomer.txt")     # ...and something else takes its name
-    if why is None and mode == "latewrite" and path.endswith("/latewrite"):
+    if why is None and mode in ("latewrite", "backcollide") and path.endswith("/" + mode):
         shutil.copy(extra, path + "/arrived.txt")      # a write that lands after the first judgment
+    if why is None and mode == "qmoved" and path.endswith("/qmoved"):
+        os.rename(qdir, qdir + ".away"); os.mkdir(qdir)                # the quarantine is moved away, a decoy takes its place
     return why
 def users_of(real, skip):
     if mode == "outside" and "/.pruning-" in real and not seen["n"]:
         seen["n"] = 1
-        real_rename(real, extra + ".moved-outside")    # after it was set aside and opened: moved out of the night...
+        os.rename(real, extra + ".moved-outside")      # after it was set aside and opened: moved out of the night...
         os.symlink(extra + ".moved-outside", real)     # ...with a symlink left at its name
     return real_users(real, skip)
-def rename(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
-    if mode == "xdev" and dst_dir_fd is not None and src_dir_fd is not None and dst_dir_fd != src_dir_fd:
+def rename_new(src_fd, src, dst_fd, dst):
+    cross = src_fd != dst_fd
+    if mode == "xdev" and cross:
         raise OSError(errno.EXDEV, "cross-device (injected)")          # the kernel says: not one filesystem after all
-    return real_rename(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
-pn.judge, pn.users_of, os.rename = judge, users_of, rename
+    if mode == "qcollide" and cross and not seen["c"]:
+        seen["c"] = 1
+        os.mkdir(dst, dir_fd=dst_fd)                   # an EMPTY directory appears at the destination just before the move
+        open(extra + ".ino", "w").write(str(os.stat(dst, dir_fd=dst_fd).st_ino))
+    if mode == "backcollide" and not cross and src.startswith(".pruning-") and not seen["c"]:
+        seen["c"] = 1
+        os.mkdir(dst, dir_fd=dst_fd)                   # an EMPTY directory takes the clone's old name before the put-back
+        open(extra + ".ino", "w").write(str(os.stat(dst, dir_fd=dst_fd).st_ino))
+    return real_new(src_fd, src, dst_fd, dst)
+def expire(q, tonight, keep_days, dry):
+    if mode == "qexpire":
+        os.rename(qdir, qdir + ".away"); os.mkdir(qdir)                # moved away before the first removal
+    return real_expire(q, tonight, keep_days, dry)
+pn.judge, pn.users_of, pn.rename_new, pn.expire = judge, users_of, rename_new, expire
 sys.exit(pn.main(["prune_nights.py", "--quarantine", qdir, sys.argv[2], sys.argv[3]]))
 EOP
 drv() { PATH="$T/ghbin:$PATH" DREAMTEAM_PRUNE_QUIET_HOURS=0 python3 -I "$T/drv.py" "$PN" "$B" "$TONIGHT" "$1" "$T/newcomer.txt" "$Q" > "$T/out/res.json" 2> "$T/out/err"; }
@@ -327,6 +345,45 @@ kept_as $N6/xdev "not on its filesystem after all (nothing is ever copied)"
 [ "$(cd "$B/$N6/xdev" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum)" = "$m0" ] && ! ls -a "$Q" | grep -q "xdev" && ok || bad "after a refused cross-device rename: night=$(ls -a "$B/$N6" | tr '\n' ' ') quarantine=$(ls -a "$Q" | grep xdev | tr '\n' ' ')"
 ! ls -a "$Q" "$B/$N6" 2>/dev/null | grep -qE '\.partial$|^\.pruning-' && ok || bad "a .partial or .pruning- entry was left: $(ls -a "$Q" "$B/$N6" 2>/dev/null | grep -E 'partial|pruning' | tr '\n' ' ')"
 ! grep -qE '"cp"|copytree|shutil\.copy|shutil\.move|sendfile' "$PN" && ok || bad "the tool contains a copy primitive"
+
+# ── round 5: no rename ever REPLACES anything (renameat2 RENAME_NOREPLACE), not even an empty directory ──────────
+mkclone $N6 qcollide; rm -f "$T/newcomer.txt.ino"; drv qcollide
+goes $N6/qcollide
+[ -d "$Q/${N6}__qcollide__q20261120" ] && [ -z "$(ls -A "$Q/${N6}__qcollide__q20261120")" ] && [ "$(stat -c %i "$Q/${N6}__qcollide__q20261120")" = "$(cat "$T/newcomer.txt.ino")" ] && [ -d "$Q/${N6}__qcollide__q20261120-2/.git" ] \
+  && ok || bad "an empty directory that appeared at the quarantine name was replaced: $(ls "$Q" | grep qcollide | tr '\n' ' ')"
+mkclone $N6 backcollide; rm -f "$T/newcomer.txt.ino"; drv backcollide
+[ -d "$B/$N6/backcollide" ] && [ -z "$(ls -A "$B/$N6/backcollide")" ] && [ "$(stat -c %i "$B/$N6/backcollide")" = "$(cat "$T/newcomer.txt.ino")" ] && ok || bad "an empty directory that took the clone's name was replaced by the put-back: $(ls -a "$B/$N6" | tr '\n' ' ')"
+tb=$(ls -d "$B/$N6"/.pruning-backcollide-* 2>/dev/null | head -n 1); [ -n "$tb" ] && [ "$(cat "$tb/arrived.txt")" = "arrived later" ] && [ -d "$tb/.git" ] && ok || bad "the clone that could not be put back is not whole under its set-aside name"
+case "$(why $N6/backcollide)" in *"its name was taken meanwhile"*) ok ;; *) bad "backcollide why: $(why $N6/backcollide)" ;; esac
+rm -rf "$B/$N6/backcollide" "$B/$N6"/.pruning-backcollide-*
+# ── round 5: the quarantine dir itself is re-checked before every move and every expiry ─────────────────────────
+mkclone $N6 qmoved; drv qmoved
+kept_as $N6/qmoved "its quarantine dir was moved or replaced during the run"
+[ -z "$(ls -A "$Q")" ] && ! ls "$Q.away" | grep -q qmoved && [ "$(jq -c '.quarantine[0] | [.relocated, .refused]' "$T/out/res.json")" = '[true,true]' ] && ok || bad "a moved-away quarantine received a clone: decoy=$(ls -A "$Q" | tr '\n' ' ') away=$(ls "$Q.away" | grep qmoved | tr '\n' ' ')"
+rmdir "$Q"; mv "$Q.away" "$Q"
+mkdir -p "$Q/2026-09-01__gone__q20260910"; echo keep > "$Q/2026-09-01__gone__q20260910/f"; drv qexpire
+[ "$(cat "$Q.away/2026-09-01__gone__q20260910/f" 2>/dev/null)" = keep ] && [ "$(jq -c '.expired' "$T/out/res.json")" = '[]' ] && ok || bad "expiry deleted from a quarantine that had been moved away: $(jq -c .expired "$T/out/res.json")"
+rmdir "$Q"; mv "$Q.away" "$Q"; rm -rf "$Q/2026-09-01__gone__q20260910"
+# ── round 5: mounts. An old entry, or a clone, with something mounted inside is never walked into ───────────────
+mkdir -p "$Q/2026-09-02__mnt__q20260910/sub" "$Q/2026-09-02__plain__q20260910"; echo foreign > "$Q/2026-09-02__mnt__q20260910/sub/theirs"
+mkclone $N6 hasmount; mkdir "$B/$N6/hasmount/mnt"; echo "mnt/" >> "$B/$N6/hasmount/.git/info/exclude"; mkclone $N6 nomount
+{ cat /proc/self/mountinfo; printf '9001 1 0:99 / %s rw - tmpfs none rw\n9002 1 0:98 / %s rw - tmpfs none rw\n' "$Q/2026-09-02__mnt__q20260910/sub" "$B/$N6/hasmount/mnt"; } > "$T/mountinfo"
+DREAMTEAM_PRUNE_MOUNTINFO="$T/mountinfo" prune
+[ "$(cat "$Q/2026-09-02__mnt__q20260910/sub/theirs")" = foreign ] && [ ! -e "$Q/2026-09-02__plain__q20260910" ] && ok || bad "expiry walked into a mount, or skipped the plain entry beside it"
+[ "$(jq -c '.quarantine[0].not_expired' "$T/out/res.json")" = '["2026-09-02__mnt__q20260910"]' ] && ok || bad "not_expired: $(jq -c '.quarantine[0].not_expired' "$T/out/res.json")"
+kept_as $N6/hasmount "something is mounted inside it"; goes $N6/nomount
+: > "$T/empty-mountinfo"; printf 'garbage\n' > "$T/bad-mountinfo"; mkclone $N6 mtab
+DREAMTEAM_PRUNE_MOUNTINFO="$T/bad-mountinfo" prune; kept_as $N6/mtab "something is mounted inside it"                # an unreadable table: fail closed
+DREAMTEAM_PRUNE_MOUNTINFO="$T/no-such-file" prune; kept_as $N6/mtab "something is mounted inside it"
+rm -rf "$Q/2026-09-02__mnt__q20260910"; prune; goes $N6/mtab; goes $N6/hasmount
+# ── round 5: git's environment is BUILT, not inherited: no channel for a filter the selector did not see ────────
+mkclone $N6 envp; echo '* filter=evil' > "$B/$N6/envp/.gitattributes"; git -C "$B/$N6/envp" add .gitattributes; git -C "$B/$N6/envp" commit -q -m attrs; topush "$B/$N6/envp" main
+touch -d '3 days ago' "$B/$N6/envp/f.txt"; rm -f "$T/ran-env-filter"
+( cd "$B/$N6/envp" && GIT_CONFIG_PARAMETERS="'filter.evil.clean=sh -c \"touch $T/ran-env-filter; cat\"'" git status --porcelain >/dev/null 2>&1 ); [ -e "$T/ran-env-filter" ] && ok || bad "fixture: the command-scope filter never fires, so the next check proves nothing"
+rm -f "$T/ran-env-filter"; touch -d '4 days ago' "$B/$N6/envp/f.txt"
+GIT_CONFIG_PARAMETERS="'filter.evil.clean=sh -c \"touch $T/ran-env-filter; cat\"'" GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=filter.evil.clean GIT_CONFIG_VALUE_0="sh -c \"touch $T/ran-env-filter; cat\"" prune
+[ ! -e "$T/ran-env-filter" ] && ok || bad "a filter from the inherited environment (GIT_CONFIG_PARAMETERS / GIT_CONFIG_COUNT) was run on a clone"
+goes $N6/envp
 
 # ── one quarantine per filesystem: a clone is only ever moved within its own ────────────────────────────────────
 OTHER=""; for cand in /dev/shm /run/user/$(id -u) /var/tmp; do
@@ -374,7 +431,7 @@ N8=2026-11-13; mkclone $N8 a-first; mkclone $N8 b-second; mkclone $N8 c-third; :
 DREAMTEAM_PRUNE_FREE_PCT_SEQ="40,40,9" prune
 goes $N8/a-first
 kept_as $N8/b-second "its quarantine went under the free-space floor"
-kept_as $N8/c-third "not looked at: its quarantine is under the free-space floor"
+kept_as $N8/c-third "not looked at: its quarantine takes nothing more this run (under the free-space floor)"
 [ "$(jq -c '.quarantine[0] | [.refused, .free_pct]' "$T/out/res.json")" = '[true,9]' ] && ! ls -a "$B/$N8" | grep -q '^\.pruning-' && ok || bad "floor mid-run: $(jq -c .quarantine "$T/out/res.json") $(ls -a "$B/$N8" | tr '\n' ' ')"
 prune; goes $N8/b-second; goes $N8/c-third                                                       # control: with room, both go
 # a name already in the quarantine is never overwritten: the newcomer gets a numbered name

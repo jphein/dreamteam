@@ -189,6 +189,15 @@ guard_line() {
           fact="$fact; old clones: moved $pr_n to quarantine, kept $pr_k${pr_first:+ (first: $pr_first)}, expired $pr_x"
         fi
       fi
+      # a quarantine dir that was moved or replaced during the run, or an old entry that could not be expired
+      # because something is mounted inside it: said, and an ok line turns to warn
+      if jq -e '.prune | type == "object" and .relocated == true' <<<"$snap" >/dev/null 2>&1; then
+        [ "$st" = ok ] && st=warn; fact="$fact; a quarantine dir was moved or replaced during the run (nothing more went into or out of it)"
+      fi
+      local pr_ne; pr_ne=$(jq -r '.prune.not_expired? | if type == "number" then floor else 0 end' <<<"$snap" 2>/dev/null); pr_ne=${pr_ne:-0}
+      if [ "$pr_ne" != 0 ]; then
+        [ "$st" = ok ] && st=warn; fact="$fact; $pr_ne old quarantine entr(ies) not expired: something is mounted inside"
+      fi
       # clones on a filesystem with no quarantine dir are never moved: named, and an ok line turns to warn
       local pr_q pr_qf
       pr_q=$(jq -r '.prune.no_quarantine? | if type == "number" then floor else 0 end' <<<"$snap" 2>/dev/null); pr_q=${pr_q:-0}
@@ -434,7 +443,9 @@ repo_rec() { # rid repo json-patch
 # in the CHECK line:
 #   {moved: N, expired: E, kept: M, kept_list: [{clone, why}, ...first 20], protected: [...], free_pct: P (the
 #    lowest among the quarantines), min_free_pct: F, refused: true|false (any quarantine under its floor),
-#    no_quarantine: K, no_quarantine_first: "<night>/<name>"}      or   {error: "..."}   or   {unconfigured: true}
+#    no_quarantine: K, no_quarantine_first: "<night>/<name>", relocated: true|false (a quarantine dir was moved or
+#    replaced during the run), not_expired: N (old entries with a mount inside)}
+#                                                         or   {error: "..."}   or   {unconfigured: true}
 # The quarantine dirs are config `overnight.prune_quarantine`: ONE absolute path or a LIST of them, one per filesystem
 # that holds night clones (a per-host value: set it in this host's overlay), with
 # `overnight.prune_keep_days` (14) and `overnight.prune_min_free_pct` (10). No quarantine configured = nothing is
@@ -481,7 +492,9 @@ prune_old_nights() { # rid wt_base night
                                else ([.quarantine[] | select(.refused) | .free_pct] | if length > 0 then min else null end)
                                     // ([.quarantine[].free_pct] | min) | floor end),
                     min_free_pct: (.quarantine[0].min_free_pct | if type == "number" then floor else null end),
-                    no_quarantine: (.no_quarantine | length), no_quarantine_first: (.no_quarantine[0] // "" | tostring)}' <<<"$res" 2>/dev/null)
+                    no_quarantine: (.no_quarantine | length), no_quarantine_first: (.no_quarantine[0] // "" | tostring),
+                    relocated: any(.quarantine[]; .relocated == true),
+                    not_expired: ([.quarantine[] | (.not_expired // []) | if type == "array" then length else 0 end] | add)}' <<<"$res" 2>/dev/null)
   fi
   [ -n "$doc" ] || doc=$(jq -cn --arg e "the prune tool exited $rc or printed no result" '{error: $e}')
   # a tool that failed says so in the record; only then is its marker no longer the only trace
