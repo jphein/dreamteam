@@ -170,7 +170,8 @@ symlink anywhere in its path and lie outside the clone base; two dirs on one fil
 local config has only the keys a fresh clone has (read as data, never run, and git is given no global or system
 config), with one remote, `origin`, at `https://github.com/<owner>/<name>`; it has been quiet for 6 hours with no
 process working in it or holding or mapping a file of it; HEAD is on a branch; `status --untracked-files=all` is
-empty; no index entry is hidden from status; no stash; no grafts, shallow file or replace refs; every commit and
+empty; no submodule in its index (a submodule has its own config, which is never read); no index entry is hidden
+from status; no stash; no grafts, shallow file or replace refs; every commit and
 tag object it holds is under a remote-tracking branch or a tag the forge has; and the forge confirms now, asked
 from outside the clone, that each tracking tip is still on the remote. Nothing is fetched. So these STAY in their
 night, named in the line: a clone whose fix branch was squash-merged and deleted on the remote, one whose history

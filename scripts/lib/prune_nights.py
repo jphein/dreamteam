@@ -39,7 +39,8 @@ left by an interrupted run earns nothing). It is selected (moved to quarantine) 
   4. git answers FOR THAT DIRECTORY (its parent is the discovery ceiling) and every git call exits 0 within the
      timeout. Every call forbids all transports and lazy fetching: this tool never fetches, so nothing in the clone
      is changed by judging it and no local ref can be moved before it is compared.
-  5. HEAD is on a branch; `git status --untracked-files=all` prints nothing; no index entry is marked
+  5. Its index holds no submodule (gitlink): a populated submodule has its own config, which nothing here has
+     read, and `status` would recurse into it. HEAD is on a branch; `git status --untracked-files=all` prints nothing; no index entry is marked
      assume-unchanged or skip-worktree (status cannot see changes to those); there is no stash.
   6. Every commit reachable from any ref or reflog is reachable from its remote-tracking branches (`rev-list
      --all --reflog --not --remotes` is empty), AND every COMMIT and TAG OBJECT in the object store, referenced or
@@ -395,6 +396,15 @@ def judge(path, clone_fd, now, dry):
         return "a detached HEAD"
     if rc != 0:
         return "git could not say what HEAD is"
+    # BEFORE status: the index, read without touching the work tree. A gitlink (mode 160000) is a submodule; a
+    # populated one has its OWN .git and config, which this tool has not read, and `status` would recurse into it
+    # and could run a filter defined there. So a clone with any gitlink is not selected, and status never sees one.
+    rc, out = git(path, "ls-files", "-s", "-z")
+    if rc != 0:
+        return "git could not list the index"
+    for entry in out.split("\0"):
+        if entry.startswith("160000 "):
+            return "a submodule (gitlink) in its index"
     rc, out = git(path, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none")
     if rc != 0:
         return "git status did not finish"
@@ -840,7 +850,7 @@ def main(argv):
         print("prune_nights: no symlink-safe rmtree on this platform; nothing is removed", file=sys.stderr)
         return 2
     try:
-        base_fd = os.open(base, NOFOLLOW_DIR)
+        base_fd = hold(os.open(base, NOFOLLOW_DIR))
         base_real = os.path.realpath(base)
         if not os.path.samestat(os.stat(base_real), os.fstat(base_fd)):
             raise OSError("moved")
@@ -918,7 +928,11 @@ def main(argv):
                 consider(night_fd, os.path.join(base_real, night), night, name, now, dry, res, qs)
             if not dry:
                 try:
-                    os.rmdir(night, dir_fd=base_fd)    # only an emptied night goes
+                    # only an emptied night goes, and only while the base is still the directory at its path and
+                    # the name still is the night that was opened
+                    if (same_dir(base_fd, base_real) and night_intact(night_fd, os.path.join(base_real, night))
+                            and os.path.samestat(os.stat(night, dir_fd=base_fd, follow_symlinks=False), os.fstat(night_fd))):
+                        os.rmdir(night, dir_fd=base_fd)
                 except OSError:
                     pass
         finally:

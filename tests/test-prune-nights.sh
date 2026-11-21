@@ -154,6 +154,16 @@ printf '[filter "evil"]\n\tclean = %s/evilfilter.sh\n\tsmudge = cat\n' "$T" > "$
 # the fixture must FIRE with a plain git, or the check after the prune proves nothing (it once did not: quotes lost)
 ( cd "$(c inherit)" && GIT_CONFIG_GLOBAL="$T/evil.gitconfig" git status --porcelain >/dev/null 2>&1 ); [ -e "$T/ran-inherited-filter" ] && ok || bad "fixture: the inherited filter does not fire with a plain git"
 rm -f "$T/ran-inherited-filter"; touch -d '5 days ago' "$(c inherit)/f.txt"                      # stat differs again: git must re-read it
+# round 7: a populated submodule with its OWN .git and a filter in ITS config. Parent clean and pushed; the child's
+# config is something the selector never reads, so a clone with any gitlink is refused BEFORE status runs.
+mkclone $N submod;     git init -q -b main "$(c submod)/child"; echo c > "$(c submod)/child/cf.txt"
+                       printf '* filter=sub\n' > "$(c submod)/child/.gitattributes"; git -C "$(c submod)/child" add -A; git -C "$(c submod)/child" commit -q -m child
+                       printf '#!/bin/sh\ntouch "%s/ran-submodule-filter"\nexec cat\n' "$T" > "$T/subfilter.sh"; chmod +x "$T/subfilter.sh"
+                       git -C "$(c submod)/child" config filter.sub.clean "$T/subfilter.sh"
+                       git -C "$(c submod)" add child 2>/dev/null; git -C "$(c submod)" commit -q -m "gitlink"; topush "$(c submod)" main
+                       touch -d '6 days ago' "$(c submod)/child/cf.txt"
+[ "$(git -C "$(c submod)" ls-files -s child | cut -c1-6)" = 160000 ] && [ -z "$(git -C "$(c submod)" status --porcelain 2>/dev/null)" ] && [ -e "$T/ran-submodule-filter" ] && ok || bad "fixture: the parent is not a clean clone with a gitlink, or a plain recursive status does not fire the child's filter"
+rm -f "$T/ran-submodule-filter"; touch -d '7 days ago' "$(c submod)/child/cf.txt"
 # positive controls: a clean clone, and one whose remote main has simply moved on since the night
 mkclone $N good
 mkclone $N behind; git clone -q "$LAST_FORGE" "$T/adv"; git -C "$T/adv" commit -q --allow-empty -m later; git -C "$T/adv" push -q origin main
@@ -176,6 +186,8 @@ kept_as $N/stale "origin/fix is not on the remote any more"
 kept_as $N/forged "origin/main is not on the remote any more"
 kept_as $N/rewritten "origin/main is not on the remote any more"
 kept_as $N/stash "a stash"
+kept_as $N/submod "a submodule (gitlink) in its index"
+[ ! -e "$T/ran-submodule-filter" ] && ok || bad "a filter from a submodule's own config was run"
 kept_as $N/graft "history is not read as it is (.git/info/grafts exists)"
 kept_as $N/replace "history is not read as it is (.git/refs/replace exists)"
 kept_as $N/dangling "1 commit or tag object(s) in its store that the remote does not hold"
@@ -320,6 +332,8 @@ def rename_new(src_fd, src, dst_fd, dst):
         open(extra + ".ino", "w").write(str(os.stat(dst, dir_fd=dst_fd).st_ino))
     return real_new(src_fd, src, dst_fd, dst)
 def expire(q, tonight, keep_days, dry):
+    if mode == "basemoved":
+        b = sys.argv[2]; os.rename(b, extra + ".base-away"); os.mkdir(b)   # the whole base leaves during expiry
     if mode == "qexpire":
         os.rename(qdir, qdir + ".away"); os.mkdir(qdir)                # moved away before the first removal
     return real_expire(q, tonight, keep_days, dry)
@@ -389,6 +403,13 @@ mkclone $N10 nightmoved2; drv nightmoved2
 left=$(ls -A "$T/newcomer.txt.night-away" | tr '\n' ' ')
 case "$left" in ".pruning-nightmoved2-"*" ") [ "$(cat "$T/newcomer.txt.night-away"/.pruning-nightmoved2-*/arrived.txt)" = "arrived later" ] && ok || bad "the set-aside clone in a moved night is not whole" ;; *) bad "a put-back was renamed inside a night that had been moved away: $left" ;; esac
 rm -rf "$B/$N10" "$T/newcomer.txt.night-away"
+# round 7: the BASE moved away during the run: an empty old night in it is not removed, nothing in it is renamed
+mv "$B" "$T/wt-real"; mkdir -p "$B/2026-10-01" "$B/2026-10-05"; mkclone 2026-10-02 inmoved
+drv basemoved
+[ -d "$T/newcomer.txt.base-away/2026-10-01" ] && [ "$(ls -A "$T/newcomer.txt.base-away/2026-10-02" | tr '\n' ' ')" = "inmoved " ] && [ -z "$(ls -A "$Q" | grep inmoved)" ] && ok || bad "a base that was moved away had a night removed or a clone renamed: $(ls -A "$T/newcomer.txt.base-away" "$T/newcomer.txt.base-away/2026-10-02" 2>&1 | tr '\n' ' ')"
+rm -rf "$B" "$T/newcomer.txt.base-away"; mv "$T/wt-real" "$B"
+# control: an emptied old night in a base that stayed put IS removed
+mkdir -p "$B/2026-10-03"; prune; [ ! -e "$B/2026-10-03" ] && ok || bad "an empty old night was not removed (control)"
 # ── round 6: an entry moved out of the quarantine WHILE it is being expired is left alone ──────────────────────
 mkdir -p "$Q/2026-09-03__expmoved__q20260910/deep/er" "$Q/2026-09-03__expstays__q20260910/d"
 for f in a deep/b deep/er/c; do echo keep > "$Q/2026-09-03__expmoved__q20260910/$f"; done; echo x > "$Q/2026-09-03__expstays__q20260910/d/f"
