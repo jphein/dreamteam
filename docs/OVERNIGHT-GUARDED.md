@@ -143,21 +143,32 @@ the contract. In short:
 - **Nights:** only real calendar dates earlier than tonight are nights. Tonight and the newest earlier night are
   never touched (the previous night's clones are what a person reads in the morning). Anything else under the base
   (other names, impossible or future dates, symlinks, files) is left alone.
-- **Clones:** one goes only when every check answered and none found something that exists only there: a real
-  directory with a `.git` directory; quiet for 6 hours and no process working in it; git answering for that
-  directory with every call exiting 0; HEAD on a branch; `status --untracked-files=all` empty; no stash; a remote,
-  fetched successfully just now, that holds every commit of HEAD and of every local branch.
-- **So this is kept, on purpose:** a clone whose fix branch was squash-merged and deleted on the remote (its commits
-  are no longer on the remote). The line names it. Nothing asks the forge whether a pull request merged.
+- **Clones:** one goes only when every check answered and none found something that exists only there:
+  - a real directory with a plain `.git` whose storage is its own (no alternates, no symlinked objects);
+  - a local config made only of the keys a fresh clone has (plus branch tracking and user.name/email), with one
+    remote, `origin`, at `https://github.com/<owner>/<name>`. An agent worked in these clones: any other key (a
+    filter, an ssh command, a helper, an include, a second remote) keeps the clone, and nothing from its config is
+    ever run;
+  - quiet for 6 hours, and no process with its working directory or an open file inside;
+  - HEAD on a branch, `status --untracked-files=all` empty, no index entry hidden from status, no stash;
+  - every commit it holds in any way (all refs, tags, every reflog) is under a remote-tracking branch, AND the forge
+    confirms now, asked from outside the clone, that each of those tracking tips is still on the remote.
+  **Nothing is fetched**: judging a clone changes nothing in it.
+- **So this is kept, on purpose:** a clone whose fix branch was squash-merged and deleted on the remote; a clone
+  whose history was amended or rebased (the reflog holds the old commits); any clone when the forge cannot be
+  asked. The line names the first one.
 - **How:** descriptors opened without following symlinks; the clone is renamed to `.pruning-<name>-<random>` inside
-  its night, the renamed directory must be the one that was judged, then it is removed. There is no lock shared
-  with clone users (nothing else takes one); the header says what stands in for it.
+  its night, must be the directory that was judged, is scanned and JUDGED AGAIN, and only then emptied through its
+  own descriptor. A `.pruning-…` name earns nothing: such a directory is judged like any other.
+- **Not a lock.** Nothing else in the fleet locks a clone, so none can be shared. The header says what remains
+  possible (another user's process; one that lists the night and opens the set-aside directory between the last
+  scan and the removal) and why it is accepted.
 - **Where it shows:** the guard record's `.prune` (`pruned`, `kept`, `kept_list` with a reason each) and the CHECK
   line: `…; old clones: pruned N, kept M (first: <night>/<name>: <why>)`. A prune that could not run is
-  `old clones NOT pruned (…)` and turns an ok line to warn. Nothing old to look at: the line says nothing.
+  `old clones NOT pruned (…)`, and a result that could not be written into the record is `old clones: the prune ran
+  but its result is not in the record`; both turn an ok line to warn. Nothing old to look at: the line says nothing.
 - `DREAMTEAM_PRUNE_NIGHTS=0` turns it off. A night ended by a signal does not prune. By hand, to see what would go:
-  `python3 -I scripts/lib/prune_nights.py --dry-run ~/srv/wt/overnight $(date -d '12 hours ago' +%F)` (no fetch in a
-  dry run, so it judges by the clone's last knowledge of its remote).
+  `python3 -I scripts/lib/prune_nights.py --dry-run ~/srv/wt/overnight $(date -d '12 hours ago' +%F)`.
 
 ## The 2026-11-16 night, and the watch
 

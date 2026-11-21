@@ -179,6 +179,10 @@ guard_line() {
           fact="$fact; old clones: pruned $pr_n, kept $pr_k${pr_first:+ (first: $pr_first)}"
         fi
       fi
+      # ...and a prune whose result could not be written into the record (the marker prune_old_nights leaves)
+      if [ -e "$STATE/overnight-runs/${rid//[^A-Za-z0-9-]/}/prune-unrecorded" ] && [[ "$fact" != *"old clones"* ]]; then
+        [ "$st" = ok ] && st=warn; fact="$fact; old clones: the prune ran but its result is not in the record"
+      fi
       # the run-level marker the runner's signal handler writes (independent of any repo record)
       if [ -s "$STATE/overnight-runs/${rid//[^A-Za-z0-9-]/}/killed" ]; then
         killedwhy="runner killed ($(head -c 20 "$STATE/overnight-runs/${rid//[^A-Za-z0-9-]/}/killed" | cut -d' ' -f1 | tr -cd 'A-Z'))"
@@ -424,12 +428,19 @@ prune_old_nights() { # rid wt_base night
                     kept_list: [.kept[:20][] | {clone: (.clone | tostring), why: (.why | tostring)}], protected: (.protected // [])}' <<<"$res" 2>/dev/null)
   fi
   [ -n "$doc" ] || doc=$(jq -cn --arg e "the prune tool exited $rc or printed no result" '{error: $e}')
-  tmp=$(mktemp "$STATE/.overnight-guard.json.XXXXXX" 2>/dev/null) || { log "runner $rid: prune result not recorded (no temp file)"; return 0; }
-  if out=$(jq -c --arg rid "$rid" --argjson p "$doc" 'if .run_id != $rid then . else .prune = $p end' "$g" 2>/dev/null) && [ -n "$out" ] \
-     && printf '%s\n' "$out" > "$tmp" && mv -f -- "$tmp" "$g"; then
+  # A result that cannot be written into the record must still reach the line: the run dir gets a marker that
+  # guard_line reads (as it reads `killed`). Clones may have been removed with nothing in the record saying so.
+  local unrec="$STATE/overnight-runs/${rid//[^A-Za-z0-9-]/}/prune-unrecorded"
+  rm -f -- "$unrec" 2>/dev/null
+  tmp=$(mktemp "$STATE/.overnight-guard.json.XXXXXX" 2>/dev/null) || tmp=""
+  if [ -n "$tmp" ] && out=$(jq -c --arg rid "$rid" --argjson p "$doc" 'if .run_id != $rid then error("not this run") else .prune = $p end' "$g" 2>/dev/null) \
+     && [ -n "$out" ] && printf '%s\n' "$out" > "$tmp" && mv -f -- "$tmp" "$g"; then
     log "runner $rid: old night clones: $(jq -r 'if .error then "not pruned (" + .error + ")" else "pruned \(.pruned), kept \(.kept)" end' <<<"$doc")"
   else
-    rm -f -- "$tmp"; log "runner $rid: prune result not recorded"
+    [ -n "$tmp" ] && rm -f -- "$tmp"
+    printf '%s\n' "$(jq -r 'if .error then "error" else "pruned \(.pruned) kept \(.kept)" end' <<<"$doc" 2>/dev/null)" > "$unrec" 2>/dev/null \
+      || log "runner $rid: prune result not recorded AND the marker could not be written"
+    log "runner $rid: prune result not recorded in the guard record"
   fi
 }
 

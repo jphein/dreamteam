@@ -940,21 +940,50 @@ FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 DREAMTEAM_PRUNE_C
 reset; rm -rf "$TMP/checks"; mkqueue jphein/realmwatch:2; : > "$TMP/prune.log"
 FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 DREAMTEAM_PRUNE_NIGHTS=0 DREAMTEAM_PRUNE_CMD="$BIN/prune-stub" PRUNE_LOG="$TMP/prune.log" run_g >/dev/null
 [ ! -s "$TMP/prune.log" ] && [ "$(gj '.prune // "none"')" = none ] && pass "prune: DREAMTEAM_PRUNE_NIGHTS=0 → the tool is not called" || fail "prune switch: $(cat "$TMP/prune.log")"
-# the REAL tool through the nightly, on a real old clone (real git for the tool only: the nightly's own git is the stub)
+# a result that cannot be recorded (the record belongs to another run by then) still reaches the line: warn
+reset; rm -rf "$TMP/checks"; mkqueue jphein/realmwatch:2
+cat > "$BIN/prune-steal" <<'S'
+#!/usr/bin/env bash
+# the tool "runs", and meanwhile the guard record is rewritten as another run's (so .prune cannot be written into it)
+g="$DREAMTEAM_STATE/overnight-guard.json"; jq -c '.real_run_id = .run_id | .run_id = "someone-else"' "$g" > "$g.x" && mv -f "$g.x" "$g"
+printf '%s\n' '{"pruned":["2001-01-01/a"],"kept":[],"protected":[]}'
+S
+chmod +x "$BIN/prune-steal"
+FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 DREAMTEAM_PRUNE_CMD="$BIN/prune-steal" run_g >/dev/null
+RIDS=$(gj .real_run_id)
+[ -s "$TMP/state/overnight-runs/$RIDS/prune-unrecorded" ] && [ "$(gj '.prune // "none"')" = none ] && pass "prune: a result that could not be recorded leaves a marker in the run dir" || fail "prune unrecorded marker: $(ls "$TMP/state/overnight-runs/$RIDS" 2>&1 | tr '\n' ' ')"
+jq -c '.run_id = .real_run_id' "$TMP/state/overnight-guard.json" > "$TMP/state/g.x" && mv -f "$TMP/state/g.x" "$TMP/state/overnight-guard.json"; run_g --check-line >/dev/null
+[[ "$(cl)" == "CHECK nightly-guarded warn · "*"; old clones: the prune ran but its result is not in the record"* ]] && pass "prune: an unrecorded result → warn, said in the line" || fail "prune unrecorded line: '$(cl)'"
+# the REAL tool through the nightly, on real old clones. The tool gets the real git and a forge stub (its own `gh`,
+# answering compare from a real bare repo); the nightly's own git and gh stay the suite's stubs.
 REALGIT=$(PATH="${PATH#"$BIN:"}" command -v git)
-reset; rm -rf "$TMP/checks" "$TMP/pr-remote.git"; mkqueue jphein/realmwatch:2
+reset; rm -rf "$TMP/checks" "$TMP/forge" "$TMP/prbin"; mkqueue jphein/realmwatch:2; mkdir -p "$TMP/forge/t" "$TMP/prbin"
+cat > "$TMP/prbin/gh" <<EOS
+#!/usr/bin/env bash
+[ "\$1" = api ] || exit 2
+url="\$2"; g="$REALGIT"; nf() { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+case "\$url" in
+  repos/*/*/compare/*) rest="\${url#repos/}"; repo="\${rest%%/compare/*}"; cmp="\${rest#*/compare/}"; sha="\${cmp%%...*}"; br="\${cmp#*...}"
+    bare="$TMP/forge/\$repo.git"; tip=\$("\$g" --git-dir="\$bare" rev-parse -q --verify "refs/heads/\$br^{commit}" 2>/dev/null) || nf
+    "\$g" --git-dir="\$bare" cat-file -e "\$sha^{commit}" 2>/dev/null || nf
+    if [ "\$tip" = "\$sha" ]; then echo identical; elif "\$g" --git-dir="\$bare" merge-base --is-ancestor "\$sha" "\$tip"; then echo ahead; else echo diverged; fi ;;
+  repos/*/*) echo main ;;
+esac
+EOS
+chmod +x "$TMP/prbin/gh"
 ( export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid
-  "$REALGIT" init -q --bare -b main "$TMP/pr-remote.git"; "$REALGIT" init -q -b main "$TMP/pr-seed"; "$REALGIT" -C "$TMP/pr-seed" commit -q --allow-empty -m one
-  "$REALGIT" -C "$TMP/pr-seed" push -q "$TMP/pr-remote.git" main; rm -rf "$TMP/pr-seed"
+  "$REALGIT" init -q --bare -b main "$TMP/forge/t/r.git"; "$REALGIT" init -q -b main "$TMP/pr-seed"; "$REALGIT" -C "$TMP/pr-seed" commit -q --allow-empty -m one
+  "$REALGIT" -C "$TMP/pr-seed" push -q "$TMP/forge/t/r.git" main; rm -rf "$TMP/pr-seed"
   mkdir -p "$TMP/wt/2001-01-01" "$TMP/wt/2001-01-02" "$TMP/wt/2001-01-03"
-  "$REALGIT" clone -q "$TMP/pr-remote.git" "$TMP/wt/2001-01-01/gone"; "$REALGIT" clone -q "$TMP/pr-remote.git" "$TMP/wt/2001-01-01/stays"
-  "$REALGIT" -C "$TMP/wt/2001-01-01/stays" commit -q --allow-empty -m local
-  "$REALGIT" clone -q "$TMP/pr-remote.git" "$TMP/wt/2001-01-03/prev" ) >/dev/null 2>&1
-printf '#!/bin/sh\nPATH="%s:$PATH" DREAMTEAM_PRUNE_QUIET_HOURS=0 exec python3 -I "%s/scripts/lib/prune_nights.py" "$@"\n' "$(dirname "$REALGIT")" "$ROOT" > "$BIN/prune-real"; chmod +x "$BIN/prune-real"
+  for c in 2001-01-01/gone 2001-01-01/stays 2001-01-03/prev; do
+    "$REALGIT" clone -q "$TMP/forge/t/r.git" "$TMP/wt/$c"; "$REALGIT" -C "$TMP/wt/$c" config remote.origin.url https://github.com/t/r.git
+  done
+  "$REALGIT" -C "$TMP/wt/2001-01-01/stays" commit -q --allow-empty -m local ) >/dev/null 2>&1
+printf '#!/bin/sh\nPATH="%s:%s:$PATH" DREAMTEAM_PRUNE_QUIET_HOURS=0 exec python3 -I "%s/scripts/lib/prune_nights.py" "$@"\n' "$TMP/prbin" "$(dirname "$REALGIT")" "$ROOT" > "$BIN/prune-real"; chmod +x "$BIN/prune-real"
 FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 DREAMTEAM_PRUNE_CMD="$BIN/prune-real" run_g >/dev/null
 { [ ! -e "$TMP/wt/2001-01-01/gone" ] && [ -d "$TMP/wt/2001-01-01/stays/.git" ] && [ -d "$TMP/wt/2001-01-03/prev/.git" ]; } \
   && pass "prune (real tool via the nightly): the clean old clone is gone, the unpushed one and the previous night stay" || fail "prune real: $(ls "$TMP/wt" "$TMP/wt/2001-01-01" 2>&1 | tr '\n' ' ') $(gj -c .prune)"
-[[ "$(cl)" == *"; old clones: pruned 1, kept 1 (first: 2001-01-01/stays: 1 commit(s) the remote does not hold)"* ]] && pass "prune (real tool): the line names the kept clone and why" || fail "prune real line: '$(cl)'"
+[[ "$(cl)" == *"; old clones: pruned 1, kept 1 (first: 2001-01-01/stays: 1 commit(s) its remote-tracking branches do not hold)"* ]] && pass "prune (real tool): the line names the kept clone and why" || fail "prune real line: '$(cl)'"
 [ ! -s "$TMP/launch-attempts.txt" ] && pass "no test attempted a real scope/tmux launch" || fail "a test reached the launch: $(head -3 "$TMP/launch-attempts.txt")"
 echo "─────────────────────────────────────────────────────────────────"
 echo "SUMMARY: $PASS passed, $FAIL failed, $((PASS+FAIL)) total"
