@@ -134,6 +134,74 @@ the clone's real default branch (`origin/HEAD`) and main/master/trunk/production
    - The 07:03 `morning-briefing.sh` adds a "Nightly sweep" line with one clause per repo (status, PRs opened,
      merged, reason), and a started run counts as overnight activity.
 
+## Old night clones (#250): move, then delete
+
+Each night's clones live in `~/srv/wt/overnight/<night>/<name>` and were never removed (1.8 GB a night on a small
+root). After the FINISHED line the runner calls `scripts/lib/prune_nights.py`; its header is the contract.
+
+**Move-then-delete, rename only** (decided 2026-11-20, after four review rounds): a selected clone is moved by ONE
+rename into a quarantine dir **on its own filesystem** and deleted from there 14 days later. Nothing is ever
+copied, and nothing is destroyed on the night it is selected: a wrong selection costs a move that can be undone.
+
+1. **Expire:** in every quarantine dir, entries named `<night>__<name>__q<YYYYMMDD>` whose q-date is 14 days or
+   more before tonight are deleted (by the date in the name, never by mtime). Anything else there is left alone.
+2. **Floor:** a quarantine whose filesystem has less than 10 % free takes nothing; the reading is taken again
+   before every move. The line says `old clones NOT all moved: a quarantine disk has N% free (floor 10%)` (warn).
+3. **Select and move:** in nights before the previous one (tonight and the newest earlier night are never
+   touched), each clone the selector passes is renamed into the quarantine on its filesystem; the others stay,
+   each with its reason. **A clone whose filesystem has no quarantine dir is never moved**; the line counts and
+   names it (warn).
+
+**What that means for disk space:** the move frees nothing on the night it happens (same filesystem). The space
+comes back when the entry expires, 14 days later. In steady state the quarantine holds two weeks of old clones.
+
+**Configure it per host** (paths are host data, so they go in that host's overlay, `config.<host>.json`): one
+absolute path, or a list with one dir per filesystem that holds night clones.
+
+```json
+{ "overnight": { "prune_quarantine": "/absolute/dir/on/the/clones/filesystem", "prune_keep_days": 14, "prune_min_free_pct": 10 } }
+```
+
+With no `prune_quarantine` nothing is moved and the line says `old clones stay (no quarantine dir configured:
+overnight.prune_quarantine)` without changing its status. A quarantine dir is created if absent; it must have no
+symlink anywhere in its path and lie outside the clone base; two dirs on one filesystem are refused.
+
+**The selector** passes a clone only when: it is a real directory with a plain `.git` holding its own storage; its
+local config has only the keys a fresh clone has (read as data, never run, and git is given no global or system
+config), with one remote, `origin`, at `https://github.com/<owner>/<name>`; it has been quiet for 6 hours with no
+process working in it or holding or mapping a file of it; HEAD is on a branch; `status --untracked-files=all` is
+empty; no submodule in its index (a submodule has its own config, which is never read); no index entry is hidden
+from status; no stash; no grafts, shallow file or replace refs; every commit and
+tag object it holds is under a remote-tracking branch or a tag the forge has; and the forge confirms now, asked
+from outside the clone, that each tracking tip is still on the remote. Nothing is fetched. So these STAY in their
+night, named in the line: a clone whose fix branch was squash-merged and deleted on the remote, one whose history
+was amended, any clone when the forge cannot be asked.
+
+**Held descriptors.** The base, each night, each clone and each quarantine dir is opened once, without following
+symlinks, and held; what each one is (device and inode) is recorded then. Nothing after that is done by path: git
+is started in the clone's descriptor, every rename is `renameat2` relative to two held descriptors, expiry walks
+the held quarantine descriptor. Before each rename the directories involved must still be what was recorded and
+still be at their configured path; after it they are compared again. A path moved or replaced during an operation
+cannot redirect a write: a directory that is no longer where it was is refused, and the line says so.
+
+**Things it will not do** (each from a review finding, each tested): replace anything by a rename (all three
+renames are `renameat2(RENAME_NOREPLACE)`; without that call nothing moves); walk into a mount (an old entry with
+something mounted inside is not expired and is named; a clone with a mount inside is not selected; an unreadable
+mount table counts as a mount); go on using a quarantine dir that was moved or replaced during the run (it is
+re-checked before every move and every expiry); run git with anything inherited (its environment is built from a
+fixed list, with no global or system config).
+
+**Where it shows:** the guard record's `.prune` and the CHECK line: `…; old clones: moved N to quarantine, kept M
+(first: <night>/<name>: <why>), expired E`, and when it applies `; K old clone(s) on a filesystem with no
+quarantine dir (first: …)`, `; a quarantine dir was moved or replaced during the run`, `; N old quarantine entr(ies)
+not expired: something is mounted inside` (each warn). A tool that fails is `old clones NOT moved (…)` (warn). A marker is written in the run
+dir BEFORE the tool runs and removed once its result is recorded; if it is still there the line says `a prune
+started and its result is not in the record` (warn). If the marker cannot be written, the tool is not run.
+
+**By hand:** `DREAMTEAM_PRUNE_NIGHTS=0` turns it off. To see what would move:
+`python3 -I scripts/lib/prune_nights.py --dry-run --quarantine <dir> ~/srv/wt/overnight $(date -d '12 hours ago' +%F)`.
+To bring a clone back within the 14 days: `mv <quarantine>/<night>__<name>__q<date> ~/srv/wt/overnight/<night>/<name>`.
+
 ## The 2026-11-16 night, and the watch
 
 The first guarded night (`nightly-20261116-233001`) died at 23:41, 11 minutes in, with one repo begun and no FINISHED

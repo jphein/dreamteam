@@ -900,6 +900,132 @@ FAKE_SESSION=gone rec started "$OLD" "guard passed" '[{"repo":"a/x","status":"st
 ( FAKE_NOTIFY_SLEEP=2 FAKE_SESSION=gone run_g --watch >/dev/null ) & ( FAKE_NOTIFY_SLEEP=2 FAKE_SESSION=gone run_g --watch >/dev/null ) & wait
 [ "$(wc -l < "$TMP/notify.txt")" = 1 ] && pass "--watch: two concurrent watches send once" || fail "watch concurrent: $(wc -l < "$TMP/notify.txt") sends"
 
+# ── #250/#255: after FINISHED the runner MOVES old night clones to a quarantine dir and expires that by age
+# (scripts/lib/prune_nights.py, tested on real repos in test-prune-nights.sh). Here: the WIRING. The tool is called
+# once, after FINISHED, with the configured quarantine, the plan's wt_base and night; its result lands in THIS run's
+# guard record; and the CHECK LINE says it (the round-1 review: JSON storage alone proves nothing about the line).
+cat > "$BIN/prune-stub" <<'S'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$PRUNE_LOG"
+grep -q '^FINISHED ' "$DREAMTEAM_STATE/overnight-pending.md" 2>/dev/null && echo after-finished >> "$PRUNE_LOG"
+ls "$DREAMTEAM_STATE"/overnight-runs/*/prune-unrecorded >/dev/null 2>&1 && echo marker-present >> "$PRUNE_LOG"
+[ -n "${PRUNE_RC:-}" ] && exit "$PRUNE_RC"
+printf '%s\n' "${PRUNE_OUT:-{\"moved\":[],\"expired\":[],\"kept\":[],\"protected\":[],\"no_quarantine\":[],\"quarantine\":[{\"free_pct\":50,\"min_free_pct\":10,\"refused\":false\}]\}}"
+S
+chmod +x "$BIN/prune-stub"
+QD="$TMP/quar"
+prun(){ FAKE_GH_realmwatch="$I2" FAKE_QUOTA="$Q_OK" DREAMTEAM_INLINE=1 DREAMTEAM_PRUNE_CMD="${PCMD:-$BIN/prune-stub}" PRUNE_LOG="$TMP/prune.log" run_g >/dev/null; }
+fresh(){ reset; rm -rf "$TMP/checks"; mkqueue jphein/realmwatch:2; : > "$TMP/prune.log"; }
+PO='{"moved":["2026-11-10/a","2026-11-10/b"],"expired":["x","y","z"],"kept":[{"clone":"2026-11-10/realmwatch","why":"1 commit(s) its remote-tracking branches do not hold"},{"clone":"2026-11-11/x","why":"a detached HEAD"}],"protected":["t","p"],"no_quarantine":[],"quarantine":[{"dir":"/q","free_pct":41,"min_free_pct":10,"keep_days":14,"refused":false}]}'
+fresh; DREAMTEAM_PRUNE_QUARANTINE="$QD" PRUNE_OUT="$PO" prun
+NIGHTP=$(pj .night); RIDP=$(gj .run_id)
+[ "$(grep -c -- "^--quarantine $QD --keep-days 14 --min-free-pct 10 $TMP/wt $NIGHTP\$" "$TMP/prune.log")" = 1 ] && pass "prune: the tool is called once with the quarantine, 14 days, 10 %, the plan's wt_base and night" || fail "prune call: $(cat "$TMP/prune.log")"
+grep -qx after-finished "$TMP/prune.log" && pass "prune: it runs AFTER the FINISHED line is written" || fail "prune ran before FINISHED"
+grep -qx marker-present "$TMP/prune.log" && pass "prune: the started-marker exists BEFORE the tool runs" || fail "no marker while the tool ran"
+[ ! -e "$TMP/state/overnight-runs/$RIDP/prune-unrecorded" ] && pass "prune: the marker is removed once the result is in the record" || fail "the marker stayed after a recorded result"
+[ "$(gj '.prune | "\(.moved) \(.expired) \(.kept) \(.kept_list[0].clone) \(.kept_list | length) \(.free_pct) \(.refused)"')" = "2 3 2 2026-11-10/realmwatch 2 41 false" ] && pass "prune: counts, the kept list and the free share are in this run's guard record" || fail "prune record: $(gj -c .prune)"
+[[ "$(cl)" == "CHECK nightly-guarded ok · "*"finished 1, stopped 0, skipped 0"*"; old clones: moved 2 to quarantine, kept 2 (first: 2026-11-10/realmwatch: 1 commit(s) its remote-tracking branches do not hold), expired 3"* ]] \
+  && pass "prune: the CHECK line says how many moved, how many stayed with the first reason, and how many expired" || fail "prune line: '$(cl)'"
+[[ "$(cl)" =~ $NSHAPE ]] && pass "prune: the line keeps its three-part shape" || fail "prune line shape: '$(cl)'"
+# the quarantine disk under its floor: nothing moved, said in the line, ok becomes warn
+fresh; DREAMTEAM_PRUNE_QUARANTINE="$QD" PRUNE_OUT='{"moved":[],"expired":["x"],"kept":[],"protected":[],"no_quarantine":[],"quarantine":[{"free_pct":7,"min_free_pct":10,"refused":true}]}' prun
+[[ "$(cl)" == "CHECK nightly-guarded warn · "*"finished 1, stopped 0, skipped 0"*"; old clones NOT all moved: a quarantine disk has 7% free (floor 10%), moved 0, expired 1"* ]] \
+  && pass "prune: a quarantine disk under its floor → warn, with the share and the floor in the line" || fail "prune floor line: '$(cl)'"
+[ "$(gj '.prune.refused')" = true ] && pass "prune: the refusal is in the record" || fail "prune floor record: $(gj -c .prune)"
+fresh; DREAMTEAM_PRUNE_QUARANTINE="$QD" PRUNE_OUT='{"moved":[],"expired":[],"kept":[],"protected":[],"no_quarantine":[],"quarantine":[{"free_pct":null,"min_free_pct":10,"refused":true}]}' prun
+[[ "$(cl)" == "CHECK nightly-guarded warn · "*"; old clones NOT all moved: a quarantine disk has an unreadable amount free (floor 10%), moved 0, expired 0"* ]] \
+  && pass "prune: a free share that could not be read → warn, said as such" || fail "prune unreadable floor line: '$(cl)'"
+# a tool that fails is said in the line and turns ok into warn (the small disk is not being freed and nobody would know)
+fresh; DREAMTEAM_PRUNE_QUARANTINE="$QD" PRUNE_RC=2 prun
+[[ "$(cl)" == "CHECK nightly-guarded warn · "*"finished 1, stopped 0, skipped 0"*"; old clones NOT moved (the prune tool exited 2 or printed no result)"* ]] \
+  && pass "prune: a tool that fails → warn, said in the line" || fail "prune fail line: '$(cl)'"
+[ "$(gj '.prune.error')" = "the prune tool exited 2 or printed no result" ] && pass "prune: the failure is in the record" || fail "prune fail record: $(gj -c .prune)"
+# output that is not the tool's object is a failure too, never read as "nothing to move"
+fresh; DREAMTEAM_PRUNE_QUARANTINE="$QD" PRUNE_OUT='{"moved":3,"kept":[],"expired":[],"no_quarantine":[],"quarantine":[{"refused":false}]}' prun
+[[ "$(cl)" == "CHECK nightly-guarded warn · "*"old clones NOT moved"* ]] && pass "prune: malformed tool output → warn, not a quiet zero" || fail "prune malformed: '$(cl)'"
+fresh; DREAMTEAM_PRUNE_QUARANTINE="$QD" PRUNE_OUT='{"moved":[],"kept":[],"expired":[],"no_quarantine":[],"quarantine":[{"refused":"no"}]}' prun
+[[ "$(cl)" == "CHECK nightly-guarded warn · "*"old clones NOT moved"* ]] && pass "prune: a result without a real refused flag → warn" || fail "prune malformed 2: '$(cl)'"
+# clones on a filesystem with no quarantine dir: never moved, named in the line, ok becomes warn
+fresh; DREAMTEAM_PRUNE_QUARANTINE="$QD" PRUNE_OUT='{"moved":["2026-11-10/a"],"expired":[],"kept":[{"clone":"2026-11-09/far","why":"no quarantine dir on its filesystem: not moved"}],"protected":[],"no_quarantine":["2026-11-09/far","2026-11-09/far2"],"quarantine":[{"free_pct":50,"min_free_pct":10,"refused":false}]}' prun
+[[ "$(cl)" == "CHECK nightly-guarded warn · "*"; old clones: moved 1 to quarantine, kept 1 (first: 2026-11-09/far: no quarantine dir on its filesystem: not moved), expired 0; 2 old clone(s) on a filesystem with no quarantine dir (first: 2026-11-09/far)"* ]] \
+  && pass "prune: clones with no quarantine on their filesystem → warn, counted and named in the line" || fail "prune no-quarantine line: '$(cl)'"
+# several quarantine dirs (one per filesystem): each is passed; the lowest refused share is the one reported
+fresh; jq '.overnight.prune_quarantine = ["/q/one", "relative/skipped", "/q/two"]' "$TMP/config.json" > "$TMP/config.x" && mv "$TMP/config.x" "$TMP/config.json"
+PRUNE_OUT='{"moved":["2026-11-10/a"],"expired":[],"kept":[],"protected":[],"no_quarantine":[],"quarantine":[{"free_pct":60,"min_free_pct":10,"refused":false},{"free_pct":4,"min_free_pct":10,"refused":true}]}' prun
+grep -q -- "^--quarantine /q/one --quarantine /q/two --keep-days 14 --min-free-pct 10 $TMP/wt " "$TMP/prune.log" && pass "prune: a list of quarantine dirs in the config → one --quarantine each, non-absolute entries dropped" || fail "prune list config: $(cat "$TMP/prune.log")"
+[[ "$(cl)" == "CHECK nightly-guarded warn · "*"; old clones NOT all moved: a quarantine disk has 4% free (floor 10%), moved 1, expired 0"* ]] && pass "prune: one of two quarantines under its floor → warn with ITS share, and what did move" || fail "prune two-quarantine line: '$(cl)'"
+# a quarantine dir moved or replaced during the run, and an old entry with a mount inside: warn, said in the line
+fresh; DREAMTEAM_PRUNE_QUARANTINE="$QD" PRUNE_OUT='{"moved":[],"expired":[],"kept":[],"protected":[],"no_quarantine":[],"quarantine":[{"free_pct":50,"min_free_pct":10,"refused":true,"relocated":true}]}' prun
+[[ "$(cl)" == "CHECK nightly-guarded warn · "*"; a quarantine dir was moved or replaced during the run (nothing more went into or out of it)"* ]] && pass "prune: a quarantine dir moved or replaced during the run → warn, said in the line" || fail "prune relocated line: '$(cl)'"
+fresh; DREAMTEAM_PRUNE_QUARANTINE="$QD" PRUNE_OUT='{"moved":[],"expired":[],"kept":[],"protected":[],"no_quarantine":[],"quarantine":[{"free_pct":50,"min_free_pct":10,"refused":false,"not_expired":["a","b"]}]}' prun
+[[ "$(cl)" == "CHECK nightly-guarded warn · "*"; 2 old quarantine entr(ies) not expired: something is mounted inside"* ]] && pass "prune: old entries not expired for a mount inside → warn, counted in the line" || fail "prune not-expired line: '$(cl)'"
+# nothing old to look at: the line is exactly as it was before this feature (quiet)
+fresh; DREAMTEAM_PRUNE_QUARANTINE="$QD" prun
+[[ "$(cl)" == "CHECK nightly-guarded ok · "*"finished 1, stopped 0, skipped 0"* ]] && [[ "$(cl)" != *"old clones"* ]] && pass "prune: nothing moved, kept or expired → the line does not mention it" || fail "prune quiet: '$(cl)'"
+# the switch: DREAMTEAM_PRUNE_NIGHTS=0 never calls the tool
+fresh; DREAMTEAM_PRUNE_QUARANTINE="$QD" DREAMTEAM_PRUNE_NIGHTS=0 prun
+[ ! -s "$TMP/prune.log" ] && [ "$(gj '.prune // "none"')" = none ] && pass "prune: DREAMTEAM_PRUNE_NIGHTS=0 → the tool is not called" || fail "prune switch: $(cat "$TMP/prune.log")"
+# no quarantine configured: the tool is not called, and the line says why nothing is moved
+fresh; prun
+[ ! -s "$TMP/prune.log" ] && [[ "$(cl)" == "CHECK nightly-guarded ok · "*"; old clones stay (no quarantine dir configured: overnight.prune_quarantine)"* ]] \
+  && pass "prune: no quarantine configured → the tool is not called; said in the line, status unchanged" || fail "prune no quarantine: '$(cl)' log=$(cat "$TMP/prune.log")"
+[ "$(gj '.prune.unconfigured')" = true ] && [ ! -e "$TMP/state/overnight-runs/$(gj .run_id)/prune-unrecorded" ] && pass "prune: the off state is in the record and leaves no marker" || fail "prune unconfigured record: $(gj -c .prune)"
+fresh; DREAMTEAM_PRUNE_QUARANTINE="relative/q" prun
+[ ! -s "$TMP/prune.log" ] && [[ "$(cl)" == *"old clones stay (no quarantine dir configured"* ]] && pass "prune: a relative quarantine path is not a quarantine" || fail "prune relative quarantine: '$(cl)'"
+# ...and the config keys are read (the per-host overlay is where a host says where its big disk is)
+fresh; jq '.overnight.prune_quarantine = "/cfg/quarantine" | .overnight.prune_keep_days = 21 | .overnight.prune_min_free_pct = 15' "$TMP/config.json" > "$TMP/config.x" && mv "$TMP/config.x" "$TMP/config.json"
+prun; grep -q -- "^--quarantine /cfg/quarantine --keep-days 21 --min-free-pct 15 $TMP/wt " "$TMP/prune.log" && pass "prune: quarantine dir, days and floor come from the config" || fail "prune config: $(cat "$TMP/prune.log")"
+fresh; jq '.overnight.prune_quarantine = "/cfg/quarantine" | .overnight.prune_keep_days = "soon" | .overnight.prune_min_free_pct = 250' "$TMP/config.json" > "$TMP/config.x" && mv "$TMP/config.x" "$TMP/config.json"
+prun; grep -q -- "^--quarantine /cfg/quarantine --keep-days 14 --min-free-pct 10 " "$TMP/prune.log" && pass "prune: a days or floor value that is not a small number falls back to 14 and 10" || fail "prune bad config: $(cat "$TMP/prune.log")"
+# no deletion without a way to say so: when the started-marker cannot be written, the tool is NOT run
+fresh; DREAMTEAM_PRUNE_QUARANTINE="$QD" DREAMTEAM_PRUNE_MARKER="/proc/nonexistent-dir/marker" prun
+[ ! -s "$TMP/prune.log" ] && [[ "$(cl)" == "CHECK nightly-guarded warn · "*"old clones NOT moved (not run: the marker that says a prune started could not be written)"* ]] \
+  && pass "prune: an unwritable started-marker → the tool is not run, warn" || fail "prune marker unwritable: '$(cl)' log=$(cat "$TMP/prune.log")"
+# a result that cannot be recorded (the record belongs to another run by then): the marker stays and the line says so
+cat > "$BIN/prune-steal" <<'S'
+#!/usr/bin/env bash
+# the tool "runs", and meanwhile the guard record is rewritten as another run's (so .prune cannot be written into it)
+g="$DREAMTEAM_STATE/overnight-guard.json"; jq -c '.real_run_id = .run_id | .run_id = "someone-else"' "$g" > "$g.x" && mv -f "$g.x" "$g"
+printf '%s\n' '{"moved":["2001-01-01/a"],"expired":[],"kept":[],"protected":[],"no_quarantine":[],"quarantine":[{"free_pct":50,"min_free_pct":10,"refused":false}]}'
+S
+chmod +x "$BIN/prune-steal"
+fresh; DREAMTEAM_PRUNE_QUARANTINE="$QD" PCMD="$BIN/prune-steal" prun
+RIDS=$(gj .real_run_id)
+[ -s "$TMP/state/overnight-runs/$RIDS/prune-unrecorded" ] && [ "$(gj '.prune // "none"')" = none ] && pass "prune: a result that could not be recorded leaves the started-marker in the run dir" || fail "prune unrecorded marker: $(ls "$TMP/state/overnight-runs/$RIDS" 2>&1 | tr '\n' ' ')"
+jq -c '.run_id = .real_run_id' "$TMP/state/overnight-guard.json" > "$TMP/state/g.x" && mv -f "$TMP/state/g.x" "$TMP/state/overnight-guard.json"; run_g --check-line >/dev/null
+[[ "$(cl)" == "CHECK nightly-guarded warn · "*"; old clones: a prune started and its result is not in the record"* ]] && pass "prune: an unrecorded result → warn, said in the line" || fail "prune unrecorded line: '$(cl)'"
+# the REAL tool through the nightly, on real old clones. The tool gets the real git and a forge stub (its own `gh`,
+# answering compare from a real bare repo); the nightly's own git and gh stay the suite's stubs.
+REALGIT=$(PATH="${PATH#"$BIN:"}" command -v git)
+fresh; rm -rf "$TMP/forge" "$TMP/prbin" "$QD"; mkdir -p "$TMP/forge/t" "$TMP/prbin"
+cat > "$TMP/prbin/gh" <<EOS
+#!/usr/bin/env bash
+[ "\$1" = api ] || exit 2
+url="\$2"; [ "\$2" = --paginate ] && url="\$3"; g="$REALGIT"; nf() { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+case "\$url" in
+  repos/*/*/compare/*) rest="\${url#repos/}"; repo="\${rest%%/compare/*}"; cmp="\${rest#*/compare/}"; sha="\${cmp%%...*}"; br="\${cmp#*...}"
+    bare="$TMP/forge/\$repo.git"; tip=\$("\$g" --git-dir="\$bare" rev-parse -q --verify "refs/heads/\$br^{commit}" 2>/dev/null) || nf
+    "\$g" --git-dir="\$bare" cat-file -e "\$sha^{commit}" 2>/dev/null || nf
+    if [ "\$tip" = "\$sha" ]; then echo identical; elif "\$g" --git-dir="\$bare" merge-base --is-ancestor "\$sha" "\$tip"; then echo ahead; else echo diverged; fi ;;
+  repos/*/*/git/matching-refs/tags/) : ;;
+  repos/*/*) echo main ;;
+esac
+EOS
+chmod +x "$TMP/prbin/gh"
+( export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid
+  "$REALGIT" init -q --bare -b main "$TMP/forge/t/r.git"; "$REALGIT" init -q -b main "$TMP/pr-seed"; "$REALGIT" -C "$TMP/pr-seed" commit -q --allow-empty -m one
+  "$REALGIT" -C "$TMP/pr-seed" push -q "$TMP/forge/t/r.git" main; rm -rf "$TMP/pr-seed"
+  mkdir -p "$TMP/wt/2001-01-01" "$TMP/wt/2001-01-02" "$TMP/wt/2001-01-03"
+  for c in 2001-01-01/gone 2001-01-01/stays 2001-01-03/prev; do
+    "$REALGIT" clone -q "$TMP/forge/t/r.git" "$TMP/wt/$c"; "$REALGIT" -C "$TMP/wt/$c" config remote.origin.url https://github.com/t/r.git
+  done
+  "$REALGIT" -C "$TMP/wt/2001-01-01/stays" commit -q --allow-empty -m local ) >/dev/null 2>&1
+printf '#!/bin/sh\nPATH="%s:%s:$PATH" DREAMTEAM_PRUNE_QUIET_HOURS=0 exec python3 -I "%s/scripts/lib/prune_nights.py" "$@"\n' "$TMP/prbin" "$(dirname "$REALGIT")" "$ROOT" > "$BIN/prune-real"; chmod +x "$BIN/prune-real"
+DREAMTEAM_PRUNE_QUARANTINE="$QD" PCMD="$BIN/prune-real" prun
+QN="2001-01-01__gone__q$(pj .night | tr -d -)"
+{ [ ! -e "$TMP/wt/2001-01-01/gone" ] && [ -d "$QD/$QN/.git" ] && [ -d "$TMP/wt/2001-01-01/stays/.git" ] && [ -d "$TMP/wt/2001-01-03/prev/.git" ]; } \
+  && pass "prune (real tool via the nightly): the clean old clone is in the quarantine, whole; the unpushed one and the previous night stay" || fail "prune real: wt=$(ls "$TMP/wt/2001-01-01" 2>&1 | tr '\n' ' ') q=$(ls "$QD" 2>&1 | tr '\n' ' ') $(gj -c .prune)"
+[[ "$(cl)" == *"; old clones: moved 1 to quarantine, kept 1 (first: 2001-01-01/stays: 1 commit(s) its remote-tracking branches do not hold), expired 0"* ]] && pass "prune (real tool): the line names what moved, the kept clone and why" || fail "prune real line: '$(cl)'"
 [ ! -s "$TMP/launch-attempts.txt" ] && pass "no test attempted a real scope/tmux launch" || fail "a test reached the launch: $(head -3 "$TMP/launch-attempts.txt")"
 echo "─────────────────────────────────────────────────────────────────"
 echo "SUMMARY: $PASS passed, $FAIL failed, $((PASS+FAIL)) total"
