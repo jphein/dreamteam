@@ -186,6 +186,11 @@ resv=$(python3 "$LIB" probe-script gpu1 | DREAMTEAM_RESERVATIONS="$rd/10-1" PATH
 check "$resv" "RESV,ERR" "sampler: a regular file where the reservations directory should be is RESV,ERR (r4 item 5)"
 order=$(python3 "$LIB" probe-script gpu1 | HOME="$h" DREAMTEAM_RESERVATIONS= PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep -o '^RESV\|^LANE' | tr '\n' ' ')
 check "$order" "RESV LANE " "sampler: reservations are sampled before the live RSS (r4 item 2)"
+# r5 item 1: a reservations directory behind an unreadable parent is EACCES, not ENOENT: RESV,ERR, never a zero
+mkdir -p "$h/noaccess/resv"; chmod 000 "$h/noaccess"
+resv=$(python3 "$LIB" probe-script gpu1 | DREAMTEAM_RESERVATIONS="$h/noaccess/resv" PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^RESV,')
+chmod 700 "$h/noaccess"
+check "$resv" "RESV,ERR" "sampler: a reservations directory behind an unreadable parent (EACCES) is RESV,ERR, not RESV,OK,0 (r5 item 1)"
 printf '300 %s s-a morpheus %s\n' "$((nowe - 5))" "$((nowe - 10))" > "$rd/16-7"       # started, past its expiry: still counted
 resv=$(python3 "$LIB" probe-script gpu1 | HOME="$h" DREAMTEAM_RESERVATIONS= PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^RESV,')
 check "$resv" "RESV,OK,1300" "sampler: a STARTED reservation past its expiry still counts (1000 + 300): released by SubagentStop, not by time (r4 item 2)"

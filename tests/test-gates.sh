@@ -86,7 +86,7 @@ GRC=0
 run_gate() {
   GRC=0
   rm -rf "$TMP/resv-default"          # each run starts without the previous admit's reservation in the seam dir
-  printf '%s' "$2" | bash "$1" 2>"$TMP/err" || GRC=$?
+  printf '%s' "$2" | bash "$1" >"$TMP/gate.out" 2>"$TMP/err" || GRC=$?
 }
 
 echo "── mem-gate.sh (memory safety gate) ─────────────────────────────"
@@ -189,15 +189,15 @@ fi
 RS="$ROOT/scripts/reservation.sh"; rm -rf "$RESV"
 tok=$(DREAMTEAM_RESERVATIONS="$RESV" bash "$RS" add 400 90 s-a morpheus)
 r=$(DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HLOCK" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$RS" start s-b morpheus >/dev/null 2>&1; echo $?)
-[ "$r" -eq 3 ] && grep -q " 0$" "$tok" && pass "start: another session's token is not taken (exit 3, unstarted)" || fail "start other session: rc=$r $(cat "$tok")"
+[ "$r" -eq 3 ] && [ "$(awk '{print $5}' "$tok")" = 0 ] && pass "start: another session's token is not taken (exit 3, unstarted)" || fail "start other session: rc=$r $(cat "$tok")"
 r=$(DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HLOCK" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$RS" start s-a luna >/dev/null 2>&1; echo $?)
 [ "$r" -eq 3 ] && pass "start: another type's token is not taken (exit 3)" || fail "start other type: rc=$r"
 flock "$HLOCK" sleep 30 & HOLDER=$!; sleep 0.3
 r=$(DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HLOCK" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$RS" start s-a morpheus >/dev/null 2>&1; echo $?)
-[ "$r" -eq 4 ] && grep -q " 0$" "$tok" && pass "start under a held host lock: exit 4 after 1 s, nothing changed (item 2)" || fail "start with lock held: rc=$r $(cat "$tok")"
+[ "$r" -eq 4 ] && [ "$(awk '{print $5}' "$tok")" = 0 ] && pass "start under a held host lock: exit 4 after 1 s, nothing changed (item 2)" || fail "start with lock held: rc=$r $(cat "$tok")"
 pkill -P "$HOLDER" 2>/dev/null; kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null
 r=$(DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HLOCK" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$RS" start s-a morpheus >/dev/null 2>&1; echo $?)
-[ "$r" -eq 0 ] && ! grep -q " 0$" "$tok" && pass "start: the lane's own token is marked started (lock free)" || fail "start own: rc=$r $(cat "$tok")"
+[ "$r" -eq 0 ] && [ "$(awk '{print $5}' "$tok")" != 0 ] && pass "start: the lane's own token is marked started (lock free)" || fail "start own: rc=$r $(cat "$tok")"
 [ "$(DREAMTEAM_RESERVATIONS="$RESV" bash "$RS" live)" -eq 400 ] && pass "a started reservation still counts until it expires (no deletion: no undercount window)" || fail "live after start: $(DREAMTEAM_RESERVATIONS="$RESV" bash "$RS" live)"
 r=$(DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HLOCK" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$RS" start s-a morpheus >/dev/null 2>&1; echo $?)
 [ "$r" -eq 3 ] && pass "start twice: the started token is not taken again (exit 3)" || fail "start twice: rc=$r"
@@ -255,9 +255,50 @@ pkill -P "$HOLDER" 2>/dev/null; kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/de
 #     still match and a scan never meets a self-inflicted malformed record. Mutant: san returns its input (red here).
 rm -rf "$RESV"; f=$(R4 add 300 90 "s a/b" "my type!" 2>/dev/null)
 out=$(R4 outstanding 2>&1); r=$?
-[ "$r" -eq 0 ] && [ "$out" = "300 1" ] && grep -q "s_a_b my_type_ 0$" "$f" && pass "a token with spaces and punctuation is sanitised at add: the record parses (300 1)" || fail "sanitised add: rc=$r out=[$out] rec=[$(cat "$f" 2>/dev/null)]"
+[ "$r" -eq 0 ] && [ "$out" = "300 1" ] && grep -q "s_a_b my_type_ 0 " "$f" && pass "a token with spaces and punctuation is sanitised at add: the record parses (300 1)" || fail "sanitised add: rc=$r out=[$out] rec=[$(cat "$f" 2>/dev/null)]"
 r=$(R4 start "s a/b" "my type!" >/dev/null 2>&1; echo $?); [ "$r" -eq 0 ] && pass "start with the same raw token matches the sanitised record" || fail "sanitised start: rc=$r"
 r=$(R4 stop "s a/b" "my type!" >/dev/null 2>&1; echo $?); [ "$r" -eq 0 ] && [ "$(R4 live)" = 0 ] && pass "stop with the same raw token releases it" || fail "sanitised stop: rc=$r live=$(R4 live)"
+
+# 2g) xreview #256 r5 (Sen 2026-11-21 13:53), one red case per item:
+#   3  a per-spawn id: the gate mints it, writes it into the reservation (field 6) and prefixes the Agent prompt
+#      with "[dreamteam reservation <id>]" through PreToolUse updatedInput (the hooks reference, read 2026-11-21:
+#      SubagentStart sees only session_id, agent_id, agent_type; no env, no prompt; SubagentStop sees agent_id and
+#      agent_transcript_path). start binds the class match to agent_id (field 7); stop releases by the id read from
+#      the subagent transcript (exact), else by agent_id, else by class.
+#   4  start reads tombstones BEFORE any scan; a scan prunes only tombstones already logged (.expired.logged, after
+#      the abandoned line is appended); start deletes a tombstone only after its late-start line appended.
+#   1  a reservations directory that cannot be reached (EACCES on a parent, not ENOENT) is an error, never "0 0".
+rm -rf "$RESV"
+FAKE_AVAIL=60000 FAKE_SWAP_USED=0 FAKE_PGREP_COUNT=1 DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HL" \
+  run_gate "$MEM_GATE" '{"session_id":"s-a","tool_name":"Agent","tool_input":{"prompt":"do the thing","subagent_type":"morpheus"}}'
+rid=$(awk '{print $6}' "$RESV"/* 2>/dev/null | head -1)
+gout=$(cat "$TMP/gate.out" 2>/dev/null)
+if [ "$GRC" -eq 0 ] && [ -n "$rid" ] && [ "$rid" != 0 ] && printf '%s' "$gout" | jq -e --arg id "$rid" '.hookSpecificOutput.updatedInput.prompt | startswith("[dreamteam reservation " + $id + "]")' >/dev/null 2>&1; then
+  pass "r5 item 3: the gate mints a per-spawn id, writes it into the reservation and prefixes the prompt with it (updatedInput)"
+else
+  fail "r5 item 3 mint: rc=$GRC id=[$rid] stdout=[$(printf '%s' "$gout" | head -c 200)]"
+fi
+rm -rf "$RESV"; a=$(R4 add 300 90 s-a morpheus --id id-A); b=$(R4 add 300 90 s-a morpheus --id id-B)
+R4 start s-a morpheus --agent ag-1 >/dev/null 2>&1; R4 start s-a morpheus --agent ag-2 >/dev/null 2>&1
+r=$(R4 stop s-a morpheus --id id-B >/dev/null 2>&1; echo $?)
+[ "$r" -eq 0 ] && [ ! -e "$b" ] && [ -e "$a" ] && pass "r5 item 3: stop --id releases exactly that reservation, the other of the class stays" || fail "stop --id: rc=$r A=$([ -e "$a" ] && echo y || echo n) B=$([ -e "$b" ] && echo y || echo n)"
+r=$(R4 stop s-a morpheus --agent ag-1 >/dev/null 2>&1; echo $?)
+[ "$r" -eq 0 ] && [ ! -e "$a" ] && pass "r5 item 3: stop --agent releases the reservation start bound to that agent_id" || fail "stop --agent: rc=$r A=$([ -e "$a" ] && echo y || echo n)"
+rm -rf "$RESV"; a=$(R4 add 300 90 s-a morpheus --id id-C); mkdir -p "$TMP/tr"; printf '{"type":"user","message":{"content":"[dreamteam reservation id-C]\\ndo the thing"}}\n' > "$TMP/tr/agent-x.jsonl"
+printf '{"hook_event_name":"SubagentStop","session_id":"s-a","agent_id":"ag-9","agent_type":"morpheus","agent_transcript_path":"%s"}' "$TMP/tr/agent-x.jsonl" | R4 stop-hook >/dev/null 2>&1
+[ ! -e "$a" ] && pass "r5 item 3: stop-hook reads the id from the subagent transcript and releases exactly that reservation" || fail "stop-hook by transcript id: file still there: $(cat "$a" 2>/dev/null)"
+rm -rf "$RESV"; R4 add 300 90 s-a morpheus >/dev/null; f=$(ls "$RESV"/* | head -1); sed -i "s/^300 [0-9]*/300 $(( $(date +%s) - 1 ))/" "$f"
+R4 live >/dev/null; R4 live >/dev/null; R4 outstanding >/dev/null
+[ -e "$f.expired" ] && pass "r5 item 4: repeated scans keep an unlogged tombstone (pruning is for logged ones only)" || fail "tombstone pruned by a scan: $(ls "$RESV" | tr '\n' ' ')"
+rm -f "$RESV/../late-starts.log"; mkdir -p "$RESV/../late-starts.log"      # the append cannot succeed
+r=$(R4 start s-a morpheus >/dev/null 2>&1; echo $?)
+[ "$r" -ne 0 ] && [ "$r" -ne 5 ] && [ -e "$f.expired" ] && pass "r5 item 4: a late start whose log append fails keeps the tombstone (exit $r, not 5)" || fail "append failure: rc=$r tomb=$([ -e "$f.expired" ] && echo y || echo n)"
+rm -rf "$RESV/../late-starts.log"
+r=$(R4 start s-a morpheus >/dev/null 2>&1; echo $?)
+[ "$r" -eq 5 ] && [ ! -e "$f.expired" ] && grep -q "s-a morpheus" "$RESV/../late-starts.log" && pass "r5 item 4: with the append possible the late start is logged, then the tombstone deleted (exit 5)" || fail "late start after repair: rc=$r"
+mkdir -p "$TMP/noaccess/resv"; printf '300 %s s-a morpheus 0 x 0\n' "$(( $(date +%s) + 60 ))" > "$TMP/noaccess/resv/1-1-1"; chmod 000 "$TMP/noaccess"
+out=$(DREAMTEAM_RESERVATIONS="$TMP/noaccess/resv" DREAMTEAM_HOST_LOCK="$HL" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$RS" outstanding 2>&1); r=$?; chmod 700 "$TMP/noaccess"
+[ "$r" -ne 0 ] && pass "r5 item 1: a reservations directory behind an unreadable parent (EACCES, not ENOENT) is an error (exit $r), never 0 0" || fail "EACCES parent: rc=$r out=[$out]"
 
 # 3) Non-Agent tools pass through untouched (gate only guards Agent|Task).
 FAKE_AVAIL=2000 \
