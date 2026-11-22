@@ -3,24 +3,30 @@
 wide-kill-guard.sh hands the raw command on stdin. Exit 0 = yes (the guard blocks), 1 = no. Any other exit is
 an error and the guard allows: it is a speed bump against the natural one-liner, not a boundary.
 
-Three forms (Flow row 62d79dae; each is a command an agent wrote on serialhub or a reviewer's natural variant).
-A program counts under a path too (`/usr/bin/pkill`).
-  (A) pkill / killall whose OWN arguments name a test runner. The call's arguments end at the first shell
-      operator OUTSIDE quotes and outside its own `$( )` (`|`, `;`, `&`, newline, `)`, a backtick), so
-      `pkill -f server.py || make test` names no runner while `pkill -f "map_server|make test"` does.
-      A pkill call is let through when it narrows its SELECTION: -P/--parent, -g/--pgroup, -s/--session,
-      -t/--terminal, -F/--pidfile, --cgroup, each with an operand, read from the call's UNQUOTED words only
-      (the `-s` in `pkill -f "python -m pytest -s tests/x.py"` belongs to the pattern). killall has no such
-      flag: its -s names a SIGNAL and its -g signals the matches' whole groups, so killall is never let through.
-  (B) ps / pgrep / pidof with a runner's name in the same statement, whose result FEEDS a kill:
-        - a kill later in that same statement (`pgrep -f pytest | xargs kill`);
-        - a variable bound to the listing (`for p in $(…)`, `PID=$(…)`, `… | while read p`) and a later kill
-          that names that variable (`for p in $(ps … | grep "make test" …); do kill $p; done`).
-      A listing followed by a kill of something else (`ps | grep pytest; kill "$PID"`, the pid captured at
-      launch) is not this form.
-  (C) kill whose own operands hold a command substitution with such a listing (`kill $(pgrep -f pytest)`).
+HOW THE TEXT IS READ. Comments are dropped. Quotes are tracked. The text is cut into PIPELINES at an unquoted
+`;`, newline, `&&`, `||` or `&`: inside one pipeline data flows from left to right, between two it does not. A program is recognised only in COMMAND POSITION
+(first word, or after `|`, `(`, `{`, a backtick, an assignment, or a wrapper such as sudo, command, exec, env,
+nohup, time, xargs, do, then, else), with or without a path (`/usr/bin/pkill`). `ls -l /usr/bin/pkill` names a
+file, not a command.
+
+THREE FORMS (Flow row 62d79dae; each is a command an agent wrote on serialhub or a reviewer's natural variant):
+  (A) pkill / killall whose OWN arguments name a test runner. The arguments end at the first shell operator
+      outside quotes and outside the call's own `$( )`: `pkill -f server.py || make test` names no runner,
+      `pkill -f "map_server|make test"` does. A pkill call is let through when it narrows its SELECTION:
+      -P/--parent, -g/--pgroup, -s/--session, -t/--terminal, -F/--pidfile, --cgroup, each with an operand
+      (quoted, attached or separate), read from the call's own words: the `-s` in
+      `pkill -f "python -m pytest -s tests/x.py"` belongs to the quoted pattern. killall has no such flag (its
+      -s names a SIGNAL, its -g signals whole groups), so killall is never let through.
+  (B) ps / pgrep / pidof with a runner's name after it in the same pipeline, whose result FEEDS a kill:
+        - a kill later in that same pipeline (`pgrep -f pytest | xargs kill`);
+        - a variable bound to the listing (`for p in $(…)`, `P=$(…)`, `… | while read p`) that a later kill
+          names (`for p in $(ps … | grep "make test" …); do kill $p; done`).
+      A listing to look, then a kill of something else (`ps | grep pytest; kill "$PID"`, also with `&&`) is
+      not this form.
+  (C) kill whose own operands hold a command substitution whose BODY is such a listing
+      (`kill $(pgrep -f pytest)`).
 In (B) and (C) a `kill -0`, `kill -s 0` or `kill -l` is not a kill: it sends nothing (a liveness probe).
-A statement ends at an unquoted `;` or newline. `[p]ytest`, the self-match trick, is read as `pytest`.
+`[p]ytest`, the self-match trick, is read as `pytest`.
 
 A heredoc body that only ever lands as data (a commit message, an issue body) is removed first by
 nopoll_text.data_text, the no-poll guard's reader (#191); anything that reader does not model is judged whole.
@@ -33,17 +39,20 @@ import sys
 RUNNERS = (r"pytest|py\.test|unittest|make +(?:test|check)|tests/run\.sh|cargo +test|go +test"
            r"|npm +(?:run +)?test|jest|vitest")
 RUNNER = re.compile(RUNNERS)
-PROG = r"(?:^|(?<=[^\w.~/-]))(?:[\w.~-]*/)*"       # where a program word starts, with an optional path before it
-KILLER = re.compile(PROG + r"(pkill|killall)(?=\s)")
-LISTING = PROG + r"(?:ps|pgrep|pidof)\s"
-LISTED = re.compile(LISTING + r".*?(?:" + RUNNERS + r")", re.S)
-SUBST_LISTED = re.compile(r"(?:\$\(|`).*?" + LISTING + r".*?(?:" + RUNNERS + r")", re.S)
+PATH = r"(?:^|(?<=[^\w.~/-]))(?:[\w.~-]*/)*"       # where a program word starts, with an optional path before it
+KILLER = re.compile(PATH + r"(pkill|killall)(?=\s)")
+LISTER = re.compile(PATH + r"(?:ps|pgrep|pidof)(?=\s)")
 PROBE = r"(?!\s+(?:-0|-s\s*0|-l)(?:\s|$))"         # kill -0 / -s 0 / -l sends nothing: a liveness probe, not a kill
 KILL_WORD = re.compile(r"(?:^|(?<=[^\w-]))kill(?=\s|$)" + PROBE)
-NARROW = re.compile(r"(?:^|\s)(?:-P|-g|-s|-t|-F|--parent|--pgroup|--session|--terminal|--pidfile|--cgroup)(?:\s+\S|=\S)")
+# a narrowing flag WITH its operand. In the text this is matched on, every quoted or substituted character is
+# the letter Q, so `-P "$$"` reads `-P QQQQ` and a `-s` inside a quoted pattern is not there at all.
+NARROW = re.compile(r"(?:^|\s)(?:(?:-P|-g|-s|-t|-F)\s*[^\s-]"
+                    r"|(?:--parent|--pgroup|--session|--terminal|--pidfile|--cgroup)(?:\s+|=)[^\s-])")
 SELF_MATCH = re.compile(r"\[(\w)\]")
 BOUND_BEFORE = re.compile(r"(?:\bfor\s+(\w+)\s+in\s|(?:^|[\s;(])(\w+)=[\"']?(?:\$\(|`))")
 BOUND_AFTER = re.compile(r"\|\s*while\s+(?:IFS=\S*\s+)?read\s+(?:-\w+\s+)*(\w+)")
+WRAPPERS = {"sudo", "command", "exec", "env", "nohup", "time", "xargs", "builtin", "setsid", "nice", "ionice",
+            "do", "then", "else", "elif", "if", "while", "until", "!"}
 
 
 def spans(s):
@@ -75,24 +84,69 @@ def spans(s):
         i += 1
 
 
-def statements(s):
-    """The text cut at every unquoted `;` or newline."""
-    out, cur = [], []
+def strip_comments(s):
+    """The text without shell comments: an unquoted `#` at the start of a word, to the end of its line."""
+    out, skipping, prev = [], False, ""
     for c, quoted in spans(s):
-        if not quoted and c in ";\n":
-            out.append("".join(cur))
-            cur = []
+        if skipping:
+            if c != "\n":
+                continue
+            skipping = False
+        if not quoted and c == "#" and (prev == "" or prev in " \t\n;|&("):
+            skipping = True
+            continue
+        out.append(c)
+        prev = c
+    return "".join(out)
+
+
+def cut(s, pipelines=False):
+    """[(start, part)]: the text cut at every unquoted `;` or newline (statements); with pipelines=True also
+    at every unquoted `&&`, `||` and `&`, so each part is one pipeline."""
+    out, cur, start, i, prev = [], [], 0, 0, ("", True)
+    chars = list(spans(s))
+    n = len(chars)
+    while i < n:
+        c, quoted = chars[i]
+        width = 0
+        if not quoted:
+            if c in ";\n":
+                width = 1
+            elif pipelines and c in "&|" and i + 1 < n and chars[i + 1] == (c, False):
+                width = 2
+            elif pipelines and c == "&" and prev != (">", False) and not (i + 1 < n and chars[i + 1][0] == ">"):
+                width = 1                                  # a lone & (not >& or &>)
+        if width:
+            out.append((start, "".join(cur)))
+            cur, start = [], i + width
+            i += width
         else:
             cur.append(c)
-    out.append("".join(cur))
+            i += 1
+        prev = (c, quoted)
+    out.append((start, "".join(cur)))
     return out
 
 
+def command_position(s, i):
+    """Is the word starting at s[i] a command, not an argument?"""
+    j = i - 1
+    while j >= 0 and s[j] in " \t":
+        j -= 1
+    if j < 0 or s[j] in ";|&({\n`":
+        return True
+    k = j
+    while k >= 0 and not s[k].isspace():
+        k -= 1
+    word = s[k + 1:j + 1]
+    return word in WRAPPERS or re.fullmatch(r"\w+=\S*", word) is not None
+
+
 def own_args(s, start):
-    """(full, bare) text of the simple command starting at `start`: up to the first unquoted shell operator
-    that is not inside a `$( )` or backtick substitution the command itself opened. `bare` has every quoted or
-    substituted character replaced by a space, so only the command's own words remain."""
-    full, bare = [], []
+    """(full, masked) text of the simple command starting at `start`: up to the first unquoted shell operator
+    that is not inside a `$( )` or backtick substitution the command itself opened. In `masked` every quoted
+    or substituted character is the letter Q, so only the command's own words and flags remain readable."""
+    full, masked = [], []
     depth, tick, prev = 0, False, ""
     for c, quoted in spans(s[start:]):
         inside = depth > 0 or tick
@@ -108,35 +162,66 @@ def own_args(s, start):
             elif not inside and c in "|;&\n)":
                 break
         full.append(c)
-        bare.append(" " if (quoted or inside) else c)
+        masked.append("Q" if (quoted or inside) else c)
         prev = c
-    return "".join(full), "".join(bare)
+    return "".join(full), "".join(masked)
+
+
+def subst_bodies(s):
+    """The body of every `$( … )` and backtick substitution in s (outermost ones; quotes do not hide them)."""
+    out, i, n = [], 0, len(s)
+    while i < n:
+        if s.startswith("$(", i):
+            depth, j = 1, i + 2
+            while j < n and depth:
+                depth += (s[j] == "(") - (s[j] == ")")
+                j += 1
+            out.append(s[i + 2:j - 1] if depth == 0 else s[i + 2:])
+            i = j
+        elif s[i] == "`":
+            j = s.find("`", i + 1)
+            out.append(s[i + 1:j] if j >= 0 else s[i + 1:])
+            i = n if j < 0 else j + 1
+        else:
+            i += 1
+    return out
+
+
+def listed(part):
+    """Yield (listing start, end of the runner's name) for each ps/pgrep/pidof in command position in `part`
+    that has a runner's name after it."""
+    for m in LISTER.finditer(part):
+        if command_position(part, m.start()):
+            r = RUNNER.search(part, m.end())
+            if r:
+                yield m.start(), r.end()
 
 
 def wide(text):
-    text = SELF_MATCH.sub(r"\1", text)
+    text = strip_comments(SELF_MATCH.sub(r"\1", text))
     for m in KILLER.finditer(text):                       # (A)
-        full, bare = own_args(text, m.start())
-        if RUNNER.search(full) and not (m.group(1) == "pkill" and NARROW.search(bare)):
+        if not command_position(text, m.start()):
+            continue
+        full, masked = own_args(text, m.start())
+        if RUNNER.search(full) and not (m.group(1) == "pkill" and NARROW.search(masked)):
             return True
     for m in KILL_WORD.finditer(text):                    # (C)
-        if SUBST_LISTED.search(own_args(text, m.start())[0]):
-            return True
-    offset = 0
-    for st in statements(text):                           # (B)
-        m = LISTED.search(st)
-        if m:
-            if KILL_WORD.search(st, m.end()):
+        for body in subst_bodies(own_args(text, m.start())[0]):
+            for part_start, part in cut(body, pipelines=True):
+                if any(True for _ in listed(part)):
+                    return True
+    for p_start, part in cut(text, pipelines=True):       # (B)
+        for l_start, r_end in listed(part):
+            if KILL_WORD.search(part, r_end):              # the same pipeline carries the listing to a kill
                 return True
-            names = {a or b for a, b in BOUND_BEFORE.findall(st[:m.start()])}
-            names |= set(BOUND_AFTER.findall(st[m.end():]))
+            names = {a or b for a, b in BOUND_BEFORE.findall(part[:l_start])}
+            names |= set(BOUND_AFTER.findall(part[r_end:]))
             names.discard("")
-            rest = text[offset + len(st):]
-            for k in KILL_WORD.finditer(rest):
+            rest = text[p_start + len(part):]
+            for k in KILL_WORD.finditer(rest):             # a later kill that names a variable bound to it
                 operands = re.split(r"[;\n]", rest[k.end():], maxsplit=1)[0]
                 if any(re.search(r"\$\{?" + re.escape(n) + r"\b", operands) for n in names):
                     return True
-        offset += len(st) + 1
     return False
 
 

@@ -13,8 +13,9 @@ WHAT IT DOES
   - PATTERN is a Python regular expression searched in the process's command line (arguments joined by spaces).
   - DIR defaults to the git top level of the current directory, else the current directory.
   - A process is taken when it is ours (same uid), matches PATTERN, and its working directory is DIR or below;
-    also when it matches PATTERN and descends from a process taken that way (a test runner that chdir'ed into
-    a temp dir under its `make`).
+    also when it matches PATTERN and descends from a matching process standing in DIR (a test runner that
+    chdir'ed into a temp dir under its `make`). That family is read a second time, link by link (parent,
+    command line, directory, start time), before any signal is sent; a link that changed admits nothing.
   - Never taken: this process and its own ancestors (the calling shell's command line holds the pattern).
   - A matching process anywhere else is left alone and COUNTED, so the report shows what a host-wide kill
     would have hit.
@@ -84,6 +85,44 @@ def signal_one(pid, selected, sig, read=read_proc, opener=None, sender=None):
             pass
 
 
+def descendants(procs, candidates, direct):
+    """{pid: [parent, grandparent, … up to and including the first process in `direct`]} for each candidate
+    that descends from a process in `direct`, by the parent links of ONE scan (not yet confirmed)."""
+    out = {}
+    for pid in candidates:
+        chain, up = [], procs[pid][0]
+        while up in procs and up not in chain:
+            chain.append(up)
+            if up in direct:
+                out[pid] = chain
+                break
+            up = procs[up][0]
+    return out
+
+
+def family_intact(pid, chain, procs, read=read_proc):
+    """Read the candidate and every ancestor in its chain again: each must be the very process the scan saw
+    (same parent, command line, directory and start time). A pid in the chain that was reused in between
+    belongs to a process with another start time, so a recycled ancestor never admits anything."""
+    for p in [pid] + list(chain):
+        now = read(p)
+        if now is None or now != procs[p]:
+            return False
+    return True
+
+
+def select(procs, rx, root, spared, read=read_proc):
+    """(taken, elsewhere): which of the scanned processes get the signal, and which match but are not ours.
+    Taken = matching and standing under `root`, plus matching descendants of those whose family, read again
+    link by link BEFORE any signal is sent (a signal changes the family, and the scan is not atomic), is
+    still the one the scan saw. A chain that cannot be confirmed leaves the process alone."""
+    matching = {pid for pid, info in procs.items() if pid not in spared and rx.search(info[1])}
+    direct = {pid for pid in matching if under(procs[pid][2], root)}
+    chains = descendants(procs, matching - direct, direct)
+    taken = direct | {pid for pid, chain in chains.items() if family_intact(pid, chain, procs, read)}
+    return taken, matching - taken
+
+
 def under(path, root):
     return path == root or path.startswith(root.rstrip("/") + "/")
 
@@ -143,17 +182,7 @@ def main(argv):
         spared.add(p)
         p = procs[p][0] if p in procs else 0
 
-    matching = {pid for pid, info in procs.items() if pid not in spared and rx.search(info[1])}
-    taken = {pid for pid in matching if under(procs[pid][2], root)}
-    for pid in sorted(matching - taken):   # a matching descendant of a taken process, wherever it stands now
-        up, seen = procs[pid][0], set()
-        while up in procs and up not in seen:
-            if up in taken:
-                taken.add(pid)
-                break
-            seen.add(up)
-            up = procs[up][0]
-    elsewhere = matching - taken
+    taken, elsewhere = select(procs, rx, root, spared)
 
     done = 0
     for pid in sorted(taken):

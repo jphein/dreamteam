@@ -104,6 +104,13 @@ deny "the restart loop with ps under a path" 'for p in $(/bin/ps -eo pid,args | 
 deny "pidof under a path fed to kill" '/usr/bin/pidof pytest | xargs kill'
 deny "a listing piped to while read, the variable then killed" 'pgrep -f pytest | while read -r p; do kill "$p"; done'
 deny "a variable bound to the listing, killed two statements later" 'P=$(pgrep -f "make test" | head -1); sleep 1; echo x; kill -TERM ${P}'
+# xreview #279 r3
+deny "pkill behind sudo" 'sudo pkill -f pytest'
+deny "pkill behind an assignment" 'LC_ALL=C pkill -f pytest'
+deny "pkill after then" 'if true; then pkill -f pytest; fi'
+deny "a variable bound to the listing, killed after &&" 'P=$(pgrep -f pytest) && kill $P'
+deny "a trailing comment does not hide the kill" 'pkill -f pytest # stop the suite'
+deny "a # inside the quoted pattern is not a comment" 'pkill -f "x # y pytest"'
 deny "pidof fed to kill" 'pidof pytest | xargs kill'
 deny "a ; inside the quoted awk program does not end the listing's statement" \
   'ps -eo pid,args | awk '"'"'{n++; if ($0 ~ /pytest/) print $1}'"'"' | xargs kill'
@@ -133,6 +140,15 @@ allow "files named after a killer and a runner, side by side" 'cat notes/pkill.m
 allow "a listing && kill-mine in ONE statement (kill-mine is not kill)" "pgrep -af pytest && $KM 'python.* -m pytest'"
 allow "a killer's path as an argument, a runner after ;" 'ls -l /usr/bin/pkill; pytest -q'
 allow "pkill narrowed to a pid file" 'pkill -F run.pid -f pytest'
+# xreview #279 r3
+allow "a QUOTED narrowing operand after the pattern" 'pkill -f pytest -P "$$"'
+allow "an attached narrowing operand" 'pkill -P$$ -f pytest'
+allow "a listing && a kill of the captured pid: sequencing is not a feed" 'ps -eo pid,args | grep pytest && kill "$PID"'
+allow "a listing || a kill of the captured pid" 'pgrep -f pytest > /dev/null || kill "$PID"'
+allow "killer and runner both as FILE arguments" 'ls -l /usr/bin/pkill /usr/bin/pytest'
+allow "a runner named only in a trailing comment (pkill)" 'pkill -f server.py # restart before pytest'
+allow "a runner named only in a trailing comment (kill of a listing)" 'kill $(pgrep -f server.py) # restart before pytest'
+allow "a runner after the substitution's closing ), not in its body" 'kill $(pgrep -f server.py) && make test'
 allow "kill -0 of a listed runner is a liveness probe, it sends nothing (replay 11-17)" \
   'kill -0 $(pgrep -f "vitest run __tests__/scripts" | head -1) 2>/dev/null && echo running'
 allow "a listing, then kill -0" 'pgrep -f pytest | xargs kill -0'
@@ -142,7 +158,12 @@ allow "pkill narrowed to a session (--session)" 'pkill --session 4242 -f pytest'
 allow "kill-mine, the replacement" "$KM 'make test|python.* -m pytest'"
 allow "kill-mine after a listing" "ps -eo pid,args | grep pytest; $KM --under /x 'python.* -m pytest'"
 allow "the stated override" 'WIDE_KILL_OK=1 pkill -f pytest'
-allow "a commit message that quotes the idiom (heredoc data)" $'git commit -F - <<\'EOF\'\nfix: lanes ran pkill -f pytest host-wide\nEOF'
+allow "a commit message that quotes the idiom mid-sentence" $'git commit -F - <<\'EOF\'\nfix: lanes ran pkill -f pytest host-wide\nEOF'
+allow "a commit message with the idiom on a line of its own (heredoc data, removed by the #191 reader)" \
+  $'git commit -F - <<\'EOF\'\nfix: block the restart idiom\n\npkill -f pytest\nEOF'
+allow "docker ps … | xargs docker kill: ps and kill are docker's arguments here" 'docker ps -q --filter name=pytest | xargs docker kill'
+allow "a script whose NAME starts with a killer's" './pkill.sh pytest'
+allow "kill-mine named after a listing inside one pipeline" 'echo "$(pgrep -fc pytest) suites running; stop yours with scripts/kill-mine.py"'
 allow "an ordinary command" 'ls -la && git status'
 allow "the word skill" 'cat skills/dreamteam/SKILL.md | grep pytest'
 
@@ -263,6 +284,36 @@ if km.signal_one(4242, sel, km.signal.SIGTERM, read=lambda pid: sel, opener=no_s
 me = km.read_proc(km.os.getpid()); raw = open("/proc/self/stat").read(); f22 = int(raw[raw.rindex(")") + 2:].split()[19])
 if me is None or me[3] != f22 or me[0] != km.os.getppid():
     bad.append(f"read_proc: {me} vs start {f22} ppid {km.os.getppid()}")
+# the family of a descendant standing elsewhere (xreview #279 r3): pid 20 stands in the directory, 30 is its
+# child elsewhere, 40 a grandchild elsewhere through a non-matching 35; 50 is elsewhere with no such ancestor.
+procs = {20: (1, "make test", "/wt/mine", 100), 30: (20, "pytest", "/tmp/x", 110), 35: (20, "sh -c", "/tmp/x", 111),
+         40: (35, "pytest", "/tmp/y", 112), 50: (1, "pytest", "/wt/other", 113), 60: (50, "pytest", "/tmp/z", 114)}
+ch = km.descendants(procs, {30, 40, 50, 60}, {20})
+if ch != {30: [20], 40: [35, 20]}:
+    bad.append(f"descendants: {ch}")
+def reader(changed):
+    return lambda pid: changed.get(pid, procs.get(pid))
+if not km.family_intact(40, ch[40], procs, read=reader({})):
+    bad.append("an unchanged family is refused")
+for what, changed in {"the in-directory ancestor's pid was recycled (later start, another directory)": {20: (1, "make test", "/wt/other", 999)},
+                      "a middle link was recycled": {35: (7, "sh -c", "/tmp/x", 998)},
+                      "the candidate was reparented": {40: (1, "pytest", "/tmp/y", 112)},
+                      "an ancestor is gone": {20: None}}.items():
+    if km.family_intact(40, ch[40], procs, read=reader(changed)):
+        bad.append(f"family admitted although {what}")
+# select() is what main() runs: with every family intact it takes 20, 30 and 40 and leaves 50 and 60; with the
+# in-directory ancestor recycled between the scan and the second read, its descendants standing elsewhere are
+# NOT taken (they are counted elsewhere), and a spared pid is never taken.
+rx = km.re.compile("pytest|make test")
+t, e = km.select(procs, rx, "/wt/mine", set(), read=reader({}))
+if (t, e) != ({20, 30, 40}, {50, 60}):
+    bad.append(f"select, intact: {t} {e}")
+t, e = km.select(procs, rx, "/wt/mine", set(), read=reader({35: (7, "sh -c", "/tmp/x", 998)}))
+if (t, e) != ({20, 30}, {40, 50, 60}):
+    bad.append(f"select, a recycled middle link: {t} {e}")
+t, e = km.select(procs, rx, "/wt/mine", {30}, read=reader({}))
+if 30 in t or 30 in e:
+    bad.append(f"select took or counted a spared pid: {t} {e}")
 print("; ".join(bad) if bad else "ok")
 PY
 )"
