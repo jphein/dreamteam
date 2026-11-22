@@ -145,7 +145,8 @@ GHOST=""
 if TAIL="$(printf '%s\n' "$RAW" | python3 -I "$ROOT/scripts/lib/pane_plain.py" 2>/dev/null)"; then
   GHOST="$(printf '%s\n' "$RAW" | python3 -I "$ROOT/scripts/lib/pane_plain.py" --ghost 2>/dev/null || true)"
 else
-  TAIL="$(printf '%s\n' "$RAW" | sed 's/\x1b\[[0-9;:?]*[ -\/]*[@-~]//g')"     # no python3: codes stripped, nothing hidden
+  # no python3 or no helper: codes stripped, nothing hidden. LC_ALL=C: in a UTF-8 locale these ranges match nothing.
+  TAIL="$(printf '%s\n' "$RAW" | LC_ALL=C sed 's/\x1b\[[0-9;:?]*[ -\/]*[@-~]//g')"
 fi
 TAIL="$(printf '%s\n' "$TAIL" | sed -e :a -e '/^[[:space:]]*$/{$d;N;ba}')"
 DISP_ADDR="$(basename "$SOCK")@${ADDR}"

@@ -182,6 +182,11 @@ echo "$J" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if (
 J="$(run --json luna-x)"
 echo "$J" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d["ghost"] is None else 1)' && ok "json: .ghost is null when there is no suggestion" || bad "json ghost not null: $J"
 
+# without the helper nothing is HIDDEN and no escape code is shown (a root that lacks lib/pane_plain.py)
+NOH="$TMP/nohelper"; mkdir -p "$NOH"; cp -r "$ROOT/scripts" "$NOH/scripts"; rm -f "$NOH/scripts/lib/pane_plain.py"
+out="$(DREAMTEAM_TMUX_DIR="$TMP/tmux" DREAMTEAM_PROC="$TMP/proc" DREAMTEAM_ROSTER="$TMP/bin/roster-stub.sh" CLAUDE_PLUGIN_ROOT="$NOH" PATH="$TMP/bin:$PATH" bash "$NOH/scripts/pane-peek.sh" nest-x 2>/dev/null)"
+echo "$out" | grep -q 'go on when the mutants are in' && ! printf '%s' "$out" | grep -q $'\033' && ok "no helper: the text is shown with codes stripped (more, never less)" || bad "no-helper fallback: $(printf '%s' "$out" | od -c | head -n 3)"
+
 echo "───────────────────────────────"
 echo "pane-peek: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]
