@@ -51,6 +51,7 @@ sock=""; subcmd=""; target=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -S) sock="$2"; shift 2;;
+    -e) [ -n "$subcmd" ] && printf '%s\n' "-e" >> "${PEEK_TEST_FLAGS:-/dev/null}"; shift;;
     list-panes|capture-pane) subcmd="$1"; shift;;
     -t) target="$2"; shift 2;;
     *) shift;;
@@ -68,7 +69,7 @@ elif [ "$subcmd" = capture-pane ]; then
     dream:2.2) echo "ECHO_TAIL running tests";;
     dream:2.3) echo "──────── @lead-x ────────";;   # box-dash footer → fallback matches
     dream:2.4) echo "roster: @guard-x is idle";;      # @name but NO box-dash → guard rejects
-    dream:2.5) echo "NEST_TAIL migrating schema";;
+    dream:2.5) printf 'NEST_TAIL migrating schema\n──── @nest-x ──\n❯ \033[2mSen 17:00: go on when the mutants are in\033[0m\n────\n';;
     work:1.1)  echo "MORPH_TAIL refactoring";;
   esac
 fi
@@ -165,6 +166,26 @@ echo "$J" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d
 J="$(run --json ghost-x)"
 echo "$J" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d["found"] is False and d["reason"] and d["lines"]==[] and d["pane"] is None) else 1)' \
   && ok "json negative: found=false, reason set, lines=[], pane=null" || bad "json negative: $J"
+
+# ── a FAINT line in the input box is a suggestion nobody typed (2026-11-21) ────────────────────────────
+: > "$TMP/flags"
+out="$(PEEK_TEST_FLAGS="$TMP/flags" run nest-x)"
+grep -qx -- '-e' "$TMP/flags" && ok "the pane is captured WITH escape codes (-e)" || bad "pane-peek captured without -e"
+echo "$out" | grep -qx '❯' && ok "the input box is shown empty, as it is" || bad "input box line: $(echo "$out" | grep '❯')"
+echo "$out" | grep -v 'FAINT suggestion' | grep -q 'go on when the mutants' && bad "the faint suggestion is shown as if it were in the box" || ok "the suggestion is not shown as typed text"
+echo "$out" | grep -q 'FAINT suggestion, typed by nobody: Sen 17:00: go on when the mutants are in' && ok "the suggestion is reported apart, named as typed by nobody" || bad "no ghost line: $out"
+echo "$out" | grep -q 'NEST_TAIL migrating schema' && ok "the rest of the pane is unchanged" || bad "tail lost"
+printf '%s' "$out" | grep -q $'\033' && bad "escape codes leaked into the output" || ok "no escape codes in the output"
+J="$(run --json nest-x)"
+echo "$J" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d["ghost"]=="Sen 17:00: go on when the mutants are in" and "❯" in d["lines"] and not any("mutants" in l for l in d["lines"])) else 1)' \
+  && ok "json: .ghost carries the suggestion, .lines has the empty input box" || bad "json ghost: $J"
+J="$(run --json luna-x)"
+echo "$J" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d["ghost"] is None else 1)' && ok "json: .ghost is null when there is no suggestion" || bad "json ghost not null: $J"
+
+# without the helper nothing is HIDDEN and no escape code is shown (a root that lacks lib/pane_plain.py)
+NOH="$TMP/nohelper"; mkdir -p "$NOH"; cp -r "$ROOT/scripts" "$NOH/scripts"; rm -f "$NOH/scripts/lib/pane_plain.py"
+out="$(DREAMTEAM_TMUX_DIR="$TMP/tmux" DREAMTEAM_PROC="$TMP/proc" DREAMTEAM_ROSTER="$TMP/bin/roster-stub.sh" CLAUDE_PLUGIN_ROOT="$NOH" PATH="$TMP/bin:$PATH" bash "$NOH/scripts/pane-peek.sh" nest-x 2>/dev/null)"
+echo "$out" | grep -q 'go on when the mutants are in' && ! printf '%s' "$out" | grep -q $'\033' && ok "no helper: the text is shown with codes stripped (more, never less)" || bad "no-helper fallback: $(printf '%s' "$out" | od -c | head -n 3)"
 
 echo "───────────────────────────────"
 echo "pane-peek: $PASS passed, $FAIL failed"
