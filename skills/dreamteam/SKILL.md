@@ -576,6 +576,13 @@ CI AND MERGE — you push, the lead gates. Four rules, all measured 2026-09-11:
   it and every gh call in the fleet failed, including the lead's cascade. A
   watch also survives a force-push and then never terminates. (no-poll-guard.sh
   blocks this, but the rule is yours to keep — the guard is the backstop.)
+- ⛔ NEVER stop a test run by NAME (`pkill -f pytest`, `ps | grep 'make test' | … kill`).
+  A command line carries no owner: it reads the same in every lane's worktree, so
+  you end every lane's suite on the host (serialhub 11-18 and 11-20: twelve runs,
+  the victims saw only "Terminated"; setsid/nohup does not protect a run). Capture
+  the pid at launch (`make test > log 2>&1 & echo $! > run.pid`) and `kill` that, or
+  `"$CLAUDE_PLUGIN_ROOT"/scripts/kill-mine.py 'make test|python.* -m pytest'`, which
+  takes only processes inside your worktree. (wide-kill-guard.sh is the backstop.)
 - `gh api rate_limit` CANNOT warn you. It read 5000 remaining throughout that
   outage; it does not see GraphQL secondary limits.
 - REST, not GraphQL, for every read: `gh api repos/O/R/...`. `gh issue view`

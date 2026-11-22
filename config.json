@@ -37,6 +37,10 @@
     "enforce": true,
     "_notes": "no-poll-guard.sh (PreToolUse Bash|Monitor in TEAMMATE sessions) blocks a LOOPING GraphQL-heavy GitHub CI read (`gh pr checks`, `gh pr view --json statusCheckRollup`). Measured 2026-09-11: three lanes' 30s pollers exhausted the per-ACCOUNT quota and every gh call in the fleet failed, including the lead's merge cascade — and `gh api rate_limit` read 5000 remaining throughout, because it cannot see GraphQL SECONDARY limits. One-shot reads and the REST route (gh api .../check-runs, what pr-gate.sh uses) stay allowed; the orchestrator is never blocked. Escape: enforce=false, or push and let the lead run scripts/pr-gate.sh once."
   },
+  "widekill": {
+    "enforce": true,
+    "_notes": "wide-kill-guard.sh (PreToolUse Bash, EVERY session, the lead too) blocks a host-wide pattern kill of a test runner: pkill/killall naming one (pytest, make test, tests/run.sh, cargo test, go test, npm test, jest, vitest, unittest) without a parent/group/session/terminal/cgroup narrowing, or ps/pgrep of one fed to kill. Measured on serialhub 2026-11-18 and 11-20 (Flow row 62d79dae): a lane's restart loop, ps | grep 'make test|python.* -m pytest' | kill, ended other lanes' 7-minute suites twelve times; a command line carries no owner, and setsid/nohup does not protect a run. The replacement is scripts/kill-mine.py PATTERN (only processes whose working directory is this worktree). Escapes: lead the command with WIDE_KILL_OK=1, or enforce=false. A missing config enforces."
+  },
   "flow": {
     "enforce": true,
     "leads": [

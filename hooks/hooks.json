@@ -44,6 +44,11 @@
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/gpu-guard.sh\"",
             "timeout": 4
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/wide-kill-guard.sh\"",
+            "timeout": 4
           }
         ]
       },
