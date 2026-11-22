@@ -12,9 +12,10 @@
 # row's first suspects (the Bash tool timeout, a reaper timer) were both innocent.
 #
 # WHAT IT BLOCKS (the judgement is scripts/lib/widekill_text.py, tested in tests/test-wide-kill.sh):
-#   (A) `pkill` / `killall` whose own arguments name a test runner, unless that call narrows itself by
-#       parent, process group, session, terminal or cgroup (-P -g -s -t --cgroup and their long forms);
-#   (B) `ps`, `pgrep` or `pidof` with a runner's name in the same statement, and `kill` after it;
+#   (A) `pkill` / `killall` whose own arguments name a test runner, unless a pkill call narrows its selection
+#       by parent, process group, session, terminal, pid file or cgroup (killall has no such flag);
+#   (B) `ps`, `pgrep` or `pidof` with a runner's name, whose result feeds a kill: later in the same
+#       statement (`| xargs kill`), or through a variable bound to it (`for p in $(…); do kill $p`);
 #   (C) `kill $( … such a listing … )`.
 # NOT BLOCKED: `kill "$PID"` of a pid captured at launch; a pattern kill of anything else (a server, a
 # browser); `ps | grep pytest` with no kill; scripts/kill-mine.py, which is the replacement:
@@ -41,7 +42,7 @@ TOOL=""; CMD=""
 [ -n "$CMD" ] || exit 0
 case "$CMD" in WIDE_KILL_OK=1\ *) exit 0 ;; esac
 # no killer and no listing in the text: nothing for the judge to find, so python is never started
-printf '%s' "$CMD" | grep -Eq '(pkill|killall|pgrep|pidof|(^|[^[:alnum:]_./-])ps[[:space:]])' || exit 0
+printf '%s' "$CMD" | grep -Eq '(pkill|killall|pgrep|pidof|(^|[^[:alnum:]_.-])ps[[:space:]])' || exit 0
 
 ENFORCE=$(jq -r 'if .widekill.enforce == false then "false" else "true" end' "$CFG" 2>/dev/null || echo true)
 [ "$ENFORCE" = "false" ] && exit 0

@@ -39,7 +39,7 @@
   },
   "widekill": {
     "enforce": true,
-    "_notes": "wide-kill-guard.sh (PreToolUse Bash, EVERY session, the lead too) blocks a host-wide pattern kill of a test runner: pkill/killall naming one (pytest, make test, tests/run.sh, cargo test, go test, npm test, jest, vitest, unittest) without a parent/group/session/terminal/cgroup narrowing, or ps/pgrep of one fed to kill. Measured on serialhub 2026-11-18 and 11-20 (Flow row 62d79dae): a lane's restart loop, ps | grep 'make test|python.* -m pytest' | kill, ended other lanes' 7-minute suites twelve times; a command line carries no owner, and setsid/nohup does not protect a run. The replacement is scripts/kill-mine.py PATTERN (only processes whose working directory is this worktree). Escapes: lead the command with WIDE_KILL_OK=1, or enforce=false. A missing config enforces."
+    "_notes": "wide-kill-guard.sh (PreToolUse Bash, EVERY session, the lead too) blocks a host-wide pattern kill of a test runner: pkill/killall naming one (pytest, make test, tests/run.sh, cargo test, go test, npm test, jest, vitest, unittest) unless a pkill narrows its selection (parent/group/session/terminal/pidfile/cgroup), or ps/pgrep/pidof of one fed to kill (same statement, a bound variable, or kill $(…)). Measured on serialhub 2026-11-18 and 11-20 (Flow row 62d79dae): a lane's restart loop, ps | grep 'make test|python.* -m pytest' | kill, ended other lanes' 7-minute suites twelve times; a command line carries no owner, and setsid/nohup does not protect a run. The replacement is scripts/kill-mine.py PATTERN (only processes whose working directory is this worktree). Escapes: lead the command with WIDE_KILL_OK=1, or enforce=false. A missing config enforces."
   },
   "flow": {
     "enforce": true,

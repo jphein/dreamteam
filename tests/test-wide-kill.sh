@@ -94,6 +94,16 @@ deny "kill \$(pgrep -f pytest): the listing is kill's own operand" 'kill $(pgrep
 deny "kill \$(ps | awk on a runner's name)" 'kill $(ps -eo pid,args | awk '"'"'/pytest/ {print $1}'"'"')'
 deny "kill with a backtick listing" 'kill -TERM `pgrep -f "make test"`'
 deny "a narrowing flag with no operand narrows nothing" 'pkill -f pytest -s'
+# xreview #279 r2
+deny "killall -s names a SIGNAL, not a session" 'killall -s TERM pytest'
+deny "killall -g signals the matches' groups, it selects nothing narrower" 'killall -g pytest'
+deny "pkill under an absolute path" '/usr/bin/pkill -f pytest'
+deny "killall under an absolute path" '/usr/bin/killall -q pytest'
+deny "kill of a substitution whose listing is under a path" 'kill $(/usr/bin/pgrep -f pytest)'
+deny "the restart loop with ps under a path" 'for p in $(/bin/ps -eo pid,args | grep pytest | awk '"'"'{print $1}'"'"'); do kill $p; done'
+deny "pidof under a path fed to kill" '/usr/bin/pidof pytest | xargs kill'
+deny "a listing piped to while read, the variable then killed" 'pgrep -f pytest | while read -r p; do kill "$p"; done'
+deny "a variable bound to the listing, killed two statements later" 'P=$(pgrep -f "make test" | head -1); sleep 1; echo x; kill -TERM ${P}'
 deny "pidof fed to kill" 'pidof pytest | xargs kill'
 deny "a ; inside the quoted awk program does not end the listing's statement" \
   'ps -eo pid,args | awk '"'"'{n++; if ($0 ~ /pytest/) print $1}'"'"' | xargs kill'
@@ -115,6 +125,14 @@ allow "a server pkill && a suite" 'pkill -f server.py && python -m pytest -q'
 allow "kill of a substitution that lists something else" 'kill $(pgrep -f map_server.py); make test'
 allow "a ; inside an awk program does not end the listing's statement (no runner in it)" \
   'ps -eo pid,args | awk '"'"'{n++; print $1}'"'"' | wc -l; make test; kill "$PID"'
+allow "a listing to LOOK, then a kill of the pid captured at launch (xreview r2)" 'ps -eo pid,args | grep pytest; kill "$PID"'
+allow "a listing bound to one variable, a kill of another" 'N=$(pgrep -fc pytest); echo "$N running"; kill "$PID"'
+allow "a kill, then a listing that is echo's argument, not kill's" 'kill "$PID" && echo "$(pgrep -f pytest)"'
+allow "a file merely named after a killer" 'cat docs/pkill.md | grep pytest'
+allow "files named after a killer and a runner, side by side" 'cat notes/pkill.md pytest.ini'
+allow "a listing && kill-mine in ONE statement (kill-mine is not kill)" "pgrep -af pytest && $KM 'python.* -m pytest'"
+allow "a killer's path as an argument, a runner after ;" 'ls -l /usr/bin/pkill; pytest -q'
+allow "pkill narrowed to a pid file" 'pkill -F run.pid -f pytest'
 allow "kill -0 of a listed runner is a liveness probe, it sends nothing (replay 11-17)" \
   'kill -0 $(pgrep -f "vitest run __tests__/scripts" | head -1) 2>/dev/null && echo running'
 allow "a listing, then kill -0" 'pgrep -f pytest | xargs kill -0'
