@@ -18,8 +18,9 @@ WHAT IT DOES
   - Never taken: this process and its own ancestors (the calling shell's command line holds the pattern).
   - A matching process anywhere else is left alone and COUNTED, so the report shows what a host-wide kill
     would have hit.
-  - Each signal goes through a pidfd, and the command line and directory are read again through it first: a
-    pid reused between the look and the signal is never signalled.
+  - Each signal goes through a pidfd. After the pidfd is open the process is read again, and it is signalled
+    only if its START TIME, command line and directory are the ones selected: a pid reused between the look
+    and the signal belongs to a process that started later, whatever its command line, and is never signalled.
 
 REFUSED (exit 2): DIR that is `/`, the home directory, or any ancestor of it (that is the whole host again).
 EXIT: 0 at least one process signalled (or would be, with --dry-run) · 1 none matched under DIR · 2 refused ·
@@ -36,7 +37,8 @@ SIGNALS = {"TERM": signal.SIGTERM, "INT": signal.SIGINT, "HUP": signal.SIGHUP, "
 
 
 def read_proc(pid):
-    """(ppid, cmdline, cwd) of a live process of ours, or None. A zombie has no cmdline and is skipped."""
+    """(ppid, cmdline, cwd, start time in clock ticks since boot) of a live process of ours, or None.
+    A zombie has no cmdline and is skipped."""
     base = f"/proc/{pid}"
     try:
         if os.stat(base).st_uid != os.getuid():
@@ -47,13 +49,39 @@ def read_proc(pid):
             return None
         with open(f"{base}/stat", "rb") as fh:
             stat = fh.read()
-        ppid = int(stat[stat.rindex(b")") + 2:].split()[1])
+        fields = stat[stat.rindex(b")") + 2:].split()      # after "pid (comm) ": state ppid … starttime(22nd)
+        ppid, start = int(fields[1]), int(fields[19])
         cwd = os.readlink(f"{base}/cwd")
     except (OSError, ValueError, IndexError):
         return None
     if cwd.endswith(" (deleted)"):
         cwd = cwd[:-len(" (deleted)")]
-    return ppid, raw.rstrip(b"\0").replace(b"\0", b" ").decode("utf-8", "replace"), cwd
+    return ppid, raw.rstrip(b"\0").replace(b"\0", b" ").decode("utf-8", "replace"), cwd, start
+
+
+def signal_one(pid, selected, sig, read=read_proc, opener=None, sender=None):
+    """Signal `pid` only if it is still the process `selected` describes. True when the signal was sent.
+    The pidfd is taken FIRST, so what is read after it is the process the signal will reach."""
+    opener = opener or os.pidfd_open
+    sender = sender or signal.pidfd_send_signal
+    try:
+        fd = opener(pid)
+    except OSError:
+        return False                       # gone already
+    try:
+        now = read(pid)
+        if now is None or now[1:] != selected[1:]:      # command line, directory, start time
+            return False
+        sender(fd, sig)
+        return True
+    except OSError as e:
+        print(f"kill-mine: {pid}: {e}", file=sys.stderr)
+        return False
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def under(path, root):
@@ -115,7 +143,7 @@ def main(argv):
         spared.add(p)
         p = procs[p][0] if p in procs else 0
 
-    matching = {pid for pid, (_, cmd, _) in procs.items() if pid not in spared and rx.search(cmd)}
+    matching = {pid for pid, info in procs.items() if pid not in spared and rx.search(info[1])}
     taken = {pid for pid in matching if under(procs[pid][2], root)}
     for pid in sorted(matching - taken):   # a matching descendant of a taken process, wherever it stands now
         up, seen = procs[pid][0], set()
@@ -129,26 +157,13 @@ def main(argv):
 
     done = 0
     for pid in sorted(taken):
-        _, cmd, cwd = procs[pid]
+        cmd = procs[pid][1]
         if a.dry_run:
             print(f"would signal {pid}  {cmd[:100]}")
             done += 1
-            continue
-        try:
-            fd = os.pidfd_open(pid)
-        except OSError:
-            continue                       # gone already
-        try:
-            again = read_proc(pid)         # the same process still: same command line, same directory
-            if again is None or again[1] != cmd or again[2] != cwd:
-                continue
-            signal.pidfd_send_signal(fd, sig)
+        elif signal_one(pid, procs[pid], sig):
             print(f"signalled {pid}  {cmd[:100]}")
             done += 1
-        except OSError as e:
-            print(f"kill-mine: {pid}: {e}", file=sys.stderr)
-        finally:
-            os.close(fd)
     verb = "would be signalled" if a.dry_run else "signalled"
     print(f"kill-mine: {done} {verb} ({sig.name}) under {root}; "
           f"{len(elsewhere)} matching elsewhere left alone")
