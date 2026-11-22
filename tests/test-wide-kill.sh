@@ -111,6 +111,12 @@ deny "pkill after then" 'if true; then pkill -f pytest; fi'
 deny "a variable bound to the listing, killed after &&" 'P=$(pgrep -f pytest) && kill $P'
 deny "a trailing comment does not hide the kill" 'pkill -f pytest # stop the suite'
 deny "a # inside the quoted pattern is not a comment" 'pkill -f "x # y pytest"'
+# xreview #279 r4
+deny "the pipeline written one stage per line (a newline after | continues it)" \
+  $'ps -eo pid,args |\n  grep pytest |\n  awk \'{print $1}\' |\n  xargs kill'
+deny "the same formatting inside kill \$( )" $'kill $(pgrep -f pytest |\n  head -1)'
+deny "the restart loop with its listing wrapped after |" \
+  $'for p in $(ps -eo pid,args |\n    grep -E "make test|pytest" | awk \'{print $1}\'); do kill $p; done'
 deny "pidof fed to kill" 'pidof pytest | xargs kill'
 deny "a ; inside the quoted awk program does not end the listing's statement" \
   'ps -eo pid,args | awk '"'"'{n++; if ($0 ~ /pytest/) print $1}'"'"' | xargs kill'
@@ -149,6 +155,11 @@ allow "killer and runner both as FILE arguments" 'ls -l /usr/bin/pkill /usr/bin/
 allow "a runner named only in a trailing comment (pkill)" 'pkill -f server.py # restart before pytest'
 allow "a runner named only in a trailing comment (kill of a listing)" 'kill $(pgrep -f server.py) # restart before pytest'
 allow "a runner after the substitution's closing ), not in its body" 'kill $(pgrep -f server.py) && make test'
+# xreview #279 r4: the bound variable is named by a LATER command, not by the kill
+allow "bound variable only in echo after &&" 'N=$(pgrep -fc pytest); kill "$PID" && echo "$N suites were running"'
+allow "bound variable only in echo after ||" 'N=$(pgrep -fc pytest); kill "$PID" || echo "$N suites still running"'
+allow "bound variable only in a command after |" 'N=$(pgrep -fc pytest); kill "$PID" 2>&1 | sed "s/^/$N: /"'
+allow "a newline that is NOT after | still ends the pipeline" $'pgrep -af pytest\nkill "$PID"'
 allow "kill -0 of a listed runner is a liveness probe, it sends nothing (replay 11-17)" \
   'kill -0 $(pgrep -f "vitest run __tests__/scripts" | head -1) 2>/dev/null && echo running'
 allow "a listing, then kill -0" 'pgrep -f pytest | xargs kill -0'

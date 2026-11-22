@@ -103,13 +103,17 @@ def strip_comments(s):
 def cut(s, pipelines=False):
     """[(start, part)]: the text cut at every unquoted `;` or newline (statements); with pipelines=True also
     at every unquoted `&&`, `||` and `&`, so each part is one pipeline."""
-    out, cur, start, i, prev = [], [], 0, 0, ("", True)
+    out, cur, start, i, prev, last = [], [], 0, 0, ("", True), ""
     chars = list(spans(s))
     n = len(chars)
     while i < n:
         c, quoted = chars[i]
         width = 0
         if not quoted:
+            if c == "\n" and last == "|":                  # a newline right after `|` continues the pipeline
+                cur.append(" ")
+                i += 1
+                continue
             if c in ";\n":
                 width = 1
             elif pipelines and c in "&|" and i + 1 < n and chars[i + 1] == (c, False):
@@ -124,6 +128,8 @@ def cut(s, pipelines=False):
             cur.append(c)
             i += 1
         prev = (c, quoted)
+        if quoted or not c.isspace():
+            last = "" if quoted or width else c            # the last unquoted non-blank character of this part
     out.append((start, "".join(cur)))
     return out
 
@@ -219,7 +225,7 @@ def wide(text):
             names.discard("")
             rest = text[p_start + len(part):]
             for k in KILL_WORD.finditer(rest):             # a later kill that names a variable bound to it
-                operands = re.split(r"[;\n]", rest[k.end():], maxsplit=1)[0]
+                operands = own_args(rest, k.start())[0]     # that kill's own operands, nothing after && || |
                 if any(re.search(r"\$\{?" + re.escape(n) + r"\b", operands) for n in names):
                     return True
     return False
