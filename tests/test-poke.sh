@@ -51,6 +51,7 @@ while [ $# -gt 0 ]; do
   else
     case "$1" in
       -t) t="$2"; shift;;
+      -e) printf 'CAPTURE with -e\n' >> "$S/capture.log";;
       -l) lit=1;;
       Enter) enter=1;;
     esac
@@ -69,7 +70,11 @@ case "$sub" in
     enters=$(cat "$S/enters" 2>/dev/null || echo 0)
     thr=$(cat "$S/threshold" 2>/dev/null || echo 1)
     mode=$(cat "$S/mode" 2>/dev/null || echo normal)
-    if [ "$mode" = queued ]; then
+    if [ "$mode" = ghost ]; then                       # input box EMPTY; the message text is only a faint suggestion
+      printf '  ...transcript...\n──── @%s ──\n❯ \033[2m%s\033[0m\n────\n  Opus 4.8 · max\n' "$ag" "$m"
+    elif [ "$mode" = typedghost ] && [ "$enters" -lt "$thr" ]; then   # really typed, with a faint completion after it
+      printf '  ...transcript...\n──── @%s ──\n❯ %s\033[2m and more\033[0m\n────\n  Opus 4.8 · max\n' "$ag" "$m"
+    elif [ "$mode" = queued ]; then
       printf '  ...transcript...\n──── @%s ──\n❯ %s\n  ↑ press up to edit queued message\n────\n  Opus 4.8 · max\n' "$ag" "$m"
     elif [ "$enters" -ge "$thr" ]; then
       printf '  ...transcript...\n──── @%s ──\n❯ \n────\n  Opus 4.8 · max\n' "$ag"
@@ -83,7 +88,7 @@ EOF
 chmod +x "$TMP/bin/tmux"
 
 # reset per-scenario state
-reset() { rm -f "$S/enters" "$S/keys.log" "$S/peek.log"; echo "$1" > "$S/threshold"; echo "${2:-normal}" > "$S/mode"; echo "${3:-found}" > "$S/peekmode"; }
+reset() { rm -f "$S/enters" "$S/keys.log" "$S/peek.log" "$S/capture.log"; echo "$1" > "$S/threshold"; echo "${2:-normal}" > "$S/mode"; echo "${3:-found}" > "$S/peekmode"; }
 run() { POKE_TEST_AGENT="$AG" POKE_TEST_MSG="$MSG" POKE_SETTLE=0 POKE_SUBMIT_RETRIES=3 \
         DREAMTEAM_PANE_PEEK="$TMP/bin/peek-stub.sh" CLAUDE_PLUGIN_ROOT="$ROOT" \
         PATH="$TMP/bin:$PATH" bash "$POKE" "$@"; }
@@ -124,6 +129,19 @@ reset 99 queued
 out="$(run "$AG" $MSG)"; rc=$?
 [ "$rc" = 0 ] && ok "queued: exit 0 (message accepted mid-turn)" || bad "queued exit=$rc ($out)"
 [ "$(enters)" -lt 3 ] && ok "queued: stops early — no Enter-hammering ($(enters))" || bad "queued over-submitted: $(enters)"
+
+# ── a FAINT suggestion in the input box is not our message still sitting there (2026-11-21) ─────────────
+# The box is empty; Claude Code shows the same words as its faint placeholder. Reading that as "typed" made poke
+# press Enter again and again and then report a failure for a message that had been submitted.
+reset 99 ghost
+out="$(run "$AG" $MSG 2>&1)"; rc=$?
+[ "$rc" = 0 ] && ok "ghost: a faint suggestion equal to the message is NOT 'still on the input line' (exit 0)" || bad "ghost exit=$rc ($out)"
+[ "$(enters)" = 1 ] && ok "ghost: one Enter, no re-pressing against a placeholder" || bad "ghost enters=$(enters)"
+grep -q 'CAPTURE with -e' "$S/capture.log" 2>/dev/null && ok "ghost: the pane is captured WITH escape codes (-e)" || bad "capture without -e"
+# ...and really typed text, with a faint completion after it, IS still there until it submits
+reset 2 typedghost
+out="$(run "$AG" $MSG)"; rc=$?
+[ "$rc" = 0 ] && [ "$(enters)" = 2 ] && ok "typed text followed by a faint completion still counts as typed (2 Enters)" || bad "typedghost rc=$rc enters=$(enters)"
 
 # ── not-found: pane-peek says found=false ⇒ exit 3, no typing ───────────────────
 reset 1 normal notfound

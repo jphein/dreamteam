@@ -88,11 +88,21 @@ fi
 # ── submit verification (#28) ────────────────────────────────────────────────
 probe="${msg//$'\n'/ }"; probe="${probe:0:24}"       # fixed-string prefix, single-lined
 
-# our message still sitting on the LIVE (bottom-most) ❯ input line ⇒ not submitted
+# our message still sitting on the LIVE (bottom-most) ❯ input line ⇒ not submitted.
+# Only TYPED text counts: Claude Code shows its predicted next prompt in the input box as a faint placeholder
+# (SGR 2), and a plain capture cannot tell that from typed text. So the pane is captured WITH escape codes (-e) and
+# read through scripts/lib/pane_plain.py, which drops faint text on the input line. Without python3 the old plain
+# reading is used (it can only err towards "still there", i.e. one more Enter, never towards "submitted").
+typed_on_input() {
+  local t
+  if t="$(tmux_s capture-pane -p -e -t "$pane" 2>/dev/null | python3 -I "$ROOT/scripts/lib/pane_plain.py" --typed 2>/dev/null)"; then
+    printf '%s' "$t"
+  else
+    tmux_s capture-pane -p -t "$pane" 2>/dev/null | grep -F '❯' | tail -n1
+  fi
+}
 still_on_input() {
-  local lastprompt
-  lastprompt="$(tmux_s capture-pane -p -t "$pane" 2>/dev/null | grep -F '❯' | tail -n1)"
-  printf '%s' "$lastprompt" | grep -Fq "$probe"
+  typed_on_input | grep -Fq "$probe"
 }
 # mid-turn queued-acceptance indicator near the input box ⇒ taken (don't re-Enter)
 accepted_as_queued() {

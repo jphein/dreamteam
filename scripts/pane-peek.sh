@@ -137,7 +137,16 @@ print(json.dumps({"agent":os.environ["AGENT"],"found":False,"resolved_via":None,
 fi
 
 # ── 4b. capture the tail; strip trailing blank rows (idle panes end in blanks) ─
-TAIL="$(tmux -S "$SOCK" capture-pane -p -t "$ADDR" -S -"$LINES" 2>/dev/null || true)"
+# Captured WITH escape codes and read through lib/pane_plain.py: a FAINT line in the input box is Claude Code's own
+# suggestion of a next prompt, not text anyone typed (2026-11-21: four such lines were reported as "typed but never
+# sent"). The tail shows the input box as it really is; the suggestion, if any, is reported apart as GHOST.
+RAW="$(tmux -S "$SOCK" capture-pane -p -e -t "$ADDR" -S -"$LINES" 2>/dev/null || true)"
+GHOST=""
+if TAIL="$(printf '%s\n' "$RAW" | python3 -I "$ROOT/scripts/lib/pane_plain.py" 2>/dev/null)"; then
+  GHOST="$(printf '%s\n' "$RAW" | python3 -I "$ROOT/scripts/lib/pane_plain.py" --ghost 2>/dev/null || true)"
+else
+  TAIL="$(printf '%s\n' "$RAW" | sed 's/\x1b\[[0-9;:?]*[ -\/]*[@-~]//g')"     # no python3: codes stripped, nothing hidden
+fi
 TAIL="$(printf '%s\n' "$TAIL" | sed -e :a -e '/^[[:space:]]*$/{$d;N;ba}')"
 DISP_ADDR="$(basename "$SOCK")@${ADDR}"
 DISP_STATUS="$R_STATUS"; [ "$DISP_STATUS" = "-" ] && DISP_STATUS="unknown"
@@ -145,7 +154,7 @@ DISP_CWD="$R_CWD"; [ "$DISP_CWD" = "-" ] && DISP_CWD=""
 
 if [ "$FMT" = "json" ]; then
   R_PID="$R_PID" R_STATUS="$DISP_STATUS" R_CWD="$R_CWD" AGENT="$AGENT" \
-  SOCK="$SOCK" ADDR="$ADDR" VIA="$VIA" TAIL="$TAIL" \
+  SOCK="$SOCK" ADDR="$ADDR" VIA="$VIA" TAIL="$TAIL" GHOST="$GHOST" \
   python3 -c '
 import json,os
 def norm(v): return None if v in ("","-") else v
@@ -153,9 +162,11 @@ print(json.dumps({"agent":os.environ["AGENT"],"found":True,"resolved_via":os.env
   "status":norm(os.environ["R_STATUS"]) or "unknown","pid":(int(os.environ["R_PID"]) if os.environ["R_PID"].isdigit() else None),
   "cwd":norm(os.environ["R_CWD"]),"socket":os.environ["SOCK"],"pane":os.environ["ADDR"],
   "resolved_pane":os.path.basename(os.environ["SOCK"])+"@"+os.environ["ADDR"],
-  "lines":os.environ["TAIL"].split("\n") if os.environ["TAIL"] else [],"reason":None}))'
+  "lines":os.environ["TAIL"].split("\n") if os.environ["TAIL"] else [],
+  "ghost":(os.environ.get("GHOST") or None),"reason":None}))'
 else
   echo "── pane-peek @${AGENT} · ${DISP_STATUS} · ${DISP_ADDR} · via ${VIA}${DISP_CWD:+ · $DISP_CWD} ──"
   printf '%s\n' "$TAIL"
+  [ -n "$GHOST" ] && echo "── (input box shows a FAINT suggestion, typed by nobody: ${GHOST:0:100}) ──"
 fi
 exit 0
