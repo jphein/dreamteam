@@ -23,7 +23,8 @@ STATE = os.path.join(HERE, f"quota_resume_state.{HOST}.json")   # host-suffixed:
 LOG = os.path.join(HERE, f"quota_resume.{HOST}.log")
 # The real error is one "●" output block; quoting it elsewhere never starts with the bullet.
 ERR = re.compile(r"● API Error: .*?(Server is temporarily limiting requests|all \d+ accounts are at their quota)")
-RESET = re.compile(r"resets in (\d+)s")
+# "resets in 42s" (older notices) or "Quota resets in 1h 55m" / "in 7m" (teamclaude since 2026-11)
+RESET = re.compile(r"resets in (?=\d)(?:(\d+)h\s*)?(?:(\d+)m\s*)?(?:(\d+)s)?")
 # A working agent shows a spinner line like "✢ Wibbling… (3m 49s · ↓ 17.0k tokens)" or "esc to interrupt".
 WORKING = re.compile(r"esc to interrupt|↓ [\d.]+k? tokens|^[✢✻✶✳✽]\s\S+…\s*\(")
 SGR = re.compile(r"\x1b\[[0-9;]*m")
@@ -76,22 +77,53 @@ def panes():
 
 
 
+def seats_serving(q):
+    """How many seats the proxy can route to now; 0 on any doubt (a dead fleet → don't type).
+
+    The proxy's own `live_seats` is the answer: it is the routing predicate itself (throttles, switch thresholds,
+    family buckets). 2026-11-21 (Sen, row seat-walls): the old test here counted any seat with a sliver of 5h and week
+    left, so it typed "continue" 146 times into two walls (10:10-12:01, 14:05-17:00) while the proxy refused every
+    request; and a seat whose fiveHour bucket is null raised AttributeError 254 times. Without `live_seats` (an older
+    proxy) a seat counts only when it is active, its week is under 98 % and its 5h under 97 % (the proxy's rules)."""
+    live = q.get("live_seats")
+    if isinstance(live, int) and not isinstance(live, bool):
+        return max(live, 0)
+    n = 0
+    for a in q.get("accounts") or []:
+        if not isinstance(a, dict) or a.get("disabled") or a.get("status") != "active":
+            continue
+        b = a.get("buckets") or {}
+        fh, wk = b.get("fiveHour") or {}, b.get("weeklyShared") or {}
+        fu, wu = fh.get("utilization"), wk.get("utilization")
+        if isinstance(wu, (int, float)) and wu < 0.98 and (fu is None or (isinstance(fu, (int, float)) and fu < 0.97)):
+            n += 1
+    return n
+
+
 def proxy_serves():
-    """True when some account can serve (5h and weekly both have room); False on any doubt (dead fleet → don't type)."""
+    """True when the proxy says a seat can serve; False on any doubt (dead fleet → don't type)."""
     try:
         import urllib.request, json as _j
-        req = urllib.request.Request("http://127.0.0.1:3456/teamclaude/quota")
-        with urllib.request.urlopen(req, timeout=5) as r:   # loopback, no proxy
-            q = _j.load(r)
-        for a in q.get("accounts", []):
-            b = a.get("buckets", {})
-            fh, wk = b.get("fiveHour", {}), b.get("weeklyShared", {})
-            if float(fh.get("remaining", 0) or 0) > 0 and float(wk.get("remaining", 0) or 0) > 0:
-                return True
-        return False
+        src = os.environ.get("QUOTA_RESUME_QUOTA_FILE")   # tests read a file instead of the endpoint
+        if src:
+            q = _j.load(open(src))
+        else:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))   # loopback, never via a proxy
+            with opener.open("http://127.0.0.1:3456/teamclaude/quota", timeout=5) as r:
+                q = _j.load(r)
+        return seats_serving(q) > 0
     except Exception as e:
         log(f"proxy quota unreadable ({type(e).__name__}); not resuming")
         return False
+
+
+def reset_wait(text):
+    """Seconds the notice says to wait: 'resets in 42s' or teamclaude's 'Quota resets in 1h 55m'; None if it names none."""
+    m = RESET.search(text)
+    if not m or not any(m.groups()):
+        return None
+    h, mi, s = (int(x) if x else 0 for x in m.groups())
+    return h * 3600 + mi * 60 + s
 
 try:
     state = json.load(open(STATE))
@@ -128,15 +160,15 @@ for pid, cmd, raw in panes():
         if DRY:
             print(f"skip {pid}: typed input {typed[:40]!r}")
         continue
-    m = RESET.search(collapsed)
-    wait = int(m.group(1)) if m else 300
+    wait = reset_wait(collapsed)
+    wait = 300 if wait is None else wait
     key = pid + ":" + hashlib.sha1(collapsed.encode()).hexdigest()[:12]
     seen_now.add(key)
     first = state.get(key, {}).get("first", now)
     done = state.get(key, {}).get("done", False)
     state[key] = {"first": first, "done": done}
     if DRY:
-        print(f"match {pid} ({cmd}): wait={wait}s done={done} due_in={int(first + wait + 30 - now)}s")
+        print(f"match {pid} ({cmd}): wait={wait}s done={done} due_in={int(first + wait + 30 - now)}s serves={proxy_serves()}")
         continue
     if done or now < first + wait + 30:
         continue
