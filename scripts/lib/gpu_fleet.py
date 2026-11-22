@@ -546,13 +546,16 @@ def live_vram_check(fleet: dict, card: str, peak_vram_mib: int) -> str:
 def cmd_admit(a, fleet, cfg) -> int:
     t = now()
     host = card_of(fleet, a.card)["host"]
-    with HostLock(fleet, host), Ledger() as L:   # the lock spans the peak recheck and the ledger, as in claim (#256 r3 item 6)
+    with HostLock(fleet, host), Ledger(write=True) as L:   # the lock spans the peak recheck and the ledger, as in claim (#256 r3 item 6)
         claim = _authorize_run(a, fleet, cfg, L, t)
         peak, grows, cap = _peaks_for_run(a, claim, fleet)
         print(f"  cap: peak {peak} MB x {'1.5 (grows)' if grows else '1.2'} = {cap} MB")
         print("  " + live_vram_check(fleet, a.card, claim.get("peak_vram_mib", 0)))
         for ln in _recheck_peak(a, fleet, L, t, claim, peak, grows):
             print("  " + ln)
+        # the admission is on the ledger's history, written while the host lock is still held: the lock order is what
+        # makes "admitted" and "recorded" one step (the stub's UNLOCK line counts admits; #280 r1 item 5)
+        L.log("admit", card=a.card, lane=claim["lane"], peak=peak, cap=cap, by=caller() or "orchestrator")
     print(f"ADMITTED (static): {a.card} for {claim['lane']}, cap {cap} MB. The launcher re-checks live memory on the host.")
     return 0
 

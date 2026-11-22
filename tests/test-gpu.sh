@@ -47,7 +47,7 @@ case "${1:-}" in *"host.lock"*)   # the host lock (#256 r1 item 3): LOCKED, then
   [ -f "$PROBES/$host.probe" ] || exit 255
   [ -e "$PROBES/$host.locked" ] && exit 1
   echo "LOCK" >> "$PROBES/$host.seq"; echo LOCKED; cat >/dev/null
-  echo "UNLOCK recorded=$(grep -c '"peak_ram_mb"' "$DREAMTEAM_GPU_STATE/claims.json" 2>/dev/null)" >> "$PROBES/$host.seq"; exit 0 ;;
+  echo "UNLOCK recorded=$(grep -c '"peak_ram_mb"' "$DREAMTEAM_GPU_STATE/claims.json" 2>/dev/null) admits=$(grep -c '"event": "admit"' "$DREAMTEAM_GPU_STATE/claims.json" 2>/dev/null)" >> "$PROBES/$host.seq"; exit 0 ;;
 esac
 [ -f "$PROBES/$host.probe" ] || exit 255
 echo "PROBE" >> "$PROBES/$host.seq"
@@ -122,10 +122,10 @@ rm -f "$PROBES/gpu1.locked"
 fresh; probe_fixture gpu1 1 0 10240; rm -f "$PROBES/gpu1.seq"
 check "$(claim gpu1:0 --lane drift-gems --until 2h --peak-ram 2878 --peak-vram 3000)" 0 "a claim under the host lock is admitted"
 seq=$(tr '\n' ' ' < "$PROBES/gpu1.seq" 2>/dev/null)
-case "$seq" in "LOCK PROBE UNLOCK recorded=1 ") pass "lock → probe → record → unlock: the probe-to-record window sits inside the lock" ;; *) fail "lock sequence: [$seq]" ;; esac
+case "$seq" in "LOCK PROBE UNLOCK recorded=1 admits=0 ") pass "lock → probe → record → unlock: the probe-to-record window sits inside the lock" ;; *) fail "lock sequence: [$seq]" ;; esac
 rm -f "$PROBES/gpu1.seq"; G "$ORCH" claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 2878 --peak-vram 3000 --dry-run >/dev/null 2>&1
 seq=$(tr '\n' ' ' < "$PROBES/gpu1.seq" 2>/dev/null)
-case "$seq" in "LOCK PROBE UNLOCK recorded=1 ") pass "a dry run takes the lock and probes, records nothing new (still the one claim)" ;; *) fail "dry-run lock sequence: [$seq]" ;; esac
+case "$seq" in "LOCK PROBE UNLOCK recorded=1 admits=0 ") pass "a dry run takes the lock and probes, records nothing new (still the one claim)" ;; *) fail "dry-run lock sequence: [$seq]" ;; esac
 # reservations (xreview #256 r2): mem-gate's lock is released when the gate exits, BEFORE the caller starts the lane,
 # so the gate reserves the lane's budget while it holds the lock; the sampler counts unexpired reservations beside
 # the live RSS until the lane's SessionStart consumes one or it expires (90 s). The stub serves RESV from the real
@@ -181,7 +181,10 @@ check "$resv" "RESV,ERR" "sampler: a reservations directory that cannot be liste
 printf '400\n' > "$rd/15-6"
 resv=$(python3 "$LIB" probe-script gpu1 | HOME="$h" DREAMTEAM_RESERVATIONS= PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^RESV,')
 check "$resv" "RESV,ERR" "sampler: a reservation file with only an MB field is RESV,ERR (each field validated, r4 item 5)"
-rm -f "$rd/15-6"
+rm -f "$rd/15-6"; printf '700 notanumber s-a morpheus 0\n' > "$rd/15-7"
+resv=$(python3 "$LIB" probe-script gpu1 | HOME="$h" DREAMTEAM_RESERVATIONS= PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^RESV,')
+check "$resv" "RESV,ERR" "sampler: a non-numeric expiry is RESV,ERR on its own (the expiry digit check, not the started-field check: mutant probe-exp-digits-unchecked)"
+rm -f "$rd/15-7"
 resv=$(python3 "$LIB" probe-script gpu1 | DREAMTEAM_RESERVATIONS="$rd/10-1" PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^RESV,')
 check "$resv" "RESV,ERR" "sampler: a regular file where the reservations directory should be is RESV,ERR (r4 item 5)"
 order=$(python3 "$LIB" probe-script gpu1 | HOME="$h" DREAMTEAM_RESERVATIONS= PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep -o '^RESV\|^LANE' | tr '\n' ' ')
@@ -203,7 +206,7 @@ check "$(rc G drift-gems@team admit --card gpu1:0 --peak-ram 5500)" 75 "admit (#
 rm -f "$PROBES/gpu1.seq"
 check "$(rc G drift-gems@team admit --card gpu1:0 --peak-ram 3000)" 0 "admit under the host lock: a peak that fits is admitted"
 seq=$(tr '\n' ' ' < "$PROBES/gpu1.seq" 2>/dev/null)
-case "$seq" in "LOCK PROBE "*"UNLOCK recorded=2 ") case "${seq#LOCK }" in *" LOCK "*) fail "admit lock sequence (a second lock): [$seq]" ;; *) pass "admit: lock → probes (live VRAM, footprint) → recheck → unlock, the two claims still recorded at unlock (item 6)" ;; esac ;; *) fail "admit lock sequence: [$seq]" ;; esac
+case "$seq" in "LOCK PROBE "*"UNLOCK recorded=2 admits=1 ") case "${seq#LOCK }" in *" LOCK "*) fail "admit lock sequence (a second lock): [$seq]" ;; *) pass "admit: lock → probes (live VRAM, footprint) → recheck → unlock, the two claims still recorded at unlock (item 6)" ;; esac ;; *) fail "admit lock sequence: [$seq]" ;; esac
 touch "$PROBES/gpu1.locked"
 check "$(rc G drift-gems@team admit --card gpu1:0 --peak-ram 3000)" 75 "admit with the host lock held elsewhere: REFUSED, fail closed (item 6)"
 rm -f "$PROBES/gpu1.locked"
