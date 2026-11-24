@@ -239,6 +239,16 @@
             "timeout": 8
           }
         ]
+      },
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/lane-style-hook.sh\"",
+            "timeout": 8
+          }
+        ]
       }
     ],
     "SessionEnd": [
