@@ -67,6 +67,13 @@ case "$#:${1:-}:${2:-}" in
   *) echo "$USAGE" >&2; exit 22 ;;
 esac
 MODE=$1
+# The hook form time-boxes ITSELF (hooks.json keeps the plain `bash <script>` form every hook uses): the whole run
+# once more under `timeout`, SIGKILL one second after an ignored SIGTERM, and this outer call always exits 0. A
+# session start is never held or failed by this.
+if [ "$HOOK" -eq 1 ] && [ -z "${LANE_SLICE_HOOK_INNER:-}" ]; then
+  LANE_SLICE_HOOK_INNER=1 timeout --kill-after=1 "${LANE_SLICE_HOOK_SECS:-6}" bash "${BASH_SOURCE[0]}" attach --hook > /dev/null 2>&1
+  exit 0
+fi
 if [ "$HOOK" -eq 1 ]; then exec >/dev/null 2>&1; trap 'exit 0' EXIT; fi
 command -v jq >/dev/null 2>&1 || { echo "lane-slice: jq is needed" >&2; exit 1; }
 uc() { systemctl --user "$@"; }

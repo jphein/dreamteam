@@ -225,7 +225,7 @@
           },
           {
             "type": "command",
-            "command": "timeout --kill-after=1 6 bash \"${CLAUDE_PLUGIN_ROOT}/scripts/lane-slice.sh\" attach --hook",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/lane-slice.sh\" attach --hook",
             "timeout": 8
           }
         ]

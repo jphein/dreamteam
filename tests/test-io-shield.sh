@@ -187,9 +187,14 @@ ok "status counts a lane's processes that sit in a fleet scope" 'grep -q "^sessi
 
 # the SessionStart form: silent, exit 0 whatever happens
 touch "$T/busctl-fails"; : > "$LOG"; out=$(DREAMTEAM_CONFIG="$T/config.json" DREAMTEAM_HOST=test-nooverlay XDG_CONFIG_HOME="$X" DREAMTEAM_PROC="$P" DREAMTEAM_CGROUP_ROOT="$T/cg" PATH="$B:$PATH" bash "$LS" attach --hook 2>&1); rc=$?; rm -f "$T/busctl-fails"
-ok "attach --hook: silent and exit 0 even when a move fails, and it did try" '[ "$rc" -eq 0 ] && [ -z "$out" ] && grep -q "AttachProcessesToUnit ssau lane-alpha.scope" "$LOG"'
+ok "attach --hook: silent and exit 0 even when a move fails, and it did try (through its own time-box)" '[ "$rc" -eq 0 ] && [ -z "$out" ] && grep -q "AttachProcessesToUnit ssau lane-alpha.scope" "$LOG"'
+# a tmux that never answers cannot hold a session start: the hook form is killed at its bound and still exits 0
+mkdir -p "$T/slow"; printf '#!/bin/sh\nsleep 30\n' > "$T/slow/tmux"; chmod +x "$T/slow/tmux"
+t0=$(date +%s); DREAMTEAM_CONFIG="$T/config.json" DREAMTEAM_HOST=test-nooverlay XDG_CONFIG_HOME="$X" DREAMTEAM_PROC="$P" DREAMTEAM_CGROUP_ROOT="$T/cg" LANE_SLICE_HOOK_SECS=2 PATH="$T/slow:$B:$PATH" bash "$LS" attach --hook; rc=$?; t1=$(date +%s)
+ok "attach --hook with a tmux that hangs: exit 0 within its bound ($((t1 - t0)) s)" '[ "$rc" -eq 0 ] && [ "$((t1 - t0))" -le 5 ]'
 run_ls attach --bogus; ok "attach with another word is exit 22" '[ "$?" -eq 22 ]'
-ok "hooks.json runs it at SessionStart under a timeout, in seconds" 'jq -e ".hooks.SessionStart[].hooks[] | select((.command | contains(\"lane-slice.sh\")) and (.command | contains(\"attach --hook\")) and .timeout <= 10)" "$ROOT/hooks/hooks.json" > /dev/null'
+hooked() { jq -e --arg c 'bash "${CLAUDE_PLUGIN_ROOT}/scripts/lane-slice.sh" attach --hook' '.hooks.SessionStart[].hooks[] | select(.command == $c and .timeout <= 10)' "$ROOT/hooks/hooks.json" > /dev/null; }
+ok "hooks.json runs it at SessionStart in the plain bash form, under a timeout in seconds" 'hooked'
 
 # install reconciles: a unit dropped from the list loses the drop-in this tool wrote
 cfg '{"lanes":{"enabled":true,"exclude":[],"units":["a-gate.service","b-gate.service"]}}'; rm -rf "$U"; run_ls install
@@ -273,7 +278,9 @@ echo "── host-io-check.sh ────────────────�
 ok "passes bash -n" 'bash -n "$HC"'
 C="$T/checks"; printf 'some avg10=1.00 avg60=2.00 avg300=1.00 total=1\nfull avg10=0.50 avg60=3.40 avg300=1.00 total=1\n' > "$T/psi"
 run_hc() { DREAMTEAM_CHECKS_DIR="$C" DREAMTEAM_CHECK_HOST=Familiar DREAMTEAM_IO_PROBE_DIR="$T/probe" DREAMTEAM_IO_PROBE_SECS=1 DREAMTEAM_PSI_IO="$T/psi" "$@" bash "$HC" > "$T/out" 2> "$T/err"; }
-run_hc env; rc=$?
+# the fsync threshold is lifted for this case: the probe is REAL, and on a busy test host its p99 is whatever the
+# host is doing (the full suite failed here once for that reason); the thresholds have their own cases below
+run_hc env DREAMTEAM_IO_FSYNC_WARN_MS=600000; rc=$?
 ok "a calm disk: ok, exit 0, the line is published under the host's own name" '[ "$rc" -eq 0 ] && grep -q "^CHECK familiar-io ok · fsync p99 [0-9]* ms (max [0-9]*), read p99 [0-9]* ms, io pressure full avg60 3%, on " "$C/familiar-io.line"'
 ok "the line is exactly three segments" '[ "$(grep -o " · " "$C/familiar-io.line" | wc -l)" -eq 2 ]'
 run_hc env DREAMTEAM_IO_FSYNC_WARN_MS=0
