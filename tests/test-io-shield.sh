@@ -186,11 +186,22 @@ else
   python3 -I -c 'import os, sys; os.setxattr(sys.argv[1], "user.oomd_avoid", b"1")' "$LD"
   mkdir -p "$LD/sub"; printf '900\n901\n' > "$LD/cgroup.procs"; echo 902 > "$LD/sub/cgroup.procs"; printf '100\n101\n' > "$AD/cgroup.procs"
   PR="$T/fproc"; for p in 900 901 902 100 101; do mkdir -p "$PR/$p"; echo 0 > "$PR/$p/oom_score_adj"; done
+  for p in 900 901; do echo "0::/$UM/app.slice/tmux-spawn-lead.scope" > "$PR/$p/cgroup"; done
+  echo "0::/$UM/app.slice/tmux-spawn-lead.scope/sub" > "$PR/902/cgroup"; for p in 100 101; do echo "0::/$UM/app.slice/tmux-spawn-x.scope" > "$PR/$p/cgroup"; done
   run_op() { IO_SHIELD_CONF="$T/conf" IO_SHIELD_QOS_FILE="$T/qos" IO_SHIELD_SYSBLOCK="$T/sys" IO_SHIELD_CGROUP_ROOT="$T/cg" IO_SHIELD_PROC="$PR" IO_SHIELD_ASSUME_ROOT=1 PATH="$B:$PATH" bash "$SH" "$@" > "$T/out" 2> "$T/err"; }
   printf 'oomprotect %s -500\n' "$(id -u)" > "$T/conf"; run_op apply; rc=$?
   ok "oomprotect: every process in the marked cgroup, sub-cgroups included, gets the score" '[ "$rc" -eq 0 ] && [ "$(cat "$PR/900/oom_score_adj" "$PR/901/oom_score_adj" "$PR/902/oom_score_adj" | tr "\n" " ")" = "-500 -500 -500 " ] && grep -q "3 process(es) set to -500" "$T/out"'
   ok "oomprotect: a process in an UNMARKED cgroup keeps its score" '[ "$(cat "$PR/100/oom_score_adj" "$PR/101/oom_score_adj" | tr "\n" " ")" = "0 0 " ]'
   run_op apply; ok "oomprotect: a second run changes nothing" 'grep -q "0 process(es) set to -500" "$T/out"'
+  # pid reuse (security review of 4c1df55): the number 901 is still listed in the marked cgroup, but the process
+  # behind /proc/901 now says it lives in ANOTHER cgroup (a successor that got the number): it is not written.
+  echo 0 > "$PR/901/oom_score_adj"; echo "0::/$UM/app.slice/tmux-spawn-x.scope" > "$PR/901/cgroup"; run_op apply
+  ok "oomprotect: a pid whose process is no longer in the marked cgroup (a reused number) is NOT written" '[ "$(cat "$PR/901/oom_score_adj")" = 0 ] && grep -q "0 process(es) set" "$T/out"'
+  echo "0::/$UM/app.slice/tmux-spawn-lead.scope" > "$PR/901/cgroup"
+  echo 999999 >> "$LD/cgroup.procs"; run_op apply; rc=$?
+  ok "oomprotect: a listed pid that has exited is skipped quietly (exit 0)" '[ "$rc" -eq 0 ] && [ "$(cat "$PR/901/oom_score_adj")" = -500 ]'
+  printf '900\n901\n' > "$LD/cgroup.procs"
+  grep -q 'os.O_DIRECTORY' "$SH" && grep -q 'dir_fd=fd' "$SH" && ! grep -q 'stat -c %u' "$SH"; ok "oomprotect: owner, cgroup and the write all go through one /proc/<pid> directory descriptor (no check by path)" '[ "$?" -eq 0 ]'
   printf 'oomprotect %s -500\n' "$(( $(id -u) + 1 ))" > "$T/conf"; echo 0 > "$PR/900/oom_score_adj"; run_op apply
   ok "oomprotect: another uid's line does not reach this user's cgroups" '[ "$(cat "$PR/900/oom_score_adj")" = 0 ]'
   printf 'oomprotect %s -500\n' "$(id -u)" > "$T/conf"; run_op status

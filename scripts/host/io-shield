@@ -101,10 +101,24 @@ docker_unit() {   # container name → docker-<id>.scope, or nothing
   id=$(docker inspect -f '{{.Id}}' "$1" 2>/dev/null) && [[ "$id" =~ ^[0-9a-f]{64}$ ]] && printf 'docker-%s.scope' "$id"
 }
 
-# oom_marked <uid>: one "pid" per line for every process in a marked cgroup below that user's manager
-oom_marked() {
+# oom_scores list|apply <uid> <score>: the processes in a marked cgroup below that user's manager.
+#   list   prints "pid=score" for each;  apply  writes <score> and prints how many it changed (exit 1 if a write
+#   to a live process failed).
+# A pid is only a number: between reading it from cgroup.procs and writing its score the process can exit and the
+# number be given to another one, of any user. So each process is taken hold of ONCE, as a directory descriptor
+# on /proc/<pid>, and everything is done through that descriptor: its owner must be <uid>, its `cgroup` must
+# still be the marked cgroup it was listed in, and the score is written to `oom_score_adj` inside the same
+# descriptor. A descriptor on a process that has exited answers "no such process"; it never reaches a successor.
+oom_scores() {
   python3 -I -c 'import os, sys
-base = os.path.join(sys.argv[1], "user.slice", "user-%s.slice" % sys.argv[2], "user@%s.service" % sys.argv[2])
+mode, cgroot, procroot, uid, score = sys.argv[1:6]
+base = os.path.join(cgroot, "user.slice", "user-%s.slice" % uid, "user@%s.service" % uid)
+def rd(fd, name):
+    f = os.open(name, os.O_RDONLY, dir_fd=fd)
+    try: return os.read(f, 65536).decode("utf-8", "replace")
+    finally: os.close(f)
+changed = failed = 0
+out = []
 for d, dirs, files in os.walk(base):
     try:
         if os.getxattr(d, "user.oomd_avoid") != b"1":
@@ -112,17 +126,47 @@ for d, dirs, files in os.walk(base):
     except OSError:
         continue
     for sub, _, _ in os.walk(d):                      # the marked cgroup and everything below it
+        rel = "/" + os.path.relpath(sub, cgroot)
         try:
-            print(open(os.path.join(sub, "cgroup.procs")).read(), end="")
+            pids = open(os.path.join(sub, "cgroup.procs")).read().split()
         except OSError:
-            pass
-    dirs[:] = []' "$CGROOT" "$1" 2>/dev/null | sort -un
+            continue
+        for pid in pids:
+            if not pid.isdigit():
+                continue
+            try:
+                fd = os.open(os.path.join(procroot, pid), os.O_RDONLY | os.O_DIRECTORY)
+            except OSError:
+                continue                              # gone already
+            try:
+                if os.fstat(fd).st_uid != int(uid):
+                    continue                          # not that user: the mark is theirs to give, for their own
+                if rd(fd, "cgroup").strip().split("\n")[-1].split("::", 1)[-1] != rel:
+                    continue                          # not (or no longer) a process of this marked cgroup
+                cur = rd(fd, "oom_score_adj").strip()
+                if mode == "list":
+                    out.append("%s=%s" % (pid, cur))
+                elif cur != score:
+                    f = os.open("oom_score_adj", os.O_WRONLY, dir_fd=fd)
+                    try: os.write(f, (score + "\n").encode())
+                    finally: os.close(f)
+                    changed += 1
+            except (ProcessLookupError, FileNotFoundError):
+                pass                                  # it exited while we held it: nothing written to anyone
+            except OSError as e:
+                failed += 1
+                sys.stderr.write("io-shield: oom_score_adj for %s: %s\n" % (pid, e))
+            finally:
+                os.close(fd)
+    dirs[:] = []
+print(" ".join(out) if mode == "list" else changed)
+sys.exit(1 if failed else 0)' "$1" "$CGROOT" "$PROCROOT" "$2" "$3"
 }
 
 rc=0
 case "$MODE" in
   status)
-    for i in "${!OOMU[@]}"; do echo "oomprotect uid ${OOMU[$i]}: want ${OOMS[$i]}; marked processes now: $(for p in $(oom_marked "${OOMU[$i]}"); do printf '%s=%s ' "$p" "$(cat "$PROCROOT/$p/oom_score_adj" 2>/dev/null)"; done)"; done
+    for i in "${!OOMU[@]}"; do echo "oomprotect uid ${OOMU[$i]}: want ${OOMS[$i]}; marked processes now: $(oom_scores list "${OOMU[$i]}" "${OOMS[$i]}" 2>/dev/null)"; done
     echo "io.cost.qos: $(tr '\n' ';' < "$QOS" 2>/dev/null)"
     for i in "${!UNITS[@]}"; do echo "unit ${UNITS[$i]}: want ${UNITW[$i]}, IOWeight=$(systemctl show "${UNITS[$i]}" -p IOWeight --value 2>/dev/null)"; done
     for i in "${!DOCK[@]}"; do u=$(docker_unit "${DOCK[$i]}"); echo "docker ${DOCK[$i]}: want ${DOCKW[$i]}, ${u:-not running}${u:+ IOWeight=$(systemctl show "$u" -p IOWeight --value 2>/dev/null)}"; done ;;
@@ -149,15 +193,8 @@ case "$MODE" in
       if [ -n "${u:-}" ]; then setw "$u" "${DOCKW[$i]}" "container ${DOCK[$i]}"; else echo "note: container ${DOCK[$i]} is not there now; the next run sets it"; fi
     done
     for i in "${!OOMU[@]}"; do
-      c=0
-      for p in $(oom_marked "${OOMU[$i]}"); do
-        f="$PROCROOT/$p/oom_score_adj"
-        [ "$(cat "$f" 2>/dev/null)" = "${OOMS[$i]}" ] && continue
-        # a process of ANOTHER uid in the user's marked cgroup is never touched: the mark is that user's to give
-        [ "$(stat -c %u "$PROCROOT/$p" 2>/dev/null)" = "${OOMU[$i]}" ] || continue
-        if printf '%s\n' "${OOMS[$i]}" > "$f" 2>/dev/null; then c=$((c + 1)); else [ -e "$f" ] && { echo "io-shield: could not set oom_score_adj for $p" >&2; rc=1; }; fi
-      done
-      echo "oomprotect uid ${OOMU[$i]}: $c process(es) set to ${OOMS[$i]}"
+      c=$(oom_scores apply "${OOMU[$i]}" "${OOMS[$i]}") || rc=1
+      echo "oomprotect uid ${OOMU[$i]}: ${c:-0} process(es) set to ${OOMS[$i]}"
     done ;;
 esac
 exit "$rc"
