@@ -221,6 +221,12 @@ both "300 $((nowr + 60)) s-a morpheus 0 - -" 300 "a seven-field record with no i
 both "300 $((nowr + 60)) s-a morpheus 0 not-hex ag-1" ERR "an id that is not 32 hex (nor -) is an error for both (#289 r1 (5))"
 both "300 $((nowr + 60)) s-a morpheus 0 0123456789abcdef0123456789abcdef bad/agent" ERR "an agent outside the token alphabet is an error for both"
 both "300 $((nowr + 60)) s-a morpheus 0 0123456789abcdef0123456789abcdef ag-1 extra" ERR "an eight-field record is an error for both"
+both "300 $((nowr + 60)) $(printf 'x%.0s' $(seq 1 129)) morpheus 0 - -" ERR "a 129-char session is an error for both (#289 r2-5: the 128-char token bound)"
+both "300 1234567890123 s-a morpheus 0 - -" ERR "a 13-digit expiry is an error for both (#289 r2-5: the 12-digit epoch bound)"
+rm -rf "$rl"; mkdir -p "$rl"; printf '300 %s s-a morpheus 0 - -\n' "$((nowr + 60))" > "$rl/1-1-1"; echo garbage > "$rl/2-2-2.expired"
+p=$(python3 "$LIB" probe-script gpu1 | DREAMTEAM_RESERVATIONS="$rl" PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^RESV,')
+o=$(DREAMTEAM_RESERVATIONS="$rl" DREAMTEAM_HOST_LOCK="$TMP/rl.lock" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$R" outstanding 2>/dev/null); orc=$?
+[ "$p" = "RESV,ERR" ] && [ "$orc" -ne 0 ] && pass "one validity rule: a malformed tombstone is an error for both (#289 r2-5: the probe validates tombstones too)" || fail "malformed tombstone: probe=[$p] helper rc=$orc"
 rm -rf "$rl"; mkdir -p "$rl"; printf '300 %s s-a morpheus 0 - -\n' "$((nowr + 60))" > "$rl/1-1-1"; chmod 000 "$rl/1-1-1"
 p=$(python3 "$LIB" probe-script gpu1 | DREAMTEAM_RESERVATIONS="$rl" PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^RESV,'); chmod 600 "$rl/1-1-1"
 check "$p" "RESV,ERR" "sampler: an unreadable record is RESV,ERR, never skipped (#289 r1 (4))"

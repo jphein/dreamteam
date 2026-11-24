@@ -63,6 +63,16 @@ MUT=(
   'mkdir-unchecked@scripts/reservation.sh@s/2) mkdir -p "\$DIR" || { echo "reservation: cannot create \$DIR" >\&2; exit 1; } ;; esac; }/2) mkdir -p "$DIR" 2>\/dev\/null ;; esac; }/@tests/test-gates.sh'
   'probe-id-shape-unchecked@scripts/lib/gpu_fleet.py@s/case "\$rid" in -) ;; \*) { \[ "\${#rid}" -eq 32 \] \&\& case "\$rid" in \*\[!0-9a-f\]\*) false ;; \*) true ;; esac; } || { ok=0; break; } ;; esac;/true;/@tests/test-gpu.sh'
   'probe-eight-fields-accepted@scripts/lib/gpu_fleet.py@s/\[ -z "\${extra:-}" \] || { ok=0; break; };/true;/@tests/test-gpu.sh'
+  'replay-add-accepted@scripts/reservation.sh@s/^      seen_has "\$id" \&\& { echo "reservation: id \$id was released before (seen-set)" >\&2; exit 2; }$/      true/@tests/test-gates.sh'
+  'replay-stop-falls-back@scripts/reservation.sh@s/^    \[ "\$id" != - \] \&\& seen_has "\$id" \&\& { echo "reservation: id \$id was released before: a replayed stop is refused" >\&2; exit 2; }$/    true/@tests/test-gates.sh'
+  'transcript-root-from-hook-input@scripts/reservation.sh@s/^      \[ -f "\$SESSIONS\/\$sses" \] \&\& \[ ! -L "\$SESSIONS\/\$sses" \] \&\& read -r root < "\$SESSIONS\/\$sses"$/      root=$(dirname -- "$(dirname -- "$(dirname -- "$tp")")")/@tests/test-gates.sh'
+  'transcript-realpath-skipped@scripts/reservation.sh@s/^if os.path.realpath(tp) != expect or os.path.realpath(os.path.dirname(tp)) != os.path.dirname(expect):$/if False:/@tests/test-gates.sh'
+  'transcript-line-bound-dropped@scripts/reservation.sh@s/^        if len(line) > 65536:          # a line past the bound/        if False:          # a line past the bound/@tests/test-gates.sh'
+  'enumeration-symlink-accepted@scripts/reservation.sh@s/^    \[ -L "\$f" \] \&\& { echo "reservation: cannot stat \$f as a record/    false \&\& { echo "reservation: cannot stat $f as a record/@tests/test-gates.sh'
+  'entropy-tail-only@scripts/mem-gate.sh@s/^RID=\$(set -o pipefail; od -An -tx1 -N16 \/dev\/urandom | tr -d/RID=$(od -An -tx1 -N16 \/dev\/urandom | tr -d/@tests/test-gates.sh'
+  'session-dir-unrecorded@scripts/mem-gate.sh@s/^if \[ -n "\$TPATH" \]; then bash "\$RSV" record-session/if false; then bash "$RSV" record-session/@tests/test-gates.sh'
+  'probe-tombstones-unvalidated@scripts/lib/gpu_fleet.py@s/case "\$f" in \*.tmp) ok=0; break ;; esac; \[ -f "\$f" \]/case "$f" in *.tmp) ok=0; break ;; *.expired) continue ;; esac; [ -f "$f" ]/@tests/test-gpu.sh'
+  'probe-token-bound-missing@scripts/lib/gpu_fleet.py@s/\[ "\${#ses}" -le 128 \] \&\& \[ "\${#typ}" -le 128 \] \&\& \[ "\${#rag}" -le 128 \] || { ok=0; break; };/true;/@tests/test-gpu.sh'
   'token-not-sanitised@scripts/reservation.sh@s/^san() { local s; s=\$(printf .*$/san() { printf "%s" "${1:--}"; }/@tests/test-gates.sh'
 )
 n=0; bad=0

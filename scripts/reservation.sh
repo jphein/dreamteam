@@ -11,16 +11,19 @@
 # rename. Every read and write runs under the HOST LOCK (DREAMTEAM_HOST_LOCK; --locked = the caller already holds
 # it, as the gate does), so no reader can see or delete a half-written file.
 #
-# IDENTITY (#289). The gate mints a random 128-bit id (32 hex from /dev/urandom), writes it here (field 6; the
-# ledger refuses a repeat, so a replayed or forged marker cannot release twice) and prefixes the Agent prompt with
-# "[dreamteam reservation <id>]" through PreToolUse updatedInput, with no permissionDecision: the hooks reference
-# (read 2026-11-21) gives SubagentStart only session_id, agent_id and agent_type (no env, no prompt, no tool_use_id)
-# and SubagentStop agent_id plus agent_transcript_path, so the prompt is the one channel to the spawn and the
-# subagent's transcript the one place the id comes back. The stop hook reads ONLY the session's own subagent
-# transcript: <dir of transcript_path>/<session_id>/subagents/agent-<agent_id>.jsonl, a regular file opened with
-# O_NOFOLLOW, at most 1 MiB, one bounded field ([0-9a-f]{32}); anything else releases by agent_id. `start` matches
-# the class (session + type: equal sizes per class) and binds the file to agent_id (field 7); `stop` releases by id
-# (exact), else by agent_id (exact), else by class.
+# IDENTITY (#289). The gate mints a random 128-bit id (32 hex from /dev/urandom, its pipeline's own status checked),
+# writes it here (field 6) and prefixes the Agent prompt with "[dreamteam reservation <id>]" through PreToolUse
+# updatedInput, with no permissionDecision: the hooks reference (read 2026-11-21) gives SubagentStart only session_id,
+# agent_id and agent_type (no env, no prompt, no tool_use_id) and SubagentStop agent_id plus agent_transcript_path, so
+# the prompt is the one channel to the spawn and the subagent's transcript the one place the id comes back. The
+# ledger refuses an id it has seen: on a live record, on a tombstone, or in the SEEN-SET (<dir>/../released-ids, one
+# "<id> <epoch>" per released id, kept 7 days), on add AND on stop --id, so a replayed or forged marker cannot release
+# twice and never falls back to the class. The gate also records the session's transcript directory at spawn
+# (<dir>/../sessions/<session_id>, realpath); the stop hook reads ONLY <that dir>/<session_id>/subagents/agent-
+# <agent_id>.jsonl, realpath'ed on both sides with the prefix required (no symlinked parent), opened with O_NOFOLLOW,
+# a regular file, at most 64 lines of at most 64 KiB, one bounded field ([0-9a-f]{32}) from one line; anything else
+# releases by agent_id. `start` matches the class (session + type: equal sizes per class) and binds the file to
+# agent_id (field 7); `stop` releases by id (exact), else by agent_id (exact), else by class.
 #
 # LIFECYCLE. Unstarted: counts until it expires (90 s: the spawn never happened); then it becomes a TOMBSTONE
 # (<file>.expired) that no scan counts and only `start` consumes, deleting it only after its late-start line appended
@@ -28,15 +31,16 @@
 # any scan or prune, so a start that is more than a day late is still a late start. Started: counts until the
 # lane's SubagentStop releases it (`stop`), NEVER by time: SubagentStart is not proof the RSS is there yet.
 #
-# READS AND WRITES. Every verb first runs ONE validation pass over every entry, records and tombstones alike
-# (validate_all: a regular readable file, exactly seven fields, bounded decimals with no leading zero, an id that is
-# - or 32 hex, an agent in the token alphabet, arithmetic in base 10); any entry that fails, including one that
-# cannot be stat'ed or a stray .tmp, is exit 1 and nothing else happens. `scan` is READ-ONLY and reports each record
-# with its state, counting or expired. `prune` is the ONE housekeeping writer: it runs only after validation and
-# tombstones expired unstarted records and removes day-old tombstones. add, start and stop write their own record
-# only, and every write (mkdir, mv, rm, append) is checked: nothing fails open. The probe reads with the same rules
-# and never writes. A reservations path that does not exist (ENOENT) is "0 0" / RESV,OK,0; one that cannot be
-# reached for any other reason (EACCES on a parent, EIO, a file in its place) is exit 1 / RESV,ERR.
+# READS AND WRITES. Every verb first ENUMERATES the directory into an array with the enumeration's own status (an
+# entry that cannot be stat'ed, or a stray .tmp, fails the verb with exit 1 before anything else), then runs ONE
+# validation pass over every entry, records and tombstones alike (parse: a regular readable file, exactly seven
+# fields, bounded decimals with no leading zero and at most 12 digits, tokens of the token alphabet and at most 128,
+# an id that is - or 32 hex, arithmetic in base 10). `scan` is READ-ONLY and reports each record with its state,
+# counting or expired. `prune` is the ONE housekeeping writer: after validation it tombstones expired unstarted
+# records and removes day-old tombstones. add, start and stop write their own record only, and every write (mkdir,
+# mv, rm, append) is checked: nothing fails open. The probe reads with the same rules, tombstones included, and
+# never writes. A reservations path that does not exist (ENOENT) is "0 0" / RESV,OK,0; one that cannot be reached
+# for any other reason (EACCES on a parent, EIO, a file in its place) is exit 1 / RESV,ERR.
 # Seams: DREAMTEAM_RESERVATIONS (default ~/.local/state/dreamteam/reservations, local disk), DREAMTEAM_HOST_LOCK,
 # DREAMTEAM_HOST_LOCK_WAIT.
 #
@@ -46,13 +50,14 @@
 #   reservation.sh start <session> <type> [--agent AID]   tombstones first: a late start is logged, deleted, exit 5
 #                                              (log append failed: kept, exit 1); else mark one unstarted reservation
 #                                              of the class started and bound to AID; exit 0 · 3 none · 4 lock
-#   reservation.sh stop <session> <type> [--id ID | --agent AID]   release by id, else by agent, else one started of
-#                                              the class; exit 0 · 3 none · 4 lock · 1 error
+#   reservation.sh stop <session> <type> [--id ID | --agent AID]   release by id (a seen id: exit 2), else by agent,
+#                                              else one started of the class; exit 0 · 3 none · 4 lock · 1 error
 #   reservation.sh start-hook | stop-hook      SubagentStart / SubagentStop from stdin JSON; always exit 0, rc logged
 set -u
 DIR="${DREAMTEAM_RESERVATIONS:-$HOME/.local/state/dreamteam/reservations}"
 LOCK="${DREAMTEAM_HOST_LOCK:-$HOME/.local/state/dreamteam/host.lock}"; WAIT="${DREAMTEAM_HOST_LOCK_WAIT:-5}"
-MAX_MB=1000000; TOMB_TTL=86400
+MAX_MB=1000000; TOMB_TTL=86400; SEEN_TTL=604800
+SEEN="$DIR/../released-ids"; SESSIONS="$DIR/../sessions"
 now=$(date +%s)
 LOCKED=0; OPT_ID=""; OPT_AGENT=""; args=()
 while [ $# -gt 0 ]; do
@@ -73,7 +78,7 @@ valid_tok() { [ -n "${1:-}" ] && [ "${#1}" -le 128 ] && case "$1" in *[!A-Za-z0-
 san() { local s; s=$(printf '%s' "${1:-}" | tr -c 'A-Za-z0-9._:-' '_' | cut -c1-128); printf '%s' "${s:--}"; }
 take_lock() {   # the host lock, unless the caller holds it (--locked); exit 4 = not taken, nothing changed
   [ "$LOCKED" = 1 ] && return 0
-  mkdir -p "$(dirname "$LOCK")" 2>/dev/null
+  mkdir -p "$(dirname "$LOCK")" || { echo "reservation: cannot create the lock directory" >&2; exit 4; }
   exec 9>>"$LOCK" || { echo "reservation: cannot open the host lock $LOCK" >&2; exit 4; }
   flock -w "$WAIT" 9 || { echo "reservation: host lock $LOCK not taken within ${WAIT}s: nothing changed" >&2; exit 4; }
 }
@@ -86,14 +91,19 @@ dir_ok() {      # 0 = readable directory · 2 = does not exist (ENOENT) · 1 = c
   case "$st" in *"No such file or directory"*) return 2 ;; esac
   echo "reservation: cannot reach $DIR: $st" >&2; return 1
 }
-# entries: every entry of the directory, one per line, or exit 1 when any cannot be stat'ed (an unmatched glob is
-# the empty list; nothing a glob returned is ever skipped)
-entries() {
+# enumerate: ENT[] = every entry of the directory, with the enumeration's own status: an entry that cannot be
+# stat'ed (a dangling link, EACCES, EIO) or a stray .tmp is exit 1 here, before any parse. Nothing a glob returned
+# is ever skipped; an unmatched glob is the empty array.
+ENT=()
+enumerate() {
   local f
+  ENT=()
   for f in "$DIR"/*; do
     [ "$f" = "$DIR/*" ] && return 0
-    stat -c %n -- "$f" >/dev/null 2>&1 || { echo "reservation: cannot stat $f" >&2; exit 1; }
-    printf '%s\n' "$f"
+    [ -L "$f" ] && { echo "reservation: cannot stat $f as a record: a symlink is never one; the enumeration failed, nothing counted" >&2; exit 1; }
+    stat -c %n -- "$f" >/dev/null 2>&1 || { echo "reservation: cannot stat $f: the enumeration failed, nothing counted" >&2; exit 1; }
+    case "$f" in *.tmp) echo "reservation: stray $f: a write that did not finish" >&2; exit 1 ;; esac
+    ENT+=("$f")
   done
 }
 # parse <file>: sets fmb fexp fses ftyp fst fid fag from a regular, readable, well-formed record (live or tombstone);
@@ -108,44 +118,38 @@ parse() {
     || { echo "reservation: malformed $1" >&2; return 1; }
 }
 expired() { [ "$fst" = 0 ] && [ "$((10#$fexp))" -le "$now" ]; }
-# validate_all: ONE pass over every entry, records and tombstones alike, before any scan or prune; exit 1 on the
-# first failure, with nothing touched. A stray .tmp (a writer that died under the lock) is an error too.
-validate_all() {
-  local f fmb fexp fses ftyp fst fid fag
-  while IFS= read -r f; do
-    case "$f" in *.tmp) echo "reservation: stray $f: a write that did not finish" >&2; exit 1 ;; esac
-    parse "$f" || exit 1
-  done < <(entries)
-}
+# validate_all: enumerate, then ONE pass over every entry, records and tombstones alike; exit 1 on the first failure
+validate_all() { local f fmb fexp fses ftyp fst fid fag; enumerate; for f in "${ENT[@]}"; do parse "$f" || exit 1; done; }
 # scan <callback>: READ-ONLY, after validate_all. Each live record is reported as
 # "<callback> <file> <mb> <session> <type> <started> <counting|expired> <id> <agent>".
 scan() {
   local f fmb fexp fses ftyp fst fid fag state
-  while IFS= read -r f; do
+  for f in "${ENT[@]}"; do
     case "$f" in *.expired) continue ;; esac
     parse "$f" || exit 1
     if expired; then state=expired; else state=counting; fi
     "$1" "$f" "$fmb" "$fses" "$ftyp" "$fst" "$state" "$fid" "$fag" || exit 1
-  done < <(entries)
+  done
 }
 # prune: the ONE housekeeping writer, after validate_all: expired unstarted records become tombstones, day-old
-# tombstones go; every write checked
+# tombstones go; every write checked; the array is enumerated again afterwards
 prune() {
-  local f fmb fexp fses ftyp fst fid fag age
-  while IFS= read -r f; do
+  local f fmb fexp fses ftyp fst fid fag age mt
+  for f in "${ENT[@]}"; do
     case "$f" in
-      *.expired) age=$(( now - $(stat -c %Y -- "$f" 2>/dev/null || { echo "reservation: cannot stat $f" >&2; exit 1; }) ))
+      *.expired) mt=$(stat -c %Y -- "$f") || { echo "reservation: cannot stat $f" >&2; exit 1; }; age=$(( now - mt ))
                  [ "$age" -gt "$TOMB_TTL" ] && { rm -f -- "$f" || exit 1; }; continue ;;
     esac
     parse "$f" || exit 1
     if expired; then mv -f -- "$f" "$f.expired" || exit 1; fi
-  done < <(entries)
+  done
+  enumerate
 }
-# late_start <session> <type> <agent>: the tombstones of the token (validated by validate_all already); a match is
-# logged and deleted only after the append succeeded (exit 5), an unloggable one kept (exit 1); return 0 = none
+# late_start <session> <type> <agent>: the tombstones of the token (validated already); a match is logged and
+# deleted only after the append succeeded (exit 5), an unloggable one kept (exit 1); return 0 = none
 late_start() {
   local f fmb fexp fses ftyp fst fid fag
-  while IFS= read -r f; do
+  for f in "${ENT[@]}"; do
     case "$f" in *.expired) ;; *) continue ;; esac
     parse "$f" || exit 1
     if [ "$fses" = "$1" ] && [ "$ftyp" = "$2" ]; then
@@ -154,11 +158,22 @@ late_start() {
       fi
       echo "reservation: late start of $1 $2 could not be logged: tombstone kept" >&2; exit 1
     fi
-  done < <(entries)
+  done
   return 0
 }
+# the seen-set of released ids: seen_has <id> (0 = seen within SEEN_TTL), seen_add <id> (atomic rewrite, pruned)
+seen_has() {
+  local i t; [ -f "$SEEN" ] || return 1
+  while read -r i t; do valid "${t:-}" && [ "$i" = "$1" ] && [ $(( now - 10#$t )) -le "$SEEN_TTL" ] && return 0; done < "$SEEN"
+  return 1
+}
+seen_add() {
+  local i t
+  { if [ -f "$SEEN" ]; then while read -r i t; do valid "${t:-}" && [ $(( now - 10#$t )) -le "$SEEN_TTL" ] && printf '%s %s\n' "$i" "$t"; done < "$SEEN"; fi
+    printf '%s %s\n' "$1" "$now"; } > "$SEEN.tmp" && mv -f -- "$SEEN.tmp" "$SEEN" || { echo "reservation: cannot record the released id" >&2; exit 1; }
+}
 write_atomic() { printf '%s\n' "$2" > "$1.tmp" && mv -f -- "$1.tmp" "$1"; }
-# open_dir <verb>: the directory for a verb that must have one: dir_ok 1 → exit 1; ENOENT → create it (checked)
+# open_dir: the directory for a verb that must have one: dir_ok 1 → exit 1; ENOENT → create it (checked)
 open_dir() { dir_ok; case $? in 1) exit 1 ;; 2) mkdir -p "$DIR" || { echo "reservation: cannot create $DIR" >&2; exit 1; } ;; esac; }
 case "${1:-}" in
   add)
@@ -166,10 +181,9 @@ case "${1:-}" in
     valid "$mb" && valid "$ttl" && [ "$((10#$mb))" -le "$MAX_MB" ] || { echo "reservation: mb and ttl are bounded decimals" >&2; exit 2; }
     valid_id "$id" || { echo "reservation: an id is 32 hex (or absent)" >&2; exit 2; }
     take_lock; open_dir; validate_all
-    if [ "$id" != - ]; then   # a repeat is refused: a replayed marker cannot release twice
-      seen=0; dup() { [ "$7" = "$id" ] && seen=1; return 0; }; scan dup
-      while IFS= read -r f; do case "$f" in *.expired) parse "$f" || exit 1; [ "$fid" = "$id" ] && seen=1 ;; esac; done < <(entries)
-      [ "$seen" = 0 ] || { echo "reservation: id $id is already on the ledger" >&2; exit 2; }
+    if [ "$id" != - ]; then   # a repeat is refused: on a record, on a tombstone, or released within 7 days
+      seen_has "$id" && { echo "reservation: id $id was released before (seen-set)" >&2; exit 2; }
+      for f in "${ENT[@]}"; do parse "$f" || exit 1; [ "$fid" = "$id" ] && { echo "reservation: id $id is already on the ledger" >&2; exit 2; }; done
     fi
     f="$DIR/$$-$now-$RANDOM"; write_atomic "$f" "$((10#$mb)) $((now + 10#$ttl)) $ses $typ 0 $id -" || exit 2; echo "$f" ;;
   outstanding|live)
@@ -195,6 +209,7 @@ case "${1:-}" in
   stop)
     ses=$(san "${2:?session}"); typ=$(san "${3:?type}"); id="${OPT_ID:--}"; ag=$(san "$OPT_AGENT"); take_lock
     valid_id "$id" || { echo "reservation: an id is 32 hex (or absent)" >&2; exit 2; }
+    [ "$id" != - ] && seen_has "$id" && { echo "reservation: id $id was released before: a replayed stop is refused" >&2; exit 2; }
     dir_ok; case $? in 1) exit 1 ;; 2) echo "reservation: no reservations directory" >&2; exit 3 ;; esac
     validate_all
     byid=""; byag=""; byclass=""
@@ -205,49 +220,77 @@ case "${1:-}" in
       return 0
     }
     scan pick
-    for f in "$byid" "$byag" "$byclass"; do [ -n "$f" ] && { rm -f -- "$f" || { echo "reservation: cannot release $f" >&2; exit 1; }; echo "$f"; exit 0; }; done
+    for f in "$byid" "$byag" "$byclass"; do
+      [ -n "$f" ] || continue
+      parse "$f" || exit 1; rid="$fid"
+      rm -f -- "$f" || { echo "reservation: cannot release $f" >&2; exit 1; }
+      [ "$rid" != - ] && seen_add "$rid"
+      echo "$f"; exit 0
+    done
     echo "reservation: no started reservation for $ses $typ (id $id, agent $ag)" >&2; exit 3 ;;
+  record-session)   # the gate, under the lock: the session's transcript directory as recorded at spawn (realpath)
+    ses=$(san "${2:?session}"); d="${3:-}"
+    [ -n "$d" ] || { echo "reservation: no transcript directory to record" >&2; exit 2; }
+    rp=$(realpath -e -- "$d") || { echo "reservation: the transcript directory does not resolve" >&2; exit 2; }
+    mkdir -p "$SESSIONS" || { echo "reservation: cannot create $SESSIONS" >&2; exit 1; }
+    write_atomic "$SESSIONS/$ses" "$rp" || { echo "reservation: cannot record the session directory" >&2; exit 1; }; exit 0 ;;
   start-hook|stop-hook)
     verb="${1%-hook}"; j=$(cat 2>/dev/null)
     ses=$(printf '%s' "$j" | jq -r '.session_id // empty' 2>/dev/null); typ=$(printf '%s' "$j" | jq -r '.agent_type // empty' 2>/dev/null)
     aid=$(printf '%s' "$j" | jq -r '.agent_id // empty' 2>/dev/null)
-    mkdir -p "$DIR" 2>/dev/null
-    if [ -z "$ses" ] || [ -z "$typ" ]; then printf '%s %s-hook: no session_id or agent_type in the hook input: nothing marked\n' "$(date -Is)" "$verb" >> "$DIR/../start-hook.log"; exit 0; fi
+    log="$DIR/../start-hook.log"
+    mkdir -p "$DIR" || { echo "reservation: cannot create $DIR" >&2; exit 0; }
+    if [ -z "$ses" ] || [ -z "$typ" ]; then printf '%s %s-hook: no session_id or agent_type in the hook input: nothing marked\n' "$(date -Is)" "$verb" >> "$log" || echo "reservation: cannot append to $log" >&2; exit 0; fi
     extra=()
     if [ "$verb" = stop ]; then
-      # the id comes back ONLY from the session's own subagent transcript, at its one expected path, a regular file
-      # opened without following symlinks, at most 1 MiB, one bounded field; anything else: release by agent_id
+      # the id comes back ONLY from the session's own subagent transcript under the directory the GATE recorded at
+      # spawn (never from the hook input), realpath'ed on both sides with the prefix required, opened without
+      # following symlinks, a regular file, at most 64 lines of at most 64 KiB, one bounded field from one line
       tp=$(printf '%s' "$j" | jq -r '.agent_transcript_path // empty' 2>/dev/null); tp="${tp/#\~/$HOME}"
-      ptp=$(printf '%s' "$j" | jq -r '.transcript_path // empty' 2>/dev/null); ptp="${ptp/#\~/$HOME}"
-      rid=""
-      if [ -n "$tp" ] && [ -n "$ptp" ] && [ -n "$aid" ] && valid_tok "$ses" && valid_tok "$aid" \
-         && [ "$tp" = "$(dirname -- "$ptp")/$ses/subagents/agent-$aid.jsonl" ]; then
-        rid=$(python3 - "$tp" <<'PY' 2>/dev/null
+      rid=""; sses=$(san "$ses"); root=""
+      [ -f "$SESSIONS/$sses" ] && [ ! -L "$SESSIONS/$sses" ] && read -r root < "$SESSIONS/$sses"
+      if [ -n "$tp" ] && [ -n "$root" ] && [ -n "$aid" ] && valid_tok "$sses" && valid_tok "$aid"; then
+        rid=$(python3 -I - "$tp" "$root" "$sses" "$aid" <<'PY' 2>/dev/null
 import os, re, stat, sys
-p = sys.argv[1]
+tp, root, ses, aid = sys.argv[1:5]
+root = os.path.realpath(root)
+expect = os.path.join(root, ses, "subagents", "agent-" + aid + ".jsonl")
+if os.path.realpath(tp) != expect or os.path.realpath(os.path.dirname(tp)) != os.path.dirname(expect):
+    sys.exit(1)
 try:
-    fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_NOCTTY)
+    fd = os.open(tp, os.O_RDONLY | os.O_NOFOLLOW | os.O_NOCTTY)
 except OSError:
     sys.exit(1)
 try:
-    st = os.fstat(fd)
-    if not stat.S_ISREG(st.st_mode):
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
         sys.exit(1)
-    data = os.read(fd, 1 << 20)
-finally:
-    os.close(fd)
-m = re.search(rb"\[dreamteam reservation ([0-9a-f]{32})\]", data)
-if not m:
-    sys.exit(1)
-sys.stdout.write(m.group(1).decode("ascii"))
+    f = os.fdopen(fd, "rb")
+except OSError:
+    os.close(fd); sys.exit(1)
+field = re.compile(rb"\[dreamteam reservation ([0-9a-f]{32})\]")
+with f:
+    for _ in range(64):
+        line = f.readline(65536 + 1)
+        if not line:
+            break
+        if len(line) > 65536:          # a line past the bound is skipped WHOLE: its remainder is never searched
+            while not line.endswith(b"\n"):
+                line = f.readline(65536 + 1)
+                if not line:
+                    break
+            continue
+        m = field.search(line)
+        if m:
+            sys.stdout.write(m.group(1).decode("ascii")); sys.exit(0)
+sys.exit(1)
 PY
 ) || rid=""
       fi
       [ -n "$rid" ] && extra=(--id "$rid")
     fi
     [ -n "$aid" ] && extra+=(--agent "$aid")
-    bash "$0" "$verb" "$ses" "$typ" "${extra[@]}" >/dev/null 2>>"$DIR/../start-hook.log"; rc=$?
-    [ "$rc" -eq 0 ] || printf '%s %s-hook rc %s for %s %s agent %s\n' "$(date -Is)" "$verb" "$rc" "$ses" "$typ" "${aid:--}" >> "$DIR/../start-hook.log"
+    bash "$0" "$verb" "$ses" "$typ" "${extra[@]}" >/dev/null 2>>"$log"; rc=$?
+    [ "$rc" -eq 0 ] || printf '%s %s-hook rc %s for %s %s agent %s\n' "$(date -Is)" "$verb" "$rc" "$ses" "$typ" "${aid:--}" >> "$log" || echo "reservation: cannot append to $log" >&2
     exit 0 ;;
-  *) echo "usage: reservation.sh add <mb> [ttl-s] [session] [type] [--id ID] | outstanding | live | start <session> <type> [--agent A] | stop <session> <type> [--id ID|--agent A] | start-hook | stop-hook  [--locked]" >&2; exit 2 ;;
+  *) echo "usage: reservation.sh add <mb> [ttl-s] [session] [type] [--id ID] | outstanding | live | start <session> <type> [--agent A] | stop <session> <type> [--id ID|--agent A] | record-session <session> <dir> | start-hook | stop-hook  [--locked]" >&2; exit 2 ;;
 esac

@@ -249,7 +249,8 @@ DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HLOCK" DREAMTEAM_HOST_LOCK_
 #   B2 start reads its token's tombstones BEFORE any scan or prune, so a tombstone prune would remove (older than a
 #      day) is still a late start, not "no reservation".
 #   B3 a reservations path that cannot be reached for a reason other than ENOENT (EACCES on a parent) is an error.
-RESV="$TMP/resvB"; rm -rf "$RESV"; HL="$TMP/hostB.lock"
+fresh_resv() { rm -rf "$RESV" "$(dirname "$RESV")/released-ids" "$(dirname "$RESV")/sessions"; }   # a seen-set outlives a record: every case starts clean
+RESV="$TMP/resvB"; HL="$TMP/hostB.lock"; fresh_resv
 RB() { DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HL" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$RS" "$@"; }
 FAKE_AVAIL=60000 FAKE_SWAP_USED=0 FAKE_PGREP_COUNT=1 DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HL" \
   run_gate "$MEM_GATE" '{"session_id":"s-a","tool_name":"Agent","tool_input":{"prompt":"do the thing","subagent_type":"morpheus"}}'
@@ -260,14 +261,14 @@ if [ "$GRC" -eq 0 ] && [ -n "$rid" ] && [ "$rid" != - ] && printf '%s' "$gout" |
 else
   fail "B1 mint: rc=$GRC id=[$rid] stdout=[$(printf '%s' "$gout" | head -c 200)]"
 fi
-rm -rf "$RESV"; a=$(RB add 300 90 s-a morpheus --id aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa); b=$(RB add 300 90 s-a morpheus --id bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)
+fresh_resv; a=$(RB add 300 90 s-a morpheus --id aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa); b=$(RB add 300 90 s-a morpheus --id bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)
 RB start s-a morpheus --agent ag-1 >/dev/null 2>&1; RB start s-a morpheus --agent ag-2 >/dev/null 2>&1
 r=$(RB stop s-a morpheus --id bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb >/dev/null 2>&1; echo $?)
 [ "$r" -eq 0 ] && [ ! -e "$b" ] && [ -e "$a" ] && pass "B1: stop --id releases exactly that reservation, the other of the class stays" || fail "stop --id: rc=$r A=$([ -e "$a" ] && echo y || echo n) B=$([ -e "$b" ] && echo y || echo n)"
 r=$(RB stop s-a morpheus --agent ag-1 >/dev/null 2>&1; echo $?)
 [ "$r" -eq 0 ] && [ ! -e "$a" ] && pass "B1: stop --agent releases the reservation start bound to that agent_id" || fail "stop --agent: rc=$r A=$([ -e "$a" ] && echo y || echo n)"
 # (the transcript read itself is pinned in 2i: the session's own path is read, a symlink and an outside path are not)
-rm -rf "$RESV"; mkdir -p "$RESV"; printf '300 %s s-a morpheus 0 - -\n' "$(( $(date +%s) - 200000 ))" > "$RESV/5-5-5.expired"; touch -d '2 days ago' "$RESV/5-5-5.expired"
+fresh_resv; mkdir -p "$RESV"; printf '300 %s s-a morpheus 0 - -\n' "$(( $(date +%s) - 200000 ))" > "$RESV/5-5-5.expired"; touch -d '2 days ago' "$RESV/5-5-5.expired"
 r=$(RB start s-a morpheus >/dev/null 2>&1; echo $?)
 [ "$r" -eq 5 ] && grep -q "s-a morpheus" "$RESV/../late-starts.log" 2>/dev/null && pass "B2: a tombstone prune would remove (older than a day) is read by start first: a late start (exit 5), logged" || fail "tombstone before scan: rc=$r log=[$(tail -1 "$RESV/../late-starts.log" 2>/dev/null)]"
 mkdir -p "$TMP/noaccessB/resv"; printf '300 %s s-a morpheus 0 - -\n' "$(( $(date +%s) + 60 ))" > "$TMP/noaccessB/resv/1-1-1"; chmod 000 "$TMP/noaccessB"
@@ -281,12 +282,12 @@ out=$(DREAMTEAM_RESERVATIONS="$TMP/noaccessB/resv" DREAMTEAM_HOST_LOCK="$HL" DRE
 #   3  one validation pass over every record and tombstone before every scan or prune, in every verb
 #   4  nothing fails open: an unreadable record, a dir that cannot be made, a dir_ok error in stop, a failed rm
 #   5  parse and the probe validate the same seven fields (the shared loop in test-gpu.sh feeds both id/agent shapes)
-rm -rf "$RESV"
+fresh_resv
 FAKE_AVAIL=60000 FAKE_SWAP_USED=0 FAKE_PGREP_COUNT=1 DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HL" \
   run_gate "$MEM_GATE" '{"session_id":"s-a","tool_name":"Agent","tool_input":{"prompt":"x","subagent_type":"morpheus"}}'
 rid=$(awk '{print $6}' "$RESV"/* 2>/dev/null | head -1)
 case "$rid" in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) pass "r1 (1): the gate mints a 128-bit random id (32 hex)" ;; *) fail "r1 (1): id=[$rid]" ;; esac
-rm -rf "$RESV"; RB add 300 90 s-a morpheus --id 0123456789abcdef0123456789abcdef >/dev/null
+fresh_resv; RB add 300 90 s-a morpheus --id 0123456789abcdef0123456789abcdef >/dev/null
 r=$(RB add 300 90 s-a morpheus --id 0123456789abcdef0123456789abcdef >/dev/null 2>&1; echo $?)
 [ "$r" -ne 0 ] && [ "$(ls "$RESV" | wc -l)" -eq 1 ] && pass "r1 (1): the ledger refuses a repeated id (exit $r), one file" || fail "repeat id: rc=$r files=$(ls "$RESV" | wc -l)"
 r=$(RB add 300 90 s-a morpheus --id short >/dev/null 2>&1; echo $?)
@@ -295,42 +296,113 @@ r=$(RB add 300 90 s-a morpheus --id short >/dev/null 2>&1; echo $?)
 sdir="$TMP/sess"; mkdir -p "$sdir/s-a/subagents"; tr_ok="$sdir/s-a/subagents/agent-ag-9.jsonl"
 printf '{"type":"user","message":{"content":"[dreamteam reservation 0123456789abcdef0123456789abcdef]\\nx"}}\n' > "$tr_ok"
 hook_in() { printf '{"hook_event_name":"SubagentStop","session_id":"s-a","transcript_path":"%s/s-a.jsonl","agent_id":"ag-9","agent_type":"morpheus","agent_transcript_path":"%s"}' "$sdir" "$1"; }
-rm -rf "$RESV"; a=$(RB add 300 90 s-a morpheus --id 0123456789abcdef0123456789abcdef); b=$(RB add 300 90 s-a morpheus --id fedcba9876543210fedcba9876543210)
+fresh_resv; a=$(RB add 300 90 s-a morpheus --id 0123456789abcdef0123456789abcdef); b=$(RB add 300 90 s-a morpheus --id fedcba9876543210fedcba9876543210)
 RB start s-a morpheus --agent ag-9 >/dev/null 2>&1   # binds the OLDEST unstarted (a) to ag-9
 hook_in "$tr_ok" | RB stop-hook >/dev/null 2>&1
 [ ! -e "$a" ] && [ -e "$b" ] && pass "r1 (2): the session's own subagent transcript is read and its id releases exactly that file" || fail "own transcript: a=$([ -e "$a" ] && echo y || echo n) b=$([ -e "$b" ] && echo y || echo n)"
-rm -rf "$RESV"; a=$(RB add 300 90 s-a morpheus --id 0123456789abcdef0123456789abcdef); b=$(RB add 300 90 s-a morpheus --id fedcba9876543210fedcba9876543210)
+fresh_resv; a=$(RB add 300 90 s-a morpheus --id 0123456789abcdef0123456789abcdef); b=$(RB add 300 90 s-a morpheus --id fedcba9876543210fedcba9876543210)
 RB start s-a morpheus --agent ag-9 >/dev/null 2>&1; RB start s-a morpheus --agent ag-8 >/dev/null 2>&1   # a→ag-9, b→ag-8
 ln -sf "$tr_ok" "$sdir/s-a/subagents/agent-ag-8.jsonl"
 printf '{"hook_event_name":"SubagentStop","session_id":"s-a","transcript_path":"%s/s-a.jsonl","agent_id":"ag-8","agent_type":"morpheus","agent_transcript_path":"%s/s-a/subagents/agent-ag-8.jsonl"}' "$sdir" "$sdir" | RB stop-hook >/dev/null 2>&1
 [ -e "$a" ] && [ ! -e "$b" ] && pass "r1 (2): a symlinked transcript is not read: the release falls back to agent_id (b, bound to ag-8), a stays" || fail "symlink transcript: a=$([ -e "$a" ] && echo y || echo n) b=$([ -e "$b" ] && echo y || echo n)"
 rm -f "$sdir/s-a/subagents/agent-ag-8.jsonl"
-rm -rf "$RESV"; a=$(RB add 300 90 s-a morpheus --id 0123456789abcdef0123456789abcdef); b=$(RB add 300 90 s-a morpheus --id fedcba9876543210fedcba9876543210)
+fresh_resv; a=$(RB add 300 90 s-a morpheus --id 0123456789abcdef0123456789abcdef); b=$(RB add 300 90 s-a morpheus --id fedcba9876543210fedcba9876543210)
 RB start s-a morpheus --agent ag-9 >/dev/null 2>&1; RB start s-a morpheus --agent ag-8 >/dev/null 2>&1
 cp "$tr_ok" "$TMP/elsewhere.jsonl"
 printf '{"hook_event_name":"SubagentStop","session_id":"s-a","transcript_path":"%s/s-a.jsonl","agent_id":"ag-8","agent_type":"morpheus","agent_transcript_path":"%s/elsewhere.jsonl"}' "$sdir" "$TMP" | RB stop-hook >/dev/null 2>&1
 [ -e "$a" ] && [ ! -e "$b" ] && pass "r1 (2): a transcript path outside the session's subagents dir is not read: release by agent_id" || fail "outside transcript: a=$([ -e "$a" ] && echo y || echo n) b=$([ -e "$b" ] && echo y || echo n)"
 printf '{"type":"user","message":{"content":"[dreamteam reservation 0123456789abcdef0123456789abcdefZZZZ]\\nx"}}\n' > "$tr_ok"
-rm -rf "$RESV"; a=$(RB add 300 90 s-a morpheus --id 0123456789abcdef0123456789abcdef); RB start s-a morpheus --agent ag-9 >/dev/null 2>&1
+fresh_resv; a=$(RB add 300 90 s-a morpheus --id 0123456789abcdef0123456789abcdef); RB start s-a morpheus --agent ag-9 >/dev/null 2>&1
 hook_in "$tr_ok" | RB stop-hook >/dev/null 2>&1
 [ ! -e "$a" ] && pass "r1 (2): a marker whose id is not exactly 32 hex is not an id: release by agent_id (a, bound to ag-9)" || fail "bad marker: a still there"
 # (3) validation before every scan or prune, in every verb
-rm -rf "$RESV"; mkdir -p "$RESV"; echo garbage > "$RESV/1-1-1.expired"; printf '300 %s s-a morpheus 0 - -\n' "$(( $(date +%s) + 60 ))" > "$RESV/1-1-2"
+fresh_resv; mkdir -p "$RESV"; echo garbage > "$RESV/1-1-1.expired"; printf '300 %s s-a morpheus 0 - -\n' "$(( $(date +%s) + 60 ))" > "$RESV/1-1-2"
 r=$(RB live >/dev/null 2>&1; echo $?); [ "$r" -eq 1 ] && pass "r1 (3): a malformed tombstone is an error for live (exit 1): one validation pass before any scan" || fail "live with a malformed tombstone: rc=$r"
 r=$(RB stop s-a morpheus >/dev/null 2>&1; echo $?); [ "$r" -eq 1 ] && pass "r1 (3): a malformed tombstone is an error for stop too" || fail "stop with a malformed tombstone: rc=$r"
 # (4) fail closed everywhere
 ro="$TMP/ro"; mkdir -p "$ro"; chmod 555 "$ro"
 r=$(DREAMTEAM_RESERVATIONS="$ro/resv" DREAMTEAM_HOST_LOCK="$HL" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$RS" start s-a morpheus >/dev/null 2>&1; echo $?)
 [ "$r" -eq 1 ] && pass "r1 (4): a reservations dir that cannot be created is an error for start (exit 1), not silence" || fail "mkdir fails: rc=$r"
-chmod 755 "$ro"; rm -rf "$RESV"; mkdir -p "$RESV"; chmod 000 "$RESV"
+chmod 755 "$ro"; fresh_resv; mkdir -p "$RESV"; chmod 000 "$RESV"
 r=$(RB stop s-a morpheus >/dev/null 2>&1; echo $?); chmod 700 "$RESV"
 [ "$r" -eq 1 ] && pass "r1 (4): a dir_ok error is an error for stop (exit 1), not 'no started reservation'" || fail "stop on an unreadable dir: rc=$r"
-rm -rf "$RESV"; a=$(RB add 300 90 s-a morpheus --id 0123456789abcdef0123456789abcdef); RB start s-a morpheus --agent ag-9 >/dev/null 2>&1; chmod 555 "$RESV"
+fresh_resv; a=$(RB add 300 90 s-a morpheus --id 0123456789abcdef0123456789abcdef); RB start s-a morpheus --agent ag-9 >/dev/null 2>&1; chmod 555 "$RESV"
 r=$(RB stop s-a morpheus --agent ag-9 >/dev/null 2>&1; echo $?); chmod 755 "$RESV"
 [ "$r" -eq 1 ] && [ -e "$a" ] && pass "r1 (4): a release whose rm fails is an error (exit 1), the file still there, never a silent exit 0" || fail "rm fails: rc=$r file=$([ -e "$a" ] && echo y || echo n)"
-rm -rf "$RESV"; mkdir -p "$RESV"; printf '300 %s s-a morpheus 0 - -\n' "$(( $(date +%s) + 60 ))" > "$RESV/2-2-2"; chmod 000 "$RESV/2-2-2"
+fresh_resv; mkdir -p "$RESV"; printf '300 %s s-a morpheus 0 - -\n' "$(( $(date +%s) + 60 ))" > "$RESV/2-2-2"; chmod 000 "$RESV/2-2-2"
 r=$(RB live >/dev/null 2>&1; echo $?); chmod 600 "$RESV/2-2-2"
 [ "$r" -eq 1 ] && pass "r1 (4): an unreadable record is an error for live (exit 1), never skipped" || fail "unreadable record: rc=$r"
+
+# 2j) #289 round 2 (Sen 2026-11-24 09:52, comment 7139819797), one red case per residual, named against its guard:
+#   r2-1 replay: a released id stays in a seen-set (<dir>/../released-ids, 7 days); add refuses it and stop --id
+#        refuses it (never falls back to the class)                        guard: seen_has / seen_add in reservation.sh
+#   r2-2 transcript: the root is the session dir the GATE recorded at spawn (<dir>/../sessions/<session_id>), both
+#        sides realpath'ed, prefix required; one bounded field from one line  guard: the Python reader in stop-hook
+#   r2-3 enumeration: entries is collected with its status checked; a failed enumeration fails the verb with
+#        "cannot stat", before any parse message                             guard: entries + ENT in reservation.sh
+#   r2-4 entropy and writes: od's own status (pipefail), 32 hex, mkdir and the appends checked  guard: mem-gate RID
+#   r2-5 one validity rule: tombstones validated by the probe too, 12-digit epochs, 128-char tokens  (test-gpu.sh loop)
+RESV="$TMP/resvC"; fresh_resv; HL="$TMP/hostC.lock"
+RC() { DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HL" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$RS" "$@"; }
+A=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; B=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+a=$(RC add 300 90 s-a morpheus --id $A); RC start s-a morpheus --agent ag-1 >/dev/null 2>&1; RC stop s-a morpheus --id $A >/dev/null 2>&1
+r=$(RC add 300 90 s-a morpheus --id $A >/dev/null 2>&1; echo $?)
+[ "$r" -eq 2 ] && [ -z "$(ls "$RESV" 2>/dev/null)" ] && pass "r2-1: a released id is refused on add (exit 2): the seen-set outlives the record" || fail "r2-1 add after release: rc=$r files=[$(ls "$RESV" | tr '\n' ' ')]"
+b=$(RC add 300 90 s-a morpheus --id $B); RC start s-a morpheus --agent ag-2 >/dev/null 2>&1
+r=$(RC stop s-a morpheus --id $A >/dev/null 2>&1; echo $?)
+[ "$r" -eq 2 ] && [ -e "$b" ] && pass "r2-1: a replayed stop --id is refused (exit 2) and never falls back to the class: the other started reservation stays" || fail "r2-1 replayed stop: rc=$r b=$([ -e "$b" ] && echo y || echo n)"
+# r2-2
+sdir="$TMP/sessC"; mkdir -p "$sdir/s-c/subagents"; fresh_resv
+FAKE_AVAIL=60000 FAKE_SWAP_USED=0 FAKE_PGREP_COUNT=1 DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HL" \
+  run_gate "$MEM_GATE" "$(printf '{"session_id":"s-c","transcript_path":"%s/s-c.jsonl","tool_name":"Agent","tool_input":{"prompt":"x","subagent_type":"morpheus"}}' "$sdir")"
+rid=$(awk '{print $6}' "$RESV"/* 2>/dev/null | head -1); [ -f "$RESV/../sessions/s-c" ] && [ "$(cat "$RESV/../sessions/s-c")" = "$(realpath "$sdir")" ] && pass "r2-2: the gate records the session's transcript dir at spawn (realpath)" || fail "r2-2 session dir not recorded: [$(cat "$RESV/../sessions/s-c" 2>/dev/null)]"
+# In each r2-2 case the id names the GATE's file (afile, bound to ag-z) and agent ag-c is bound to a second file (b):
+# a read marker releases afile; a refused read releases b by agent_id. The two outcomes differ.
+r2_2_setup() { # r2_2_setup: the gate's file started as ag-z, b added and started as ag-c; sets afile b rid
+  afile=$(ls "$RESV"/* | head -1); rid=$(awk '{print $6}' "$afile")
+  RC start s-c morpheus --agent ag-z >/dev/null 2>&1
+  b=$(RC add 300 90 s-c morpheus --id $B); RC start s-c morpheus --agent ag-c >/dev/null 2>&1
+}
+r2_2_setup
+mkdir -p "$TMP/elsewhereC/s-c/subagents"; printf '{"type":"user","message":{"content":"[dreamteam reservation %s]\\nx"}}\n' "$rid" > "$TMP/elsewhereC/s-c/subagents/agent-ag-c.jsonl"
+printf '{"hook_event_name":"SubagentStop","session_id":"s-c","transcript_path":"%s/elsewhereC/s-c.jsonl","agent_id":"ag-c","agent_type":"morpheus","agent_transcript_path":"%s/elsewhereC/s-c/subagents/agent-ag-c.jsonl"}' "$TMP" "$TMP" | RC stop-hook >/dev/null 2>&1
+[ -e "$afile" ] && [ ! -e "$b" ] && pass "r2-2: a transcript root taken from the hook input, not the recorded session dir, is not read: the release went by agent_id (b), the id's file stays" || fail "r2-2 root from hook input: afile=$([ -e "$afile" ] && echo y || echo n) b=$([ -e "$b" ] && echo y || echo n)"
+fresh_resv; rm -rf "$sdir"; mkdir -p "$sdir/s-c"; ln -s "$TMP/elsewhereC/s-c/subagents" "$sdir/s-c/subagents"
+FAKE_AVAIL=60000 FAKE_SWAP_USED=0 FAKE_PGREP_COUNT=1 DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HL" \
+  run_gate "$MEM_GATE" "$(printf '{"session_id":"s-c","transcript_path":"%s/s-c.jsonl","tool_name":"Agent","tool_input":{"prompt":"x","subagent_type":"morpheus"}}' "$sdir")"
+r2_2_setup
+printf '{"type":"user","message":{"content":"[dreamteam reservation %s]\\nx"}}\n' "$rid" > "$TMP/elsewhereC/s-c/subagents/agent-ag-c.jsonl"
+printf '{"hook_event_name":"SubagentStop","session_id":"s-c","transcript_path":"%s/s-c.jsonl","agent_id":"ag-c","agent_type":"morpheus","agent_transcript_path":"%s/s-c/subagents/agent-ag-c.jsonl"}' "$sdir" "$sdir" | RC stop-hook >/dev/null 2>&1
+[ -e "$afile" ] && [ ! -e "$b" ] && pass "r2-2: a symlinked PARENT dir (subagents → elsewhere) is not followed (realpath prefix): release by agent_id (b), the id's file stays" || fail "r2-2 symlinked parent: afile=$([ -e "$afile" ] && echo y || echo n) b=$([ -e "$b" ] && echo y || echo n)"
+fresh_resv; rm -rf "$sdir"; mkdir -p "$sdir/s-c/subagents"
+FAKE_AVAIL=60000 FAKE_SWAP_USED=0 FAKE_PGREP_COUNT=1 DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HL" \
+  run_gate "$MEM_GATE" "$(printf '{"session_id":"s-c","transcript_path":"%s/s-c.jsonl","tool_name":"Agent","tool_input":{"prompt":"x","subagent_type":"morpheus"}}' "$sdir")"
+r2_2_setup
+{ head -c 70000 /dev/zero | tr '\0' 'x'; printf ' [dreamteam reservation %s]\n' "$rid"; } > "$sdir/s-c/subagents/agent-ag-c.jsonl"   # the marker past a 64 KiB line bound
+printf '{"hook_event_name":"SubagentStop","session_id":"s-c","transcript_path":"%s/s-c.jsonl","agent_id":"ag-c","agent_type":"morpheus","agent_transcript_path":"%s/s-c/subagents/agent-ag-c.jsonl"}' "$sdir" "$sdir" | RC stop-hook >/dev/null 2>&1
+[ -e "$afile" ] && [ ! -e "$b" ] && pass "r2-2: the field is parsed from one bounded line: a marker past the 64 KiB line bound is not read (release by agent_id, b)" || fail "r2-2 bounded line: afile=$([ -e "$afile" ] && echo y || echo n) b=$([ -e "$b" ] && echo y || echo n)"
+fresh_resv; rm -rf "$sdir"; mkdir -p "$sdir/s-c/subagents"
+FAKE_AVAIL=60000 FAKE_SWAP_USED=0 FAKE_PGREP_COUNT=1 DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HL" \
+  run_gate "$MEM_GATE" "$(printf '{"session_id":"s-c","transcript_path":"%s/s-c.jsonl","tool_name":"Agent","tool_input":{"prompt":"x","subagent_type":"morpheus"}}' "$sdir")"
+r2_2_setup
+printf '{"type":"user","message":{"content":"[dreamteam reservation %s]\\nx"}}\n' "$rid" > "$sdir/s-c/subagents/agent-ag-c.jsonl"
+printf '{"hook_event_name":"SubagentStop","session_id":"s-c","transcript_path":"%s/s-c.jsonl","agent_id":"ag-c","agent_type":"morpheus","agent_transcript_path":"%s/s-c/subagents/agent-ag-c.jsonl"}' "$sdir" "$sdir" | RC stop-hook >/dev/null 2>&1
+[ ! -e "$afile" ] && [ -e "$b" ] && pass "r2-2: the recorded session dir, a real file, one bounded line: the id is read and its file released, b stays (control)" || fail "r2-2 control: afile=$([ -e "$afile" ] && echo y || echo n) b=$([ -e "$b" ] && echo y || echo n)"
+# r2-3
+fresh_resv; mkdir -p "$RESV"; printf '300 %s s-a morpheus 0 - -\n' "$(( $(date +%s) + 60 ))" > "$RESV/1-1-1"; ln -s /nonexistent/never "$RESV/9-9-9.expired"
+err=$(RC live 2>&1 >/dev/null); r=$?
+[ "$r" -eq 1 ] && printf '%s' "$err" | grep -q "cannot stat" && pass "r2-3: an entry the enumeration cannot stat fails the verb with 'cannot stat' (exit 1), before any parse" || fail "r2-3 enumeration: rc=$r err=[$(printf '%s' "$err" | head -c 120)]"
+# r2-4
+mkdir -p "$TMP/badod"; printf '#!/usr/bin/env bash\nprintf " 00 11 22 33 44 55 66 77 88 99 aa bb cc dd ee ff\\n"; exit 1\n' > "$TMP/badod/od"; chmod +x "$TMP/badod/od"
+fresh_resv
+PATH="$TMP/badod:$PATH" FAKE_AVAIL=60000 FAKE_SWAP_USED=0 FAKE_PGREP_COUNT=1 DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HL" \
+  run_gate "$MEM_GATE" '{"session_id":"s-a","tool_name":"Agent","tool_input":{"prompt":"x","subagent_type":"morpheus"}}'
+[ "$GRC" -eq 2 ] && grep -qi "reservation id" "$TMP/err" && pass "r2-4: an od that fails behind a 32-char output is caught (pipefail): the gate blocks" || fail "r2-4 entropy: rc=$GRC $(head -1 "$TMP/err")"
+fresh_resv; mkdir -p "$TMP/roC"; chmod 555 "$TMP/roC"
+FAKE_AVAIL=60000 FAKE_SWAP_USED=0 FAKE_PGREP_COUNT=1 DREAMTEAM_RESERVATIONS="$TMP/roC/resv" DREAMTEAM_HOST_LOCK="$HL" \
+  run_gate "$MEM_GATE" '{"session_id":"s-a","tool_name":"Agent","tool_input":{"prompt":"x","subagent_type":"morpheus"}}'
+chmod 755 "$TMP/roC"
+[ "$GRC" -eq 2 ] && pass "r2-4: a reservations dir the gate cannot create is a block, never a silent admit" || fail "r2-4 mkdir: rc=$GRC $(head -1 "$TMP/err")"
 
 # 2e) xreview #256 r4 (Sen 2026-11-18 20:58), one red case per item:
 #   1  scan errors are nonzero and delete nothing: an unreadable directory, a malformed file (evidence kept); a
@@ -343,7 +415,7 @@ r=$(RB live >/dev/null 2>&1; echo $?); chmod 600 "$RESV/2-2-2"
 #      pruned the live file; a start-hook without ids logs that too
 #   7  every helper read runs under the host lock (--locked = the caller already holds it, the gate), writes are
 #      tmp + rename; live under a held lock is exit 4
-RESV="$TMP/resv4"; rm -rf "$RESV"; HL="$TMP/host4.lock"
+RESV="$TMP/resv4"; fresh_resv; HL="$TMP/host4.lock"
 R4() { DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HL" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$RS" "$@"; }
 out=$(R4 outstanding 2>&1); r=$?; [ "$r" -eq 0 ] && [ "$out" = "0 0" ] && pass "r4 item 1: a directory that never existed is 0 0, exit 0" || fail "missing dir: rc=$r out=[$out]"
 R4 add 300 90 s-a morpheus >/dev/null; printf '400\n' > "$RESV/bad-1-1"
@@ -356,21 +428,21 @@ FAKE_AVAIL=60000 FAKE_SWAP_USED=0 FAKE_PGREP_COUNT=1 DREAMTEAM_RESERVATIONS="$RE
   run_gate "$MEM_GATE" '{"session_id":"s-a","tool_name":"Agent","tool_input":{"prompt":"x","subagent_type":"morpheus"}}'
 chmod 700 "$RESV"
 [ "$GRC" -eq 2 ] && grep -qi 'reservation' "$TMP/err" && pass "r4 item 1: the gate BLOCKS when the reservations cannot be read" || fail "gate on unreadable reservations: rc=$GRC $(head -1 "$TMP/err")"
-rm -rf "$RESV"; R4 add 300 90 s-a morpheus >/dev/null; f=$(ls "$RESV"/* | head -1)
+fresh_resv; R4 add 300 90 s-a morpheus >/dev/null; f=$(ls "$RESV"/* | head -1)
 R4 start s-a morpheus >/dev/null 2>&1; sed -i "s/^300 [0-9]*/300 $(( $(date +%s) - 1 ))/" "$f"
 [ "$(R4 live)" = 300 ] && [ -e "$f" ] && pass "r4 item 2: a STARTED reservation past its expiry still counts (released by stop, not by time)" || fail "started past expiry: live=$(R4 live) exists=$([ -e "$f" ] && echo y || echo n)"
 r=$(R4 stop s-a morpheus >/dev/null 2>&1; echo $?); [ "$r" -eq 0 ] && [ "$(R4 live)" = 0 ] && pass "r4 item 2: SubagentStop releases the started reservation (stop <session> <type>)" || fail "stop: rc=$r live=$(R4 live)"
 r=$(R4 stop s-a morpheus >/dev/null 2>&1; echo $?); [ "$r" -eq 3 ] && pass "r4 item 2: a second stop finds nothing (exit 3)" || fail "second stop: rc=$r"
-rm -rf "$RESV"; R4 add 300 90 s-a morpheus >/dev/null; R4 add 300 90 s-a morpheus >/dev/null
+fresh_resv; R4 add 300 90 s-a morpheus >/dev/null; R4 add 300 90 s-a morpheus >/dev/null
 r1=$(R4 start s-a morpheus >/dev/null 2>&1; echo $?); r2=$(R4 start s-a morpheus >/dev/null 2>&1; echo $?); r3=$(R4 start s-a morpheus >/dev/null 2>&1; echo $?)
 [ "$r1$r2$r3" = "003" ] && [ "$(R4 live)" = 600 ] && pass "r4 item 3: two parallel same-type spawns: two starts mark two reservations, a third is exit 3; both still count (equal sizes per class, said in the script)" || fail "same-type pair: rc=$r1,$r2,$r3 live=$(R4 live)"
-rm -rf "$RESV"; R4 add 300 90 s-a morpheus >/dev/null; f=$(ls "$RESV"/* | head -1); sed -i "s/^300 [0-9]*/300 $(( $(date +%s) - 1 ))/" "$f"
+fresh_resv; R4 add 300 90 s-a morpheus >/dev/null; f=$(ls "$RESV"/* | head -1); sed -i "s/^300 [0-9]*/300 $(( $(date +%s) - 1 ))/" "$f"
 [ "$(R4 live)" = 0 ] && [ ! -e "$f" ] && [ -e "$f.expired" ] && pass "r4 item 4: live prunes an expired UNSTARTED reservation to a tombstone (<file>.expired), not to nothing" || fail "tombstone: live=$(R4 live) file=$([ -e "$f" ] && echo y || echo n) tomb=$([ -e "$f.expired" ] && echo y || echo n)"
 r=$(R4 start s-a morpheus >/dev/null 2>&1; echo $?)
 [ "$r" -eq 5 ] && grep -q "s-a morpheus" "$RESV/../late-starts.log" && [ ! -e "$f.expired" ] && pass "r4 item 4: a late start is still recognised from the tombstone after the scan (exit 5, logged, tombstone consumed)" || fail "late start via tombstone: rc=$r tomb=$([ -e "$f.expired" ] && echo y || echo n) log=[$(tail -1 "$RESV/../late-starts.log" 2>/dev/null)]"
 printf '{"hook_event_name":"SubagentStart"}' | R4 start-hook >/dev/null 2>&1
 grep -q "no session_id or agent_type" "$RESV/../start-hook.log" 2>/dev/null && pass "r4 item 4: a start-hook without ids is logged, not silently skipped" || fail "start-hook without ids: log=[$(cat "$RESV/../start-hook.log" 2>/dev/null | tail -1)]"
-rm -rf "$RESV"; R4 add 300 90 s-a morpheus >/dev/null
+fresh_resv; R4 add 300 90 s-a morpheus >/dev/null
 [ -z "$(ls "$RESV" | grep '\.tmp$')" ] && [ "$(ls "$RESV" | wc -l)" -eq 1 ] && pass "r4 item 7: add leaves one complete file and no .tmp (tmp + rename)" || fail "add files: $(ls "$RESV" | tr '\n' ' ')"
 flock "$HL" sleep 30 & HOLDER=$!; sleep 0.3
 r=$(R4 live >/dev/null 2>&1; echo $?); [ "$r" -eq 4 ] && pass "r4 item 7: live under a held host lock is exit 4 (every read is serialized)" || fail "live with lock held: rc=$r"
@@ -380,7 +452,7 @@ pkill -P "$HOLDER" 2>/dev/null; kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/de
 #     no scan can parse, and under item 1 that one file blocks the gate until an operator moves it. The token fields
 #     are sanitised at add, start and stop alike ([A-Za-z0-9._:-], at most 128, else _), so the hook-side raw values
 #     still match and a scan never meets a self-inflicted malformed record. Mutant: san returns its input (red here).
-rm -rf "$RESV"; f=$(R4 add 300 90 "s a/b" "my type!" 2>/dev/null)
+fresh_resv; f=$(R4 add 300 90 "s a/b" "my type!" 2>/dev/null)
 out=$(R4 outstanding 2>&1); r=$?
 [ "$r" -eq 0 ] && [ "$out" = "300 1" ] && grep -q "s_a_b my_type_ 0 " "$f" && pass "a token with spaces and punctuation is sanitised at add: the record parses (300 1)" || fail "sanitised add: rc=$r out=[$out] rec=[$(cat "$f" 2>/dev/null)]"
 r=$(R4 start "s a/b" "my type!" >/dev/null 2>&1; echo $?); [ "$r" -eq 0 ] && pass "start with the same raw token matches the sanitised record" || fail "sanitised start: rc=$r"
