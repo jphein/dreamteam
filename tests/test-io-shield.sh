@@ -219,60 +219,135 @@ touch "$T/busctl-fails"; cfg '{"lanes":{"enabled":true,"exclude":[]}}'; run_ls i
 ok "uninstall: a lane that cannot be moved out is NOT stopped (its processes would be ended), exit 1" '[ "$rc" -eq 1 ] && ! grep -q "stop lane-alpha.scope" "$LOG"'
 rm -f "$T/lane-units" "$T/fleet-units" "$T/controlgroup"; rm -rf "$T/cg/$UM/lanes.slice"
 
-echo "── io-shield oomprotect: only the watchdog's named unit (xreview #282 r1) ───────"
-LD="$T/cg/$UM/app.slice/lead-spire.scope"; mkdir -p "$LD/sub" "$T/cg/$UM/app.slice/tmux-spawn-x.scope" "$T/cg/$UM/app.slice/lead-spire.scope-x" "$T/cg/$UM/lanes.slice/lead-spire.scope" "$T/run"
-PR="$T/fproc"; rm -rf "$PR"
-fp() { mkdir -p "$PR/$1"; echo "${3:-0}" > "$PR/$1/oom_score_adj"; echo "0::/$UM/$2" > "$PR/$1/cgroup"; }
+echo "── io-shield oomprotect: scores only the watchdog's unit, undoes only its own records (xreview #282 r2) ──"
+# THE RULE under test: a negative score this helper did not write is NEVER written to, anywhere. "Untouched" is
+# observed, not inferred from the final value: each such fixture file's content, mtime and inode are compared
+# before and after (sig), so a write of the very same value would be seen.
+LD="$T/cg/$UM/app.slice/lead-spire.scope"; XD="$T/cg/$UM/app.slice/tmux-spawn-x.scope"
+mkdir -p "$LD/sub" "$XD" "$T/cg/$UM/app.slice/lead-spire.scope-x" "$T/cg/$UM/lanes.slice/lead-spire.scope" "$T/run"
+PR="$T/fproc"; LG="$T/run/dreamteam-io-shield"
+fp() {  # fp <pid> <cgroup path as in /proc> <score> [starttime]
+  mkdir -p "$PR/$1"; echo "${3:-0}" > "$PR/$1/oom_score_adj"; echo "0::$2" > "$PR/$1/cgroup"
+  echo "$1 (fix ture) S 1 $1 $1 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 ${4:-5000$1} 0 0" > "$PR/$1/stat"
+}
 scores() { local p o=""; for p in "$@"; do o="$o$(cat "$PR/$p/oom_score_adj") "; done; printf '%s' "$o"; }
-fixture() { rm -rf "$PR"; fp 900 app.slice/lead-spire.scope; fp 901 app.slice/lead-spire.scope; fp 902 app.slice/lead-spire.scope/sub; fp 100 app.slice/tmux-spawn-x.scope; fp 101 app.slice/tmux-spawn-x.scope
-            fp 200 app.slice/lead-spire.scope-x; fp 201 lanes.slice/lead-spire.scope; fp 202 app.slice; rm -f "$T/run/dreamteam-io-shield.off"
-            # a SYSTEM service that runs as this user with its unit's own negative score, and a login-session process
-            mkdir -p "$PR/300" "$PR/301"; echo -500 > "$PR/300/oom_score_adj"; echo "0::/system.slice/palace-daemon.service" > "$PR/300/cgroup"
-            echo -700 > "$PR/301/oom_score_adj"; echo "0::/user.slice/user-$(id -u).slice/session-4.scope" > "$PR/301/cgroup"; }
+sig() { local p; for p in "$@"; do printf '%s:%s:%s ' "$p" "$(cat "$PR/$p/oom_score_adj")" "$(stat -c '%y %i' "$PR/$p/oom_score_adj")"; done; }
+# the processes that must NEVER be written: a lane's, lookalike units, a login session with its own negative
+# score, an unrelated user-slice process with one, five system services running as the user with their units'
+# own scores (familiar's four and serialhub's octoprint), and two INSIDE the lead unit that already had one
+STAY="100 101 200 201 202 301 302 310 311 312 313 314 903 904"
+fixture() {
+  rm -rf "$PR" "$LG"; rm -f "$T/run/dreamteam-io-shield.off"
+  fp 900 "/$UM/app.slice/lead-spire.scope" 0; fp 901 "/$UM/app.slice/lead-spire.scope" 200; fp 902 "/$UM/app.slice/lead-spire.scope/sub" 0
+  fp 903 "/$UM/app.slice/lead-spire.scope" -900; fp 904 "/$UM/app.slice/lead-spire.scope" -500
+  fp 100 "/$UM/app.slice/tmux-spawn-x.scope" 0; fp 101 "/$UM/app.slice/tmux-spawn-x.scope" 0
+  fp 200 "/$UM/app.slice/lead-spire.scope-x" 0; fp 201 "/$UM/lanes.slice/lead-spire.scope" 0; fp 202 "/$UM/app.slice" 0
+  fp 301 "/user.slice/user-$(id -u).slice/session-4.scope" -700; fp 302 "/$UM/app.slice/tmux-spawn-x.scope" -500
+  fp 310 /system.slice/palace-daemon.service -500; fp 311 /system.slice/qwen3-coder.service -500
+  fp 312 /system.slice/familiar-loadguard.service -800; fp 313 /system.slice/donkey-llm.service -100; fp 314 /system.slice/octoprint.service -900
+  printf '900\n901\n903\n904\n' > "$LD/cgroup.procs"; echo 902 > "$LD/sub/cgroup.procs"; printf '100\n101\n302\n' > "$XD/cgroup.procs"
+  sleep 0.02   # so that a later write has a later mtime
+}
 run_op() { IO_SHIELD_CONF="$T/conf" IO_SHIELD_QOS_FILE="$T/qos" IO_SHIELD_SYSBLOCK="$T/sys" IO_SHIELD_CGROUP_ROOT="$T/cg" IO_SHIELD_PROC="$PR" IO_SHIELD_RUN_DIR="$T/run" IO_SHIELD_ASSUME_ROOT=1 PATH="$B:$PATH" bash "$SH" "$@" > "$T/out" 2> "$T/err"; }
 printf 'oomprotect %s lead-spire.scope -500\n' "$(id -u)" > "$T/conf"
-fixture; run_op apply; rc=$?
-ok "every process in the named unit, sub-cgroups included, gets the score" '[ "$rc" -eq 0 ] && [ "$(scores 900 901 902)" = "-500 -500 -500 " ] && grep -q "3 process(es) set to -500, 1 outside it put back to 0" "$T/out"'
-ok "a lane's scope, a unit whose name only STARTS like it, the same name under another slice, and the parent slice earn nothing" '[ "$(scores 100 101 200 201 202)" = "0 0 0 0 0 " ]'
-ok "a SYSTEM service running as the user keeps its unit's own negative score (serialhub 11-23: the first version reset three)" '[ "$(scores 300)" = "-500 " ]'
-ok "a negative score in the user's own login session is undone (only root's hand puts one there)" '[ "$(scores 301)" = "0 " ]'
-run_op apply; ok "a second run changes nothing" 'grep -q "0 process(es) set to -500, 0 outside" "$T/out"'
-if python3 -I -c 'import os, sys; os.setxattr(sys.argv[1], "user.oomd_avoid", b"1")' "$T/cg/$UM/app.slice/tmux-spawn-x.scope" 2>/dev/null; then
-  run_op apply; ok "a lane that MARKS its own scope (user.oomd_avoid) earns nothing: no mark is read" '[ "$(scores 100 101)" = "0 0 " ]'
-fi
-ok "no attribute is read anywhere in the tool" '! grep -q "getxattr\|oomd_avoid" "$SH"'
-echo -500 > "$PR/100/oom_score_adj"; run_op apply
-ok "a process OUTSIDE the unit that holds a negative score is put back to 0" '[ "$(scores 100)" = "0 " ] && grep -q ", 1 outside it put back to 0" "$T/out"'
-echo "0::/$UM/app.slice/tmux-spawn-x.scope" > "$PR/901/cgroup"; run_op apply
-ok "a process that LEFT the unit loses the score at the next run (migration is undone)" '[ "$(scores 901)" = "0 " ] && [ "$(scores 900)" = "-500 " ]'
-fixture; echo "0::/$UM/app.slice/tmux-spawn-x.scope" > "$PR/901/cgroup"; run_op apply
-ok "a pid listed nowhere but whose process is not in the unit is not scored (the cgroup is read through the held descriptor)" '[ "$(scores 901)" = "0 " ]'
-fixture; mv "$LD" "$LD.away"; ln -s "$T/cg/$UM/app.slice/tmux-spawn-x.scope" "$LD"; run_op apply; rm -f "$LD"; mv "$LD.away" "$LD"
-ok "the unit path being a symlink: nobody is scored" '[ "$(scores 900 901 902 100 101)" = "0 0 0 0 0 " ]'
-fixture; mv "$LD" "$LD.away"; echo -500 > "$PR/900/oom_score_adj"; run_op apply; mv "$LD.away" "$LD"
-ok "the unit not existing (the lead is down): nobody is scored, and a leftover score is undone" '[ "$(scores 900 901)" = "0 0 " ]'
-fixture; rm -rf "$PR/901"; run_op apply; rc=$?
-ok "a process that has exited is skipped quietly" '[ "$rc" -eq 0 ] && [ "$(scores 900 902)" = "-500 -500 " ]'
-fixture; printf 'oomprotect %s lead-spire.scope -500\n' "$(( $(id -u) + 1 ))" > "$T/conf"; echo -300 > "$PR/100/oom_score_adj"; run_op apply
-ok "a line for another uid neither scores nor resets this user's processes" '[ "$(scores 900 100)" = "0 -300 " ]'
-printf 'oomprotect %s lead-spire.scope -500\n' "$(id -u)" > "$T/conf"; fixture; run_op apply; echo -500 > "$PR/100/oom_score_adj"; cp -r "$PR" "$T/before"; run_op status
-ok "status lists who is in the unit and any negative score outside it in the user's slice (not the system service's), and writes nothing" 'grep -q "in:900=-500 901=-500 902=-500; out:100=-500$" "$T/out" && diff -r "$PR" "$T/before" > /dev/null'
-rm -rf "$T/before"
-ok "owner, cgroup and the write all go through one /proc/<pid> directory descriptor" 'grep -q "os.O_DIRECTORY" "$SH" && grep -q "dir_fd=fd" "$SH" && ! grep -q "stat -c %u" "$SH"'
-# the rollback
+
+fixture; before=$(sig $STAY); run_op apply; rc=$?
+ok "apply: the unit's processes with a non-negative score get it (sub-cgroup too)" '[ "$rc" -eq 0 ] && [ "$(scores 900 901 902)" = "-500 -500 -500 " ] && grep -q "3 process(es) scored -500 and recorded; 0 of OUR records undone" "$T/out"'
+ok "apply: a record per scored process: pid, start time, unit, score, the score it had before" 'grep -qx "start=5000900 unit=lead-spire.scope score=-500 prev=0 uid=$(id -u)" "$LG/900" && grep -q "prev=200 " "$LG/901" && [ "$(ls "$LG" | tr "\n" " ")" = "900 901 902 " ]'
+ok "apply: NOTHING else is written to: lane, lookalike units, the login session's -700, an unrelated -500 in the user slice, palace-daemon, qwen3-coder, familiar-loadguard, donkey-llm, octoprint (content, mtime, inode)" '[ "$(sig $STAY)" = "$before" ]'
+ok "apply: inside the unit, a process that already had a negative score (ours by inheritance or anyone else's) is left as found, unrecorded" '[ "$(scores 903 904)" = "-900 -500 " ] && [ ! -e "$LG/903" ] && [ ! -e "$LG/904" ] && grep -q "2 in the unit left as found" "$T/out"'
+all=$(sig 900 901 902 $STAY); run_op apply
+ok "a second apply writes to nobody at all" '[ "$(sig 900 901 902 $STAY)" = "$all" ] && grep -q "0 process(es) scored" "$T/out"'
+
+# undo: ONLY a recorded process, the same process, still holding our score
+echo "0::/$UM/app.slice/tmux-spawn-x.scope" > "$PR/901/cgroup"; printf '900\n903\n904\n' > "$LD/cgroup.procs"; before=$(sig $STAY 900 902); run_op apply
+ok "a process WE scored that left the unit gets its PREVIOUS score back (200, not 0), and its record goes" '[ "$(scores 901)" = "200 " ] && [ ! -e "$LG/901" ] && grep -q "1 of OUR records undone" "$T/out"'
+ok "…and that undo wrote to nobody else" '[ "$(sig $STAY 900 902)" = "$before" ]'
+fixture; run_op apply
+echo "900 (other) S 1 900 900 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 7777777 0 0" > "$PR/900/stat"; echo "0::/$UM/app.slice/tmux-spawn-x.scope" > "$PR/900/cgroup"; s900=$(sig 900); run_op apply
+ok "a record whose pid now is ANOTHER process (start time differs) is dropped and that process is not written" '[ "$(sig 900)" = "$s900" ] && [ ! -e "$LG/900" ]'
+echo "0::/$UM/app.slice/tmux-spawn-x.scope" > "$PR/902/cgroup"; : > "$LD/sub/cgroup.procs"; echo -300 > "$PR/902/oom_score_adj"; sleep 0.02; s902=$(sig 902); run_op apply
+ok "a recorded process whose score someone has CHANGED since is not ours any more: not written, record dropped" '[ "$(sig 902)" = "$s902" ] && [ ! -e "$LG/902" ]'
+fixture; run_op apply; rm -rf "$PR/901"; run_op apply; rc=$?
+ok "a recorded process that has exited: record dropped, no error" '[ "$rc" -eq 0 ] && [ ! -e "$LG/901" ]'
+
+# off: every record undone, and STILL nothing unrecorded is touched
 printf 'device nvme0n1\nunit syncthing@jp.service 20\ndocker mempalace-db 20\noomprotect %s lead-spire.scope -500\n' "$(id -u)" > "$T/conf"
-fixture; run_op apply; : > "$LOG"; run_op off; rc=$?
-ok "off: io.cost disabled, the unit and container weights reset, every score back to 0, a stamp written" '[ "$rc" -eq 0 ] && grep -qxF "259:0 enable=0" "$T/qos" && grep -qxF "systemctl set-property --runtime syncthing@jp.service IOWeight=" "$LOG" && grep -qxF "systemctl set-property --runtime docker-'"$ID"'.scope IOWeight=" "$LOG" && [ "$(scores 900 901 902)" = "0 0 0 " ] && [ -e "$T/run/dreamteam-io-shield.off" ] && [ "$(scores 300)" = "-500 " ]'
-: > "$LOG"; run_op apply; rc=$?
-ok "after off, the timer's apply does NOTHING (the rollback is not undone 5 minutes later)" '[ "$rc" -eq 0 ] && grep -q "nothing applied" "$T/out" && grep -qxF "259:0 enable=0" "$T/qos" && [ "$(scores 900)" = "0 " ] && [ ! -s "$LOG" ]'
+fixture; run_op apply; before=$(sig $STAY); : > "$LOG"; run_op off; rc=$?
+ok "off: each score WE recorded goes back to what it was (0, 200, 0); the ledger is empty; a stamp is written" '[ "$rc" -eq 0 ] && [ "$(scores 900 901 902)" = "0 200 0 " ] && [ -z "$(ls "$LG")" ] && [ -e "$T/run/dreamteam-io-shield.off" ]'
+ok "off: the login session's -700, the user-slice -500, the five system services and the two unrecorded in-unit scores are NOT written (content, mtime, inode)" '[ "$(sig $STAY)" = "$before" ]'
+ok "off: io.cost disabled, unit and container weights reset" 'grep -qxF "259:0 enable=0" "$T/qos" && grep -qxF "systemctl set-property --runtime syncthing@jp.service IOWeight=" "$LOG" && grep -qxF "systemctl set-property --runtime docker-'"$ID"'.scope IOWeight=" "$LOG"'
+all=$(sig 900 901 902 $STAY); : > "$LOG"; run_op apply; rc=$?
+ok "after off, the timer's apply does NOTHING" '[ "$rc" -eq 0 ] && grep -q "nothing applied" "$T/out" && [ "$(sig 900 901 902 $STAY)" = "$all" ] && [ ! -s "$LOG" ]'
 run_op status; ok "status says it is off" 'grep -q "^OFF: " "$T/out"'
 run_op on; run_op apply
 ok "on, then apply: applied again" '[ ! -e "$T/run/dreamteam-io-shield.off" ] && grep -q "^259:0 enable=1" "$T/qos" && [ "$(scores 900)" = "-500 " ]'
+printf 'oomprotect %s lead-spire.scope -500\n' "$(id -u)" > "$T/conf"
+
+# the ledger itself is not something a user can plant
+fixture; mkdir -p -m 700 "$T/elsewhere"; chmod 700 "$T/elsewhere"; ln -s "$T/elsewhere" "$LG"; before=$(sig 900 901 902 $STAY); run_op apply
+ok "a ledger path that is a SYMLINK is not trusted: nothing is scored, nothing undone" '[ "$(sig 900 901 902 $STAY)" = "$before" ] && [ -z "$(ls "$T/elsewhere")" ]'
+rm -f "$LG"
+fixture; mkdir -p "$LG"; chmod 777 "$LG"; before=$(sig 900 901 902 $STAY); run_op apply
+ok "a ledger directory that others can write is not trusted: nothing is scored, nothing recorded" '[ "$(sig 900 901 902 $STAY)" = "$before" ] && [ -z "$(ls "$LG")" ]'
+fixture; run_op apply; printf 'start=5000100 unit=lead-spire.scope score=0 prev=-999 uid=%s\n' "$(id -u)" > "$T/planted"; ln -s "$T/planted" "$LG/100"; echo garbage > "$LG/101"
+printf 'start=5000302 unit=lead-spire.scope score=-500 prev=77 uid=%s\n' "$(( $(id -u) + 1 ))" > "$LG/302"; before=$(sig $STAY); run_op apply; run_op off
+ok "a record that is a symlink, one that is garbage, and one for another uid are ignored: those processes are not written" '[ "$(sig $STAY)" = "$before" ]'
+
+# who can be scored at all
+fixture; run_op apply
+ok "a lane's scope, a unit whose name only STARTS like it, the same name under another slice, and the parent slice earn nothing" '[ "$(scores 100 101 200 201 202)" = "0 0 0 0 0 " ]'
+if python3 -I -c 'import os, sys; os.setxattr(sys.argv[1], "user.oomd_avoid", b"1")' "$XD" 2>/dev/null; then
+  run_op apply; ok "a lane that MARKS its own scope (user.oomd_avoid) earns nothing" '[ "$(scores 100 101)" = "0 0 " ]'
+fi
+ok "no attribute is read anywhere in the tool, and no blanket reset is left in it" '! grep -q "getxattr\|oomd_avoid" "$SH" && ! grep -q "startswith(mine)\|wr(fd, \"0\")" "$SH"'
+fixture; mv "$LD" "$LD.away"; ln -s "$LD.away" "$LD"; before=$(sig 900 901 902 $STAY); run_op apply; rm -f "$LD"; mv "$LD.away" "$LD"
+ok "the unit path being a symlink (to a directory listing processes whose own cgroup IS the unit): nobody is scored" '[ "$(sig 900 901 902 $STAY)" = "$before" ] && [ ! -e "$LG/900" ]'
+# a process the unit's cgroup.procs still lists but whose OWN cgroup is already elsewhere (it moved while we read):
+# a unit whose name only starts like the lead's, and the same unit name under another slice
+fixture; printf '900\n901\n903\n904\n200\n201\n' > "$LD/cgroup.procs"; before=$(sig $STAY); run_op apply
+ok "listed in the unit but its own cgroup is lead-spire.scope-x, or lanes.slice/lead-spire.scope: not scored, not recorded" '[ "$(sig $STAY)" = "$before" ] && [ ! -e "$LG/200" ] && [ ! -e "$LG/201" ] && [ "$(scores 900)" = "-500 " ]'
+# …and the undo side of the same two shapes: a process we scored that is NOW in a lookalike is outside the unit
+echo "0::/$UM/app.slice/lead-spire.scope-x" > "$PR/901/cgroup"; echo "0::/$UM/lanes.slice/lead-spire.scope" > "$PR/900/cgroup"; printf '903\n904\n' > "$LD/cgroup.procs"; run_op apply
+ok "a process we scored that moved to lead-spire.scope-x, and one that moved to the same name under another slice, are both undone (200, 0)" '[ "$(scores 901 900)" = "200 0 " ] && [ ! -e "$LG/901" ] && [ ! -e "$LG/900" ] && grep -q "2 of OUR records undone" "$T/out"'
+fixture; mv "$LD" "$LD.away"; before=$(sig 900 901 902 $STAY); run_op apply; mv "$LD.away" "$LD"
+ok "the unit not existing (the lead is down): nobody is scored" '[ "$(sig 900 901 902 $STAY)" = "$before" ]'
+fixture; printf 'oomprotect %s lead-spire.scope -500\n' "$(( $(id -u) + 1 ))" > "$T/conf"; before=$(sig 900 901 902 $STAY); run_op apply; run_op off
+ok "a line for another uid writes to none of this user's processes (apply and off)" '[ "$(sig 900 901 902 $STAY)" = "$before" ]'
+printf 'oomprotect %s lead-spire.scope -500\n' "$(id -u)" > "$T/conf"; fixture; run_op apply; all=$(sig 900 901 902 $STAY); cp -r "$LG" "$T/lg.before"; run_op status
+ok "status: who is in the unit (and which are not ours), the ledger; it writes nothing, not even the ledger" 'grep -q "in:900=-500 901=-500 903=-900(not ours) 904=-500(not ours) 902=-500; recorded:900(lead-spire.scope) 901(lead-spire.scope) 902(lead-spire.scope)" "$T/out" && [ "$(sig 900 901 902 $STAY)" = "$all" ] && diff -r "$LG" "$T/lg.before" > /dev/null'
+rm -rf "$T/lg.before"
+ok "owner, start time, cgroup and the write all go through one /proc/<pid> directory descriptor" 'grep -q "os.O_DIRECTORY" "$SH" && grep -q "dir_fd=fd" "$SH" && ! grep -q "stat -c %u" "$SH"'
 for bad in "oomprotect $(id -u) -500" "oomprotect $(id -u) tmux-spawn-x.scope -500" "oomprotect $(id -u) app.slice -500" "oomprotect $(id -u) lead-spire.service -500" \
            "oomprotect $(id -u) ../lead-spire.scope -500" "oomprotect $(id -u) lead-spire.scope 100" "oomprotect $(id -u) lead-spire.scope -2000" "oomprotect jp lead-spire.scope -500" "oomprotect $(id -u) lead-spire.scope -500 extra"; do
-  fixture; printf '%s\n' "$bad" > "$T/conf"; run_op apply; rc=$?
-  if [ "$rc" -eq 22 ] && [ "$(scores 900 100)" = "0 0 " ]; then pass "bad oomprotect line refused: $bad"; else fail "bad oomprotect '$bad': rc $rc"; fi
+  fixture; printf '%s\n' "$bad" > "$T/conf"; before=$(sig 900 $STAY); run_op apply; rc=$?
+  if [ "$rc" -eq 22 ] && [ "$(sig 900 $STAY)" = "$before" ]; then pass "bad oomprotect line refused: $bad"; else fail "bad oomprotect '$bad': rc $rc"; fi
 done
+
+# the acceptance check that goes with an apply or an off on a real host (scripts/host/io-shield-accept)
+AC="$ROOT/scripts/host/io-shield-accept"
+printf 'oomprotect %s lead-spire.scope -500\n' "$(id -u)" > "$T/conf"; fixture
+run_ac() { IO_SHIELD_CONF="$T/conf" IO_SHIELD_QOS_FILE="$T/qos" IO_SHIELD_SYSBLOCK="$T/sys" IO_SHIELD_CGROUP_ROOT="$T/cg" IO_SHIELD_PROC="$PR" IO_SHIELD_RUN_DIR="$T/run" IO_SHIELD_ASSUME_ROOT=1 IO_SHIELD_BIN="$SH" PATH="$B:$PATH" bash "$AC" "$@" > "$T/out" 2> "$T/err"; }
+run_ac "$(id -u)" apply; rc=$?
+ok "io-shield-accept apply: exit 0, and it names palace-daemon, qwen3-coder, familiar-loadguard and donkey-llm as untouched with their scores" '[ "$rc" -eq 0 ] && for u in "palace-daemon.service 310 -500" "qwen3-coder.service 311 -500" "familiar-loadguard.service 312 -800" "donkey-llm.service 313 -100"; do set -- $u; grep -q "untouched  $1 pid $2 $3" "$T/out" || exit 1; done'
+ok "…and counts every other pre-existing negative score as untouched too" 'grep -q "ACCEPT: 9 negative score(s) existed before, all 9 unchanged; 3 scored in lead-spire.scope" "$T/out"'
+run_ac "$(id -u)" off; rc=$?
+ok "io-shield-accept off: exit 0, the same nine unchanged" '[ "$rc" -eq 0 ] && grep -q "all 9 unchanged" "$T/out"'
+cat > "$T/evil-shield" <<EOF
+#!/usr/bin/env bash
+echo 0 > "$PR/310/oom_score_adj"
+EOF
+cat > "$T/reuse-shield" <<EOF
+#!/usr/bin/env bash
+# palace-daemon's process exits and its pid is taken by a new, unrelated process with score 0
+echo "310 (new one) S 1 310 310 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 8888888 0 0" > "$PR/310/stat"; echo 0 > "$PR/310/oom_score_adj"
+EOF
+chmod +x "$T/reuse-shield"; fixture
+IO_SHIELD_CONF="$T/conf" IO_SHIELD_PROC="$PR" IO_SHIELD_CGROUP_ROOT="$T/cg" IO_SHIELD_RUN_DIR="$T/run" IO_SHIELD_ASSUME_ROOT=1 IO_SHIELD_BIN="$T/reuse-shield" bash "$AC" "$(id -u)" apply > "$T/out" 2>&1; rc=$?
+ok "io-shield-accept follows the PROCESS (pid and start time): a pid taken by a new process is 'exited since', not a change" '[ "$rc" -eq 0 ] && grep -q "untouched  palace-daemon.service pid 310 -500 (the process has exited since)" "$T/out" && grep -q "^ACCEPT" "$T/out"'
+chmod +x "$T/evil-shield"; fixture
+IO_SHIELD_CONF="$T/conf" IO_SHIELD_PROC="$PR" IO_SHIELD_CGROUP_ROOT="$T/cg" IO_SHIELD_RUN_DIR="$T/run" IO_SHIELD_ASSUME_ROOT=1 IO_SHIELD_BIN="$T/evil-shield" bash "$AC" "$(id -u)" apply > "$T/out" 2>&1; rc=$?
+ok "io-shield-accept is not vacuous: a helper that DOES reset palace-daemon is exit 1 and named" '[ "$rc" -eq 1 ] && grep -q "CHANGED    palace-daemon.service pid 310 -500 → 0" "$T/out" && grep -q "^REJECT" "$T/out"'
 
 echo "── host-io-check.sh ─────────────────────────────────────────────"
 ok "passes bash -n" 'bash -n "$HC"'

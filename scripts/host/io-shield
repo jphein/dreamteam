@@ -30,12 +30,13 @@
 #       <unit> must be `lead-<name>.scope`: the unit scripts/lead-watchdog.sh creates when it launches the fleet
 #       lead. Every process of <uid> in EXACTLY this cgroup,
 #           <cgroup root>/user.slice/user-<uid>.slice/user@<uid>.service/app.slice/<unit>
-#       (and below it) gets /proc/<pid>/oom_score_adj = <score>, -1000..0. NOTHING else earns it: no mark, no
-#       attribute, no other unit name, no parent slice. And every OTHER process in that user's own slice
-#       (/user.slice/user-<uid>.slice/…: the user manager's tree and the login sessions) that holds a negative
-#       score is put back to 0 on each run: a process that left the unit, or inherited the score and then left,
-#       does not keep it past the next run (the timer runs every 5 minutes). System services that run as the
-#       user keep the score their own unit gives them: they live under system.slice and are never touched.
+#       (and below it) whose score is not already negative gets /proc/<pid>/oom_score_adj = <score>,
+#       -1000..0, and a record of that write. NOTHING else earns it: no mark, no attribute, no other unit name,
+#       no parent slice. And the helper UNDOES ONLY WHAT IT RECORDED: a process it scored that has since left
+#       the unit gets its previous score back at the next run. A negative score it has no record of is never
+#       written to, wherever the process lives: system services that run as the user (on familiar:
+#       palace-daemon -500, qwen3-coder -500, familiar-loadguard -800, donkey-llm -100), anything in the user
+#       slice or a login session, and a process inside the lead unit that already had one.
 #       THE LIMIT, stated plainly: the lead and the lanes are the same uid. A same-uid process can move itself
 #       into that cgroup, or be started in a unit of that name while the lead is down, and will then be scored
 #       like the lead. Closing that needs lanes under their own uid, not a check here. What this rules out is
@@ -46,12 +47,12 @@
 #   io-shield apply      device lines to io.cost.qos, the weights, the scores. A unit or container that is not
 #                        there is a note (the next run sets it). Does NOTHING while the off stamp exists.
 #   io-shield off        the rollback: io.cost disabled on the configured devices, IOWeight reset on the
-#                        configured units and containers, every negative oom_score_adj of the configured uids
-#                        back to 0, and a stamp (/run/dreamteam-io-shield.off) that keeps the timer's `apply`
+#                        configured units and containers, every score THIS TOOL RECORDED put back to what it
+#                        was before (and nothing else touched), and a stamp (/run/dreamteam-io-shield.off) that keeps the timer's `apply`
 #                        from undoing this. The stamp is gone after a reboot, or after `io-shield on`.
 #   io-shield on         remove the stamp (the next `apply` applies again).
 #   io-shield status     print io.cost.qos, the stamp, each unit's IOWeight, the protected unit's processes
-#                        and scores, and any negative score outside it. Read-only.
+#                        and scores (which of them are ours), and the ledger. Read-only.
 #
 # Exit: 0 done · 1 a write or a set-property failed · 2 not root (apply, off, on) or no config · 22 bad argument
 # or bad config line.
@@ -62,6 +63,7 @@ SYSBLOCK="${IO_SHIELD_SYSBLOCK:-/sys/block}"
 CGROOT="${IO_SHIELD_CGROUP_ROOT:-/sys/fs/cgroup}"
 PROCROOT="${IO_SHIELD_PROC:-/proc}"
 STAMP="${IO_SHIELD_RUN_DIR:-/run}/dreamteam-io-shield.off"
+LEDGER="${IO_SHIELD_LEDGER:-${IO_SHIELD_RUN_DIR:-/run}/dreamteam-io-shield}"
 
 usage() { echo "usage: io-shield apply|off|on|status" >&2; exit 22; }
 [ "$#" -eq 1 ] || usage
@@ -117,66 +119,176 @@ docker_unit() {   # container name → docker-<id>.scope, or nothing
 }
 
 # oom_scores <list|apply|reset> <uid> <unit> <score>
-#   list    "in:<pid>=<score> …; out:<pid>=<score> …"  (out = negative scores of that uid outside the unit)
-#   apply   processes in the unit get <score>; negative scores outside it go back to 0; prints "<set> <undone>"
-#   reset   every negative score of that uid, inside the unit or not, goes back to 0; prints "<undone>"
-# A pid is only a number: the process can exit and the number be given to another one of any user. So each
-# process is taken hold of ONCE, as a directory descriptor on /proc/<pid>, and its owner, its cgroup and the
-# write all go through that descriptor. A descriptor on a process that has exited answers "no such process"; it
-# never reaches a successor. The cgroup is read through it immediately before the write: a process that is not
-# (or no longer) in the unit is not scored. One that leaves AFTER the write keeps the score until the next run,
-# which undoes it; that window is the timer period.
+#
+# THE RULE (fleet-incidents 2026-11-23; Sen, xreview #282 r2): this helper undoes ONLY what it scored itself,
+# and it proves "itself" with its own record. A negative score it did not write is never written to, anywhere:
+# not in system.slice, not in the user slice, not in a login session, not inside the lead unit either.
+#   On 2026-11-23 23:21 an earlier version reset every negative score of the uid outside the lead unit; on
+#   serialhub that hit octoprint, ustreamer-builtin and ustreamer (-900 each, restored by hand), and on familiar
+#   it would have hit palace-daemon, qwen3-coder, familiar-loadguard and donkey-llm. The version after that
+#   still reset any negative score in the user slice: the same class. Being root, or the cgroup being the
+#   user slice, is not proof that a score is ours.
+#
+# THE LEDGER: one file per scored process in $LEDGER (default /run/dreamteam-io-shield, root only, gone at
+# reboot like the processes it names): <pid> holding "start=<starttime> unit=<unit> score=<n> prev=<n> uid=<n>".
+# starttime is field 22 of /proc/<pid>/stat: with the pid it names ONE process, never a later one of that number.
+#   apply  1. each record of this uid+unit: the SAME process (starttime) that has LEFT the unit and still holds
+#             the score we wrote gets its previous score back, and the record goes. A record whose process is
+#             gone, whose pid now is another process, or whose score someone has changed since is dropped
+#             WITHOUT a write.
+#          2. each process in the unit that has no record and whose score is not negative: the record is
+#             written FIRST, then the score. A process in the unit that already holds a negative score we have
+#             no record for (inherited, or given by something else) is left exactly as it is.
+#   reset  (off) step 1 for every record of this uid, in the unit or not.
+#   list   read-only: who is in the unit with which score, which of them we recorded, and the records.
+# Prints "scored undone left" (apply), "undone" (reset). KNOWN LIMIT: a child that INHERITS the score from a
+# scored process and then leaves the unit keeps it; we did not write it, so we do not undo it.
+# Every process is held as ONE directory descriptor on /proc/<pid>; its owner, start time, cgroup and score are
+# read through it and the write goes through it: a pid recycled meanwhile is never reached.
 oom_scores() {
   python3 -I -c 'import os, sys
-mode, cgroot, procroot, uid, unit, score = sys.argv[1:7]
+mode, cgroot, procroot, ledger, uid, unit, score = sys.argv[1:8]
 rel = "/user.slice/user-%s.slice/user@%s.service/app.slice/%s" % (uid, uid, unit)
+unit_dir = cgroot + rel
+real = os.path.isdir(unit_dir) and not os.path.islink(unit_dir)
+
 def rd(fd, name):
     f = os.open(name, os.O_RDONLY, dir_fd=fd)
     try: return os.read(f, 65536).decode("utf-8", "replace")
     finally: os.close(f)
+
 def wr(fd, value):
-    f = os.open("oom_score_adj", os.O_WRONLY | os.O_TRUNC, dir_fd=fd)     # what a shell `>` does; /proc ignores it
+    f = os.open("oom_score_adj", os.O_WRONLY | os.O_TRUNC, dir_fd=fd)     # what a shell > does; /proc ignores it
     try: os.write(f, (value + "\n").encode())
     finally: os.close(f)
-mine = "/user.slice/user-%s.slice/" % uid
-unit_dir = cgroot + rel
-real = os.path.isdir(unit_dir) and not os.path.islink(unit_dir)
-ins, outs, done, undone, failed = [], [], 0, 0, 0
-for pid in sorted((p for p in os.listdir(procroot) if p.isdigit()), key=int):
+
+def hold(pid):
+    """(fd, starttime, cgroup, score) of a live process of <uid>, else None. The caller closes fd."""
     try:
         fd = os.open(os.path.join(procroot, pid), os.O_RDONLY | os.O_DIRECTORY)
     except OSError:
-        continue
+        return None
     try:
         if os.fstat(fd).st_uid != int(uid):
-            continue
+            os.close(fd); return None
+        stat = rd(fd, "stat")
+        start = stat[stat.rindex(")") + 2:].split()[19]
         cg = rd(fd, "cgroup").strip().split("\n")[-1].split("::", 1)[-1]
-        inside = real and (cg == rel or cg.startswith(rel + "/"))
-        cur = rd(fd, "oom_score_adj").strip()
-        # (no apostrophes in this block: it sits inside a single-quoted shell string)
-        # A score is UNDONE only for a process in the slice of this user (the user manager tree and the login
-        # sessions), where nothing but root, i.e. this tool, can have set a negative one. A SYSTEM service
-        # that runs as the user and carries the OOMScoreAdjust of its unit (on familiar: palace-daemon -500,
-        # loadguard -800) lives under system.slice and is never touched. Measured the hard way 2026-11-23: the
-        # first version reset three such services on serialhub; they were put back by hand.
-        ours = cg.startswith(mine)
-        if mode == "list":
-            if inside: ins.append("%s=%s" % (pid, cur))
-            elif cur.startswith("-") and ours: outs.append("%s=%s" % (pid, cur))
-        elif mode == "apply" and inside:
-            if cur != score:
-                wr(fd, score); done += 1
-        elif cur.startswith("-") and ours:          # apply: outside the unit; reset: anywhere in that slice
-            wr(fd, "0"); undone += 1
+        return fd, start, cg, rd(fd, "oom_score_adj").strip()
+    except (OSError, ValueError, IndexError):
+        os.close(fd); return None
+
+def inside(cg):
+    return real and (cg == rel or cg.startswith(rel + "/"))
+
+# the ledger: ours alone. A directory that is a symlink or not owned by us is not trusted and nothing is undone.
+def ledger_ok(create):
+    if os.path.islink(ledger):
+        return False
+    if not os.path.isdir(ledger):
+        if not create:
+            return False
+        os.makedirs(ledger, mode=0o700)
+    st = os.lstat(ledger)
+    return st.st_uid == os.geteuid() and (st.st_mode & 0o022) == 0
+
+def records():
+    out = {}
+    for n in sorted(os.listdir(ledger)):
+        if not n.isdigit():
+            continue
+        p = os.path.join(ledger, n)
+        try:
+            if os.path.islink(p) or os.lstat(p).st_uid != os.geteuid():
+                continue
+            f = dict(kv.split("=", 1) for kv in open(p).read().split())
+            if f["uid"] == uid and f["start"].isdigit() and f["score"].lstrip("-").isdigit() and f["prev"].lstrip("-").isdigit():
+                out[n] = f
+        except (OSError, ValueError, KeyError):
+            continue
+    return out
+
+def drop(pid):
+    try: os.unlink(os.path.join(ledger, pid))
+    except OSError: pass
+
+scored = undone = left = failed = 0
+have = ledger_ok(mode == "apply")
+recs = records() if have else {}
+if mode == "list":
+    ins = []
+    if real:
+        for sub, _, _ in os.walk(unit_dir):
+            try: pids = open(os.path.join(sub, "cgroup.procs")).read().split()
+            except OSError: continue
+            for pid in pids:
+                h = hold(pid) if pid.isdigit() else None
+                if h:
+                    os.close(h[0])
+                    ours = pid in recs and recs[pid]["start"] == h[1]
+                    ins.append("%s=%s%s" % (pid, h[3], "" if ours else "(not ours)"))
+    print("in:%s; recorded:%s" % (" ".join(ins) or "none", " ".join("%s(%s)" % (p, r["unit"]) for p, r in recs.items()) or "none"))
+    sys.exit(0)
+
+# 1. undo: only records, only the same process, only while it still holds the score we wrote
+for pid, r in recs.items():
+    if mode == "apply" and r.get("unit") != unit:
+        continue
+    h = hold(pid)
+    if h is None:
+        drop(pid); continue                              # gone: nothing to undo, nobody written
+    fd, start, cg, cur = h
+    try:
+        if start != r["start"]:
+            drop(pid)                                    # the number belongs to another process now: never touched
+        elif cur != r["score"]:
+            drop(pid)                                    # someone changed it since: it is theirs now
+        elif mode == "reset" or not inside(cg):
+            wr(fd, r["prev"]); undone += 1; drop(pid)
     except (ProcessLookupError, FileNotFoundError):
-        pass                                        # it exited while we held it: nothing written to anyone
-    except (OSError, ValueError) as e:
-        failed += 1
-        sys.stderr.write("io-shield: oom_score_adj for %s: %s\n" % (pid, e))
+        drop(pid)
+    except OSError as e:
+        failed += 1; sys.stderr.write("io-shield: undo for %s: %s\n" % (pid, e))
     finally:
         os.close(fd)
-print("in:%s; out:%s" % (" ".join(ins) or "none", " ".join(outs) or "none") if mode == "list" else ("%d %d" % (done, undone) if mode == "apply" else undone))
-sys.exit(1 if failed else 0)' "$1" "$CGROOT" "$PROCROOT" "$2" "$3" "$4"
+
+# 2. score: only processes in the unit, only a score that is not already negative, record first
+if mode == "apply" and real and have:
+    recs = records()
+    for sub, _, _ in os.walk(unit_dir):
+        try: pids = open(os.path.join(sub, "cgroup.procs")).read().split()
+        except OSError: continue
+        for pid in pids:
+            h = hold(pid) if pid.isdigit() else None
+            if h is None:
+                continue
+            fd, start, cg, cur = h
+            try:
+                if not inside(cg):
+                    continue                             # listed there a moment ago, not there now
+                if pid in recs and recs[pid]["start"] == start:
+                    continue                             # ours already
+                if cur.startswith("-"):
+                    left += 1; continue                  # a negative score we did not write: never touched
+                tmp = os.path.join(ledger, ".%s.tmp" % pid)
+                try: os.unlink(tmp)                      # a leftover of a run that was stopped mid-record
+                except OSError: pass
+                f = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                try: os.write(f, ("start=%s unit=%s score=%s prev=%s uid=%s\n" % (start, unit, score, cur, uid)).encode())
+                finally: os.close(f)
+                os.replace(tmp, os.path.join(ledger, pid))
+                try:
+                    wr(fd, score); scored += 1
+                except OSError:
+                    drop(pid); raise
+            except (ProcessLookupError, FileNotFoundError):
+                pass
+            except OSError as e:
+                failed += 1; sys.stderr.write("io-shield: score for %s: %s\n" % (pid, e))
+            finally:
+                os.close(fd)
+print("%d %d %d" % (scored, undone, left) if mode == "apply" else undone)
+sys.exit(1 if failed else 0)' "$1" "$CGROOT" "$PROCROOT" "$LEDGER" "$2" "$3" "$4"
 }
 
 rc=0
@@ -204,7 +316,7 @@ case "$MODE" in
     for i in "${!DOCK[@]}"; do u=$(docker_unit "${DOCK[$i]}") || true; [ -n "${u:-}" ] && setw "$u" "" "container ${DOCK[$i]}"; done
     for i in "${!OOMU[@]}"; do
       c=$(oom_scores reset "${OOMU[$i]}" "${OOMN[$i]}" "${OOMS[$i]}") || rc=1
-      echo "oom scores of uid ${OOMU[$i]}: ${c:-0} process(es) put back to 0"
+      echo "oom scores of uid ${OOMU[$i]}: ${c:-0} of OUR recorded score(s) put back to what they were; nothing else is touched"
     done ;;
   apply)
     if [ -e "$STAMP" ]; then echo "off ($STAMP exists): nothing applied"; exit 0; fi
@@ -221,7 +333,8 @@ case "$MODE" in
     done
     for i in "${!OOMU[@]}"; do
       c=$(oom_scores apply "${OOMU[$i]}" "${OOMN[$i]}" "${OOMS[$i]}") || rc=1
-      echo "oomprotect uid ${OOMU[$i]} unit ${OOMN[$i]}: ${c%% *} process(es) set to ${OOMS[$i]}, ${c##* } outside it put back to 0"
+      read -r sc un lf <<< "${c:-0 0 0}"
+      echo "oomprotect uid ${OOMU[$i]} unit ${OOMN[$i]}: $sc process(es) scored ${OOMS[$i]} and recorded; $un of OUR records undone (it left the unit); $lf in the unit left as found (a negative score we did not write)"
     done ;;
 esac
 exit "$rc"

@@ -47,16 +47,22 @@ Order on a host, each step reversible:
 
 The lead (Flow row f72945bc). `scripts/lead-watchdog.sh` launches the lead in a unit it names and creates,
 `lead-<session>.scope`, with `ManagedOOMPreference=avoid` set at creation (systemd-oomd then passes it over). The
-`oomprotect <uid> lead-<session>.scope -500` line makes root give every process in exactly that cgroup the kernel
-OOM score, and put any other negative score in that user's own slice back to 0. Nothing a lane can mark, name or
-configure earns the score. The limit that remains: the lead and the lanes are one uid, and a same-uid process can
-put itself into that cgroup. That needs lanes under their own uid; no check in a script closes it. System
-services that run as the user (palace-daemon and others carry their unit's own negative score) are never touched.
+`oomprotect <uid> lead-<session>.scope -500` line makes root give each process in exactly that cgroup whose score
+is not already negative the kernel OOM score, and WRITE A RECORD of it first (`/run/dreamteam-io-shield/<pid>`:
+start time, unit, the score written, the score it had). **The helper undoes only what it recorded**: a process it
+scored that has left the unit gets its previous score back; `off` puts every recorded score back. **A negative
+score it has no record of is never written to, anywhere**: not in a system service, not in a login session, not
+elsewhere in the user's slice, not inside the lead's unit. (The rule is from 2026-11-23, when an earlier version
+reset three services' scores on serialhub and the next version would still have reset a login session's.)
+Nothing a lane can mark, name or configure earns the score. The limit that remains: the lead and the lanes are
+one uid, and a same-uid process can put itself into that cgroup. That needs lanes under their own uid; no check
+in a script closes it.
 
 ### Rollback (each line undoes one thing; all of it is safe to run twice)
 
-    sudo dreamteam-io-shield off            # io.cost off, unit and container weights reset, scores back to 0,
-                                            # and a stamp so the timer's apply does nothing until `on` or a reboot
+    sudo dreamteam-io-shield off            # io.cost off, unit and container weights reset, every score THIS TOOL
+                                            # recorded back to what it was (nothing else is written), and a stamp
+                                            # so the timer's apply does nothing until `on` or a reboot
     sudo systemctl disable --now dreamteam-io-shield.timer
     scripts/lane-slice.sh uninstall         # lanes' processes moved out of the slice, lane scopes stopped, fleet
                                             # scope weights reset, slice + drop-ins removed, attach timer disabled
@@ -79,13 +85,22 @@ serialhub; familiar's drive, memory and load are different.
    no lower than the lane maximum plus one balloon (4700M on familiar's 11-17 numbers). Two measured floors exist
    for ADMISSION (lane start 6800 MB available, nightly 5500 MB; both with 4096 MB swap free): they say when a
    lane may start, not what it may use, and they are not replaced by these limits.
-3. **Trial, nothing persistent:** `sudo scripts/host/io-shield apply` with the config; `io-shield status`.
+3. **Trial, nothing persistent, WITH THE PROOF OF WHAT IT DID NOT TOUCH:**
+   `sudo IO_SHIELD_BIN=scripts/host/io-shield scripts/host/io-shield-accept <uid> apply`, then `io-shield status`.
+   `io-shield-accept` lists every negative OOM score of that user before the run, runs the helper, reads the same
+   processes again (pid and start time) and must end in `ACCEPT`. It names these units one by one, and each must
+   read `untouched` with its score on the host it lives on (an `absent` there is a finding too):
+   - familiar: `palace-daemon.service` (-500), `qwen3-coder.service` (-500), `familiar-loadguard.service` (-800),
+     `donkey-llm.service` (-100);
+   - serialhub: `octoprint.service`, `ustreamer.service`, `ustreamer-builtin.service` (-900 each).
+   A `REJECT` (exit 1) means the helper changed a score it did not write: put the scores back from the units'
+   `OOMScoreAdjust`, do not enable the timer. The same script with `off` goes with every rollback.
 4. **After, same load:** `scripts/host-io-check.sh` three times; the gate's wall time again. Accept only if the
    victim's fsync p99 is back near its idle value AND the gate still finishes inside its deadline. If the gate is
    starved, raise `min=` or the latency targets and repeat; if nothing helps, `io-shield off`.
 5. **Placement:** `scripts/lane-slice.sh install`, `attach`, `status`: every lane in the slice, the lead and every
-   excluded session outside it, fleet scopes counted. `io-shield status`: the lead's unit and its scores, no
-   leftover negative score.
+   excluded session outside it, fleet scopes counted. `io-shield status`: the lead's unit, its scores (which
+   are the tool's own), and the ledger.
 6. **Negative cases:** a throwaway scope with another name, and one that marks itself `user.oomd_avoid`, get no
    score after `apply` (`/home/jp/work/iotest/oomprotect-live.sh` on serialhub is the model).
 7. **After the next boot:** `lane-slice.sh status` must say the io controller is in use by the user manager; until
