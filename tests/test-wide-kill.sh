@@ -283,8 +283,9 @@ if [ "$GRC" -eq 2 ]; then pass "a detector that ends with 0 and no verdict BLOCK
 if [ "$GRC" -eq 0 ] && [ "$(wc -l < "$BL")" -eq 1 ] && grep -q 'ALLOWED bypass=widekill.enforce=false verdict=UNJUDGED(detector-exit-1) cmd=pkill -f server.py$' "$BL"; then
   pass "kill switch with a BROKEN detector: allowed, and the log says the command was NOT judged and why (the health check ran)"; else fail "kill switch, broken detector: rc $GRC, log: $(cat "$BL")"; fi
 : > "$BL"; GRC=0; jq -nc '{tool_name:"Bash",tool_input:{command:"pkill -f pytest"}}' | PATH="$TMP/nopy" DREAMTEAM_CONFIG="$TMP/off.json" "$(command -v bash)" "$GUARD" 2>/dev/null || GRC=$?
-if [ "$GRC" -eq 0 ] && [ "$(wc -l < "$BL")" -eq 1 ] && grep -q 'bypass=widekill.enforce=false verdict=UNJUDGED(python3-missing) cmd=pkill -f pytest$' "$BL"; then
-  pass "kill switch with NO python3: allowed, logged as not judged (the interpreter check ran)"; else fail "kill switch, no python3: rc $GRC, log: $(cat "$BL")"; fi
+# this PATH has no date, tr, cut or mkdir either: the WHOLE line, its time included, must still be there
+if [ "$GRC" -eq 0 ] && [ "$(wc -l < "$BL")" -eq 1 ] && grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} wide-kill-guard ALLOWED bypass=widekill\.enforce=false verdict=UNJUDGED\(python3-missing\) cmd=pkill -f pytest$' "$BL"; then
+  pass "kill switch with NO python3 (and no date, tr, cut): allowed, logged as not judged, the line whole with its time"; else fail "kill switch, no python3: rc $GRC, log: $(cat "$BL")"; fi
 : > "$BL"
 # (2) the WIDE_KILL_OK=1 prefix does NOT excuse a command that could not be judged
 brk exception 'raise RuntimeError("boom")' 'WIDE_KILL_OK=1 pkill -f pytest'
