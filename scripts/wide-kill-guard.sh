@@ -23,7 +23,8 @@
 #
 # WHO: every session, the lead too. Unlike the no-poll guard there is no role for which ending another
 # lane's suite is the job. A host you have to yourself, or a kill you mean: lead the command with
-# WIDE_KILL_OK=1. Kill switch: config `widekill.enforce=false`. A missing config ENFORCES.
+# WIDE_KILL_OK=1 (it lets a JUDGED wide kill through; it does not excuse a command the detector could not judge).
+# Kill switch: config `widekill.enforce=false`. A missing config ENFORCES.
 #
 # A SPEED BUMP, NOT A BOUNDARY: it matches command text, so a kill hidden in a script file passes and a
 # command that only prints such a line is blocked (except a heredoc body that ends as data, #191's reader).
@@ -41,26 +42,30 @@ TOOL=""; CMD=""
 { IFS= read -r TOOL; CMD="$(cat)"; } < <(printf '%s' "$INPUT" | jq -r '(.tool_name // ""), (.tool_input.command // "")' 2>/dev/null) || true
 [ "$TOOL" = "Bash" ] || exit 0
 [ -n "$CMD" ] || exit 0
-case "$CMD" in WIDE_KILL_OK=1\ *) exit 0 ;; esac
 # no killer and no listing in the text: nothing for the judge to find, so python is never started
 printf '%s' "$CMD" | grep -Eq '(pkill|killall|pgrep|pidof|(^|[^[:alnum:]_.-])ps[[:space:]])' || exit 0
 
 ENFORCE=$(jq -r 'if .widekill.enforce == false then "false" else "true" end' "$CFG" 2>/dev/null || echo true)
 [ "$ENFORCE" = "false" ] && exit 0
 
-# FAIL CLOSED from here (Sen, xreview #279 r1; as no-poll-guard does): this text names a killer or a listing, and
-# if it cannot be judged it is not run. The kill switch above is the only bypass.
+# FAIL CLOSED from here (Sen, xreview #279 r1 and r2; as no-poll-guard does): this text names a killer or a
+# listing, and if it cannot be judged it is not run. The kill switch above is the ONLY bypass of that: the
+# WIDE_KILL_OK=1 prefix is looked at after the detector has answered, and only lets a JUDGED wide kill through.
 if ! command -v python3 >/dev/null 2>&1; then
   echo "🛑 DREAMTEAM WIDE-KILL GUARD — python3 is missing, so this kill or listing command cannot be judged: blocked (kill switch: config widekill.enforce=false)" >&2
   exit 2
 fi
 printf '%s' "$CMD" | python3 -I "$ROOT/scripts/lib/widekill_text.py" 2>/dev/null
 JRC=$?
-[ "$JRC" -eq 1 ] && exit 0                             # 1 = judged: not a wide kill
-if [ "$JRC" -ne 0 ]; then
-  echo "🛑 DREAMTEAM WIDE-KILL GUARD — the detector failed (exit $JRC), so this kill or listing command cannot be judged: blocked (kill switch: config widekill.enforce=false)" >&2
+# The detector's two verdicts are 20 (a wide kill) and 21 (judged, not one). EVERYTHING else is a failure: 1 is
+# what Python exits with on an uncaught exception, a syntax error or a failed import, and 0 would be a detector
+# that ended without a verdict.
+[ "$JRC" -eq 21 ] && exit 0
+if [ "$JRC" -ne 20 ]; then
+  echo "🛑 DREAMTEAM WIDE-KILL GUARD — the detector failed (exit $JRC, not a verdict), so this kill or listing command cannot be judged: blocked (kill switch: config widekill.enforce=false)" >&2
   exit 2
 fi
+case "$CMD" in WIDE_KILL_OK=1\ *) exit 0 ;; esac          # a judged wide kill, and the caller says they mean it
 
 {
   echo "🛑 DREAMTEAM WIDE-KILL GUARD — a host-wide kill of a test runner, blocked"

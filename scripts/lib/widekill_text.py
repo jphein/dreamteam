@@ -1,7 +1,10 @@
 """dreamteam wide-kill guard: does this command text kill a test runner BY NAME, host-wide?
 
-wide-kill-guard.sh hands the raw command on stdin. Exit 0 = yes (the guard blocks), 1 = no. Any other exit is
-an error, and the guard blocks then too: a command it cannot judge is not run.
+wide-kill-guard.sh hands the raw command on stdin. The two VERDICTS have exit codes no failure produces:
+    20 = a wide kill (the guard blocks)        21 = judged, not a wide kill (the guard allows)
+Every other exit is a failure of this detector, and the guard blocks: 0 would mean it ended without a verdict,
+1 is what Python gives an uncaught exception, a syntax error or a failed import, 2 a usage error, 137 a kill.
+A command the guard cannot judge is not run.
 
 HOW THE TEXT IS READ. Comments are dropped. Quotes are tracked. The text is cut into PIPELINES at an unquoted
 `;`, newline, `&&`, `||` or `&`: inside one pipeline data flows from left to right, between two it does not. A program is recognised only in COMMAND POSITION
@@ -269,19 +272,22 @@ def wide(text):
     return False
 
 
+WIDE, NOT_WIDE = 20, 21
+
+
 def main():
     raw = sys.stdin.read()
     if not wide(raw):
-        return 1
+        return NOT_WIDE
     if "<<" in raw:
         try:
             sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
             import nopoll_text
             if not wide(nopoll_text.data_text(raw)):
-                return 1
+                return NOT_WIDE
         except Exception:                                 # the reader failed: judge the whole text (keep the block)
             pass
-    return 0
+    return WIDE
 
 
 if __name__ == "__main__":

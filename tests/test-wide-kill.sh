@@ -222,7 +222,7 @@ mkdir -p "$TMP/badpy" "$TMP/nopy"
 printf '#!/bin/sh\nexit 3\n' > "$TMP/badpy/python3"; chmod +x "$TMP/badpy/python3"
 GRC=0; jq -nc '{tool_name:"Bash",tool_input:{command:"pkill -f pytest"}}' | PATH="$TMP/badpy:$PATH" DREAMTEAM_CONFIG="$TMP/on.json" bash "$GUARD" 2>/dev/null || GRC=$?
 GRC=0; jq -nc '{tool_name:"Bash",tool_input:{command:"pkill -f pytest"}}' | PATH="$TMP/badpy:$PATH" DREAMTEAM_CONFIG="$TMP/on.json" bash "$GUARD" 2>"$TMP/err" || GRC=$?
-if [ "$GRC" -eq 2 ] && [ "$(wc -l < "$TMP/err")" -eq 1 ] && grep -q 'detector failed (exit 3)' "$TMP/err"; then pass "a detector that errors (exit 3) is a BLOCK, with one line"; else fail "erroring judge → exit $GRC: $(cat "$TMP/err")"; fi
+if [ "$GRC" -eq 2 ] && [ "$(wc -l < "$TMP/err")" -eq 1 ] && grep -q 'detector failed (exit 3, not a verdict)' "$TMP/err"; then pass "a detector that errors (exit 3) is a BLOCK, with one line"; else fail "erroring judge → exit $GRC: $(cat "$TMP/err")"; fi
 GRC=0; jq -nc '{tool_name:"Bash",tool_input:{command:"pkill -f server.py"}}' | PATH="$TMP/badpy:$PATH" DREAMTEAM_CONFIG="$TMP/on.json" bash "$GUARD" 2>/dev/null || GRC=$?
 if [ "$GRC" -eq 2 ]; then pass "…also for a harmless pkill: unjudged is not run"; else fail "erroring judge, harmless pkill → exit $GRC"; fi
 GRC=0; jq -nc '{tool_name:"Bash",tool_input:{command:"pkill -f pytest"}}' | PATH="$TMP/badpy:$PATH" DREAMTEAM_CONFIG="$TMP/off.json" bash "$GUARD" 2>/dev/null || GRC=$?
@@ -236,7 +236,35 @@ if [ "$GRC" -eq 2 ] && [ "$(wc -l < "$TMP/err")" -eq 1 ] && grep -q 'python3 is 
 # the judge's own exit codes: 0 and 1 are verdicts, anything else is the failure blocked above
 printf '%s' 'pkill -f pytest' | python3 -I "$ROOT/scripts/lib/widekill_text.py"; rc=$?
 printf '%s' 'pkill -f server.py' | python3 -I "$ROOT/scripts/lib/widekill_text.py"; rc2=$?
-if [ "$rc" -eq 0 ] && [ "$rc2" -eq 1 ]; then pass "the judge: exit 0 = wide, 1 = not"; else fail "judge exits $rc / $rc2"; fi
+if [ "$rc" -eq 20 ] && [ "$rc2" -eq 21 ]; then pass "the detector's verdicts are 20 (wide) and 21 (not): codes no failure produces"; else fail "detector exits $rc / $rc2"; fi
+
+# xreview #279 r2 (1): a REAL detector failure. Python exits 1 on an uncaught exception, a syntax error and a
+# failed import; exit 1 used to mean "not a wide kill". Each broken copy below must BLOCK, with one line.
+brk() {  # brk <name> <python text put at the top of the detector>
+  local d="$TMP/broken-$1"; mkdir -p "$d/scripts/lib"; cp "$GUARD" "$d/scripts/"; cp "$ROOT/scripts/lib/nopoll_text.py" "$d/scripts/lib/"
+  { printf '%s\n' "$2"; cat "$ROOT/scripts/lib/widekill_text.py"; } > "$d/scripts/lib/widekill_text.py"
+  GRC=0; jq -nc --arg c "${3:-pkill -f server.py}" '{tool_name:"Bash",tool_input:{command:$c}}' | CLAUDE_PLUGIN_ROOT="$d" DREAMTEAM_CONFIG="${4:-$TMP/on.json}" bash "$d/scripts/wide-kill-guard.sh" 2>"$TMP/err" || GRC=$?
+}
+brk exception 'raise RuntimeError("boom")'
+python3 -I "$TMP/broken-exception/scripts/lib/widekill_text.py" < /dev/null > /dev/null 2>&1; prc=$?
+if [ "$prc" -eq 1 ]; then pass "fixture: an uncaught exception in the detector really exits 1"; else fail "fixture: exception exits $prc"; fi
+if [ "$GRC" -eq 2 ] && [ "$(wc -l < "$TMP/err")" -eq 1 ] && grep -q 'detector failed (exit 1, not a verdict)' "$TMP/err"; then pass "an uncaught exception in the detector (exit 1) BLOCKS, with exactly one line"
+else fail "detector exception → exit $GRC: $(cat "$TMP/err")"; fi
+brk syntax 'def broken(:'
+if [ "$GRC" -eq 2 ] && [ "$(wc -l < "$TMP/err")" -eq 1 ]; then pass "a syntax error in the detector BLOCKS, with exactly one line"; else fail "detector syntax error → exit $GRC"; fi
+brk import 'import a_module_that_does_not_exist_anywhere'
+if [ "$GRC" -eq 2 ] && [ "$(wc -l < "$TMP/err")" -eq 1 ]; then pass "a failed import in the detector BLOCKS, with exactly one line"; else fail "detector import error → exit $GRC"; fi
+brk exitzero 'import sys; sys.exit(0)'
+if [ "$GRC" -eq 2 ]; then pass "a detector that ends with 0 and no verdict BLOCKS"; else fail "detector exit 0 → exit $GRC"; fi
+brk exception 'raise RuntimeError("boom")' 'pkill -f server.py' "$TMP/off.json"
+if [ "$GRC" -eq 0 ]; then pass "the kill switch bypasses a broken detector"; else fail "kill switch with a broken detector → exit $GRC"; fi
+# (2) the WIDE_KILL_OK=1 prefix does NOT excuse a command that could not be judged
+brk exception 'raise RuntimeError("boom")' 'WIDE_KILL_OK=1 pkill -f pytest'
+if [ "$GRC" -eq 2 ]; then pass "WIDE_KILL_OK=1 with a failing detector: still blocked (only the kill switch bypasses a failure)"; else fail "override with a failing detector → exit $GRC"; fi
+GRC=0; jq -nc '{tool_name:"Bash",tool_input:{command:"WIDE_KILL_OK=1 pkill -f pytest"}}' | PATH="$TMP/nopy" DREAMTEAM_CONFIG="$TMP/on.json" "$(command -v bash)" "$GUARD" 2>/dev/null || GRC=$?
+if [ "$GRC" -eq 2 ]; then pass "WIDE_KILL_OK=1 with no python3: still blocked"; else fail "override with no python3 → exit $GRC"; fi
+GRC=0; jq -nc '{tool_name:"Bash",tool_input:{command:"WIDE_KILL_OK=1 pkill -f pytest"}}' | PATH="$TMP/badpy:$PATH" DREAMTEAM_CONFIG="$TMP/on.json" bash "$GUARD" 2>/dev/null || GRC=$?
+if [ "$GRC" -eq 2 ]; then pass "WIDE_KILL_OK=1 with an interpreter that exits 3: still blocked"; else fail "override with a bad interpreter → exit $GRC"; fi
 
 run Bash 'pkill -f pytest'
 if grep -q 'kill-mine.py' "$TMP/err" && grep -q 'WIDE_KILL_OK=1' "$TMP/err"; then pass "the block names kill-mine and the override"
