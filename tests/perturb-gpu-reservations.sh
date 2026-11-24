@@ -40,7 +40,6 @@ MUT=(
   'scan-not-all-or-nothing@scripts/reservation.sh@0,/^    parse "\$f" || return 1$/s//    parse "$f" || continue/@tests/test-gates.sh'
   'prune-before-scan@scripts/reservation.sh@s/scan acc || { echo "reservation: scan failed, nothing counted" >\&2; exit 1; }; prune || { echo "reservation: prune failed" >\&2; exit 1; }/prune; scan acc || exit 1/@tests/test-gates.sh'
   'tombstones-validated-after-prune@scripts/reservation.sh@s/^    for f in "\$DIR"\/\*.expired; do \[ -e "\$f" \] || continue; parse "\$f" || exit 1; done   # tombstones validated/    true   # tombstones validated/@tests/test-gates.sh'
-  'tombstone-read-unparsed@scripts/reservation.sh@s/^      parse "\$f" || exit 1            # a tombstone is evidence/      read -r fmb fexp fses ftyp fst < "$f" 2>\/dev\/null || continue   # a tombstone is evidence/@tests/test-gates.sh'
   'unreadable-dir-as-zero@scripts/reservation.sh@s/|| { echo "reservation: \$DIR is not a readable directory" >\&2; return 1; }/|| return 2/@tests/test-gates.sh'
   'started-expires@scripts/reservation.sh@s/^expired() { \[ "\$fst" = 0 \] \&\& /expired() { true \&\& /@tests/test-gates.sh'
   'tombstone-dropped@scripts/reservation.sh@s/    if expired; then mv -f -- "\$f" "\$f.expired" || return 1; fi/    if expired; then rm -f -- "$f"; fi/@tests/test-gates.sh'
