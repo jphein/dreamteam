@@ -26,6 +26,16 @@ seat can serve):
     CHECK quota-resume[-<host>] ok   · 9 panes read, 0 walled · every 2 min, owner Sen
     CHECK quota-resume[-<host>] warn · 9 panes read, 3 walled: luna-map (resumed), morpheus-roam (typed text in its box), nebula (waits 412 s) · every 2 min, owner Sen
     CHECK quota-resume[-<host>] fail · tmux cannot be read (<reason>) · every 2 min, owner Sen
+THE FAILOVER TURN (rows daf22d99, 55bd0a23; measured 2026-11-23 from the lanes' transcripts). When no seat can
+serve, the proxy answers a turn itself with a small local model and marks it:
+    ● ⚠ FAILOVER: local qwen36-coder served this turn; no tools ran; treat as unavailable
+That turn does nothing and ENDS, so the lane sits at its prompt with no error on screen. 19 such turns in six
+days on serialhub, and each "pane hung" or "context emptied by a restart" report matches one to the minute
+(Fri 14:40 and Sat 19:14/19:17 this lane, Sat 19:11 raven, four lanes Thu 02:04-02:06). No process had been
+restarted. A pane whose LATEST output block starts with that mark is therefore treated like a walled one: after
+120 s, with nothing typed in its box and a seat serving again, it is told to continue, at most 3 times an hour
+per pane (a proxy that keeps failing over is not fed forever). The line names it "(failover turn …)".
+
 Seams: QUOTA_RESUME_STATE_DIR (state and log; default beside this file), DREAMTEAM_CHECKS_DIR, DREAMTEAM_CHECK_HOST.
 A fixture pane is never typed into: the run goes through every decision and logs what it would have typed.
 """
@@ -38,6 +48,9 @@ STATE = os.path.join(SDIR, f"quota_resume_state.{HOST}.json")   # host-suffixed:
 LOG = os.path.join(SDIR, f"quota_resume.{HOST}.log")
 # The real error is one "●" output block; quoting it elsewhere never starts with the bullet.
 ERR = re.compile(r"● API Error: .*?(Server is temporarily limiting requests|all \d+ accounts are at their quota)")
+# A turn the proxy served from its local failover model: the mark is the first words of the block.
+FAILOVER = re.compile(r"^● ⚠ FAILOVER: local \S+ served this turn")
+FAILOVER_WAIT, FAILOVER_PER_HOUR = 120, 3
 # "resets in 42s" (older notices) or "Quota resets in 1h 55m" / "in 7m" (teamclaude since 2026-11)
 RESET = re.compile(r"resets in (?=\d)(?:(\d+)h\s*)?(?:(\d+)m\s*)?(?:(\d+)s)?")
 # A working agent shows a spinner line like "✢ Wibbling… (3m 49s · ↓ 17.0k tokens)" or "esc to interrupt".
@@ -200,15 +213,17 @@ for pid, cmd, raw in all_panes:
     bullets = [i for i in range(box) if lines[i].lstrip().startswith("●")]
     block = lines[bullets[-1]:box] if bullets else []
     collapsed = " ".join(" ".join(block).split())
-    is_wall = bool(block) and bool(ERR.search(collapsed)) and not any(WORKING.search(l) for l in block[1:])
+    failover = bool(block) and bool(FAILOVER.search(collapsed))
+    is_wall = bool(block) and (failover or bool(ERR.search(collapsed))) and not any(WORKING.search(l) for l in block[1:])
+    kind = "failover turn, " if failover else ""
     if "Do you want" in text or "Enter to select" in text or "Enter to confirm" in text:
         if DRY: print(f"skip {pid}: dialog on screen")
         if is_wall:
-            walled.append((name, "a dialog is open"))
+            walled.append((name, kind + "a dialog is open"))
         continue
     if not bullets:
         continue
-    if not ERR.search(collapsed):
+    if not failover and not ERR.search(collapsed):
         continue
     if any(WORKING.search(l) for l in block[1:]):
         if DRY: print(f"skip {pid}: working again")
@@ -217,10 +232,10 @@ for pid, cmd, raw in all_panes:
     if typed:
         if DRY:
             print(f"skip {pid}: typed input {typed[:40]!r}")
-        walled.append((name, "typed text in its box"))
+        walled.append((name, kind + "typed text in its box"))
         continue
-    wait = reset_wait(collapsed)
-    wait = 300 if wait is None else wait
+    wait = None if failover else reset_wait(collapsed)
+    wait = (FAILOVER_WAIT if failover else 300) if wait is None else wait
     key = pid + ":" + hashlib.sha1(collapsed.encode()).hexdigest()[:12]
     seen_now.add(key)
     first = state.get(key, {}).get("first", now)
@@ -230,27 +245,37 @@ for pid, cmd, raw in all_panes:
         print(f"match {pid} ({cmd}): wait={wait}s done={done} due_in={int(first + wait + 30 - now)}s serves={proxy_serves()}")
         continue
     if done:
-        walled.append((name, "resumed once already, still on the notice"))
+        walled.append((name, kind + "resumed once already, still on the notice"))
         continue
     if now < first + wait + 30:
-        walled.append((name, f"waits {int(first + wait + 30 - now)} s for the reset"))
+        walled.append((name, kind + f"waits {int(first + wait + 30 - now)} s" + ("" if failover else " for the reset")))
+        continue
+    fo_key = "_failover:" + pid
+    recent = [t for t in state.get(fo_key, []) if isinstance(t, (int, float)) and t > now - 3600]
+    if failover and len(recent) >= FAILOVER_PER_HOUR:
+        state[fo_key] = recent
+        walled.append((name, f"failover turn, {FAILOVER_PER_HOUR} resumes already this hour: held"))
         continue
     if not FIXTURES:
         subprocess.run(["tmux", "send-keys", "-t", pid, "C-u"])
     if not proxy_serves():
         log(f"hold {pid}: no seat can serve; not typing continue")
-        walled.append((name, "no seat can serve"))
+        walled.append((name, kind + "no seat can serve"))
         continue
     if FIXTURES:
         log(f"would resume {pid} (a fixture is never typed into)")
     else:
-        subprocess.run(["tmux", "send-keys", "-t", pid, "-l", "continue (jp-ab auto-resume after quota reset)"])
+        subprocess.run(["tmux", "send-keys", "-t", pid, "-l",
+                        "continue (auto-resume: your last turn was served by the local failover model and did nothing; a seat serves again)"
+                        if failover else "continue (jp-ab auto-resume after quota reset)"])
         subprocess.run(["tmux", "send-keys", "-t", pid, "Enter"])
     state[key]["done"] = True
-    walled.append((name, "resumed"))
-    log(f"resumed {pid} ({cmd}) after quota error, waited {int(now-first)}s")
+    if failover:
+        state[fo_key] = recent + [now]
+    walled.append((name, kind + "resumed"))
+    log(f"resumed {pid} ({cmd}) after {'a failover turn' if failover else 'quota error'}, waited {int(now-first)}s")
 if not DRY:
-    state = {k: v for k, v in state.items() if k in seen_now}
+    state = {k: v for k, v in state.items() if k in seen_now or (k.startswith("_failover:") and any(t > now - 3600 for t in v))}
     json.dump(state, open(STATE, "w"))
     if walled:
         shown = ", ".join(f"{n} ({why})" for n, why in walled[:8]) + (f" and {len(walled) - 8} more" if len(walled) > 8 else "")

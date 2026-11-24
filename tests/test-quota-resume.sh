@@ -61,7 +61,7 @@ line() { cat "$C/${1:-quota-resume}.line" 2>/dev/null; }
 seed() {  # make every wall in the state file 2 hours old, so its reset has passed
   python3 -I -c 'import json, sys, time, glob
 for f in glob.glob(sys.argv[1] + "/quota_resume_state.*.json"):
-    d = json.load(open(f)); [v.__setitem__("first", time.time() - 7200) for v in d.values()]; json.dump(d, open(f, "w"))' "$S"
+    d = json.load(open(f)); [v.__setitem__("first", time.time() - 7200) for v in d.values() if isinstance(v, dict)]; json.dump(d, open(f, "w"))' "$S"
 }
 fresh_state() { rm -f "$S"/quota_resume_state.*.json "$S"/quota_resume.*.log "$C"/*.line; }
 quota '"live_seats":2,' "$(seat claude active 0.2 0.4)"
@@ -132,5 +132,38 @@ echo "no server running on /tmp/tmux-1000/default" > "$T/tmux-mode"; fresh_state
 t "no tmux server on the host: 0 panes, ok (a host without lanes is not a failure)" grep -q '^CHECK quota-resume-serialhub ok · 0 panes read, 0 walled' <<<"$(line quota-resume-serialhub)"
 rm -f "$T/tmux-mode"
 t "the unit runs this script from the repo checkout" grep -qx 'ExecStart=/usr/bin/python3 %h/Projects/dreamteam/scripts/quota_resume.py' "$ROOT/systemd/quota-resume.service"
+
+# ── the failover turn (measured 2026-11-23: 19 in six days on serialhub; each "pane hung" report matches one) ───
+FO='● ⚠ FAILOVER: local qwen36-coder served this turn; no tools ran; treat as unavailable'
+fo() {  # fo <name> <a line of the small model's answer> <box line>
+  printf '%s\n' '● Working on it' '' "$FO" '' "  $2" '' '────────' "$3" '────────' > "$T/$1"
+}
+quota '"live_seats":2,' "$(seat claude active 0.2 0.4)"
+fo fx-fo 'I cannot run tools.' '❯ '
+fresh_state; live fx-fo
+t "a failover-served turn is a stall: warn, named, a short wait (not the 300 s default)" bash -c '[[ "$1" =~ 1\ walled:\ fx-fo\ \(failover\ turn,\ waits\ ([0-9]+)\ s\) ]] && [ "${BASH_REMATCH[1]}" -le 150 ]' _ "$(line)"
+seed; live fx-fo
+t "…after the wait, with a seat serving: resumed, and the log says after what" bash -c 'grep -q "fx-fo (failover turn, resumed)" <<<"$1" && grep -q "after a failover turn" "$2"/quota_resume.*.log' _ "$(line)" "$S"
+quota '"live_seats":0,' "$(seat claude active 0.99 1)"
+fresh_state; live fx-fo; seed; live fx-fo
+t "…with no seat serving: held (the proxy would only fail over again)" grep -q 'fx-fo (failover turn, no seat can serve)' <<<"$(line)"
+quota '"live_seats":2,' "$(seat claude active 0.2 0.4)"
+fo fx-fotyped 'I cannot run tools.' '❯ a half-typed order'
+fresh_state; live fx-fotyped; seed; live fx-fotyped
+t "…with typed text in the box: never typed over, said so" bash -c 'grep -q "fx-fotyped (failover turn, typed text in its box)" <<<"$1" && ! grep -qs "would resume" "$2"/quota_resume.*.log' _ "$(line)" "$S"
+fresh_state
+for n in 1 2 3; do fo fx-fo "answer number $n" '❯ '; live fx-fo; seed; live fx-fo; done
+t "three failover turns in an hour on one pane are each resumed" bash -c '[ "$(grep -c "would resume fx-fo" "$1"/quota_resume.*.log)" = 3 ]' _ "$S"
+fo fx-fo 'answer number 4' '❯ '; live fx-fo; seed; live fx-fo
+t "…the fourth is HELD: a proxy that keeps failing over is not fed forever" bash -c 'grep -q "fx-fo (failover turn, 3 resumes already this hour: held)" <<<"$1" && [ "$(grep -c "would resume fx-fo" "$2"/quota_resume.*.log)" = 3 ]' _ "$(line)" "$S"
+printf '%s\n' '● Working on it' '' '● I saw the mark ⚠ FAILOVER: local qwen36-coder served this turn in another pane.' '' '────────' '❯ ' '────────' > "$T/fx-quote"
+fresh_state; live fx-quote
+t "a pane that only QUOTES the mark mid-sentence is not stalled" grep -q '1 panes read, 0 walled' <<<"$(line)"
+printf '%s\n' '● Working on it' '' "$FO" '✢ Wibbling… (3m 49s · ↓ 17.0k tokens)' '────────' '❯ ' '────────' > "$T/fx-fobusy"
+fresh_state; live fx-fobusy
+t "a failover mark with the agent working again below it is not stalled" grep -q '1 panes read, 0 walled' <<<"$(line)"
+fo realpane 'I cannot run tools.' '❯ '
+fresh_state; : > "$T/tmux.log"; real; seed; real
+t "real path: the failover message is what gets typed, into that pane" bash -c 'grep -qF "tmux send-keys -t %7 -l continue (auto-resume: your last turn was served by the local failover model" "$1" && grep -qxF "tmux send-keys -t %7 Enter" "$1"' _ "$T/tmux.log"
 
 exit $fail
