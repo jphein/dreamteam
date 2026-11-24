@@ -92,6 +92,37 @@ the lane.
 
 All three are expected by Sat 2026-11-21 18:00.
 
+## 6. One week on (2026-11-24): what shipped, and three things the week taught
+
+**Shipped from §5.** The Stop-hook callout is live (`scripts/flow-callout.sh`, practice 3). The xreview round
+counter is live (practice 6). The thread owner in plan-chat (practice 4, row `b0654b98`) is still ordered.
+
+**Practice 6 needed an ending.** A cap says when inspection stops, not what happens then. What now happens:
+the lead may declare a round final, and after a final round the lead RULES in a PR comment. Either the PR merges
+on the lane's own gate once the named fixes land, each with a red test (dreamteam #279: round 3 was final and
+still DO-NOT-MERGE, two fixes were named, the lane merged that night and cited the ruling), or it is closed. A
+finding of the same class as an earlier round, in a final round, closes it: that is Deming's point about
+inspection [3] made concrete, the diff or its spec is the defect, and another round cannot repair either.
+SKILL.md Fleet lesson 18.
+
+**Practice 3 needed stopping rules, not only a callout.** The hook holds a lane that goes quiet on an open row.
+Two more ways of stopping wrongly showed up. Lanes sat on a quota notice after the pool could serve again
+(11-21, 3.5 h on serialhub; the instrument is the proxy's `live_seats`, and a "usage limit" notice is about one
+seat), and a lane that had been served a failover turn sat at its prompt and was reported as hung or restarted
+(19 such turns in six days; none was a restart). Both are indicators that could not see (practice 8): the notice and the quiet pane each looked like
+a state and were neither. SKILL.md Fleet lessons 15, 16 and 19.
+
+**Practice 7 has no mechanism yet.** "The lead rejects a report whose first line is not the answer" is a rule
+without one, and every session on the fleet's hosts was meanwhile being told to write explanatory blocks (a
+user-level plugin, found 2026-11-24). An output style for lanes (the bottom line, then the four parts, twelve
+lines) is proposed in dreamteam #284 *(open at the time of writing)*; whether it saves what it should is to
+be measured from transcripts before the fleet is switched.
+
+**A reading of the week** *(inference)*: the three corrections share one shape. Each replaced a judgement the
+lead or a lane had to make from what a screen showed (is it stuck, is it typing, is the pool empty, is this
+review done) with a number or a record someone can read back. That is practice 8 again, and it is cheaper than
+any amount of care.
+
 ## Sources
 
 1. Andrew S. Grove, *High Output Management*, Random House, 1983 (leverage, task-relevant maturity, indicators, one-on-ones).
