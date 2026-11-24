@@ -227,6 +227,17 @@ rm -rf "$rl"; mkdir -p "$rl"; printf '300 %s s-a morpheus 0 - -\n' "$((nowr + 60
 p=$(python3 "$LIB" probe-script gpu1 | DREAMTEAM_RESERVATIONS="$rl" PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^RESV,')
 o=$(DREAMTEAM_RESERVATIONS="$rl" DREAMTEAM_HOST_LOCK="$TMP/rl.lock" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$R" outstanding 2>/dev/null); orc=$?
 [ "$p" = "RESV,ERR" ] && [ "$orc" -ne 0 ] && pass "one validity rule: a malformed tombstone is an error for both (#289 r2-5: the probe validates tombstones too)" || fail "malformed tombstone: probe=[$p] helper rc=$orc"
+# #289 r3 ruling (3): the enumeration status is checked in both parsers: a symlink among the entries is RESV,ERR for
+# the probe as it is an error for the helper
+rm -rf "$rl"; mkdir -p "$rl"; printf '300 %s s-a morpheus 0 - -\n' "$((nowr + 60))" > "$rl/1-1-1"; ln -s /nonexistent/never "$rl/9-9-9"
+p=$(python3 "$LIB" probe-script gpu1 | DREAMTEAM_RESERVATIONS="$rl" PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^RESV,')
+o=$(DREAMTEAM_RESERVATIONS="$rl" DREAMTEAM_HOST_LOCK="$TMP/rl.lock" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$R" outstanding 2>/dev/null); orc=$?
+[ "$p" = "RESV,ERR" ] && [ "$orc" -ne 0 ] && pass "r3-3: a symlink among the entries is an error for both parsers (probe RESV,ERR, helper exit $orc)" || fail "r3-3 symlink entry: probe=[$p] helper rc=$orc"
+# #289 r3 ruling (5): ONE validity rule, one function both parsers read: the probe script carries the helper's record
+# rule block verbatim (the probe-script output contains the same text the helper defines)
+blk=$(sed -n '/^# --- record rule begin/,/^# --- record rule end/p' "$R" | sha256sum | cut -c1-16)
+pblk=$(python3 "$LIB" probe-script gpu1 | sed -n '/^# --- record rule begin/,/^# --- record rule end/p' | sha256sum | cut -c1-16)
+[ -n "$blk" ] && [ "$blk" = "$pblk" ] && [ "$blk" != "$(printf '' | sha256sum | cut -c1-16)" ] && pass "r3-5: the probe carries the helper's record rule block verbatim ($blk)" || fail "r3-5 shared rule block: helper=[$blk] probe=[$pblk]"
 rm -rf "$rl"; mkdir -p "$rl"; printf '300 %s s-a morpheus 0 - -\n' "$((nowr + 60))" > "$rl/1-1-1"; chmod 000 "$rl/1-1-1"
 p=$(python3 "$LIB" probe-script gpu1 | DREAMTEAM_RESERVATIONS="$rl" PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^RESV,'); chmod 600 "$rl/1-1-1"
 check "$p" "RESV,ERR" "sampler: an unreadable record is RESV,ERR, never skipped (#289 r1 (4))"

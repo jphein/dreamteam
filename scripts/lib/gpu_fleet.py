@@ -562,11 +562,12 @@ def cmd_admit(a, fleet, cfg) -> int:
 # ── the board ─────────────────────────────────────────────────────────────────────────────────────
 
 PROBE = r"""
+__RULE__
 nvidia-smi --query-gpu=index,pci.bus_id,memory.used,memory.total,utilization.gpu --format=csv,noheader,nounits 2>/dev/null | sed 's/^/GPU,/'
 nvidia-smi --query-compute-apps=gpu_bus_id,pid,used_memory,process_name --format=csv,noheader,nounits 2>/dev/null | sed 's/^/APP,/'
 awk '/MemAvailable/{a=$2}/SwapTotal/{t=$2}/SwapFree/{f=$2}END{print "MEM,"a","t","f}' /proc/meminfo
 d="${DREAMTEAM_RESERVATIONS:-$HOME/.local/state/dreamteam/reservations}"; r=0; ok=1; now=$(date +%s)
-if dst=$(stat -c %F -- "$d" 2>&1); then if [ "$dst" != directory ] || ! [ -r "$d" ] || ! [ -x "$d" ]; then ok=0; else for f in "$d"/*; do [ "$f" = "$d/*" ] && break; stat -c %n -- "$f" >/dev/null 2>&1 || { ok=0; break; }; case "$f" in *.tmp) ok=0; break ;; esac; [ -f "$f" ] && [ -r "$f" ] || { ok=0; break; }; read -r mb exp ses typ st rid rag extra < "$f" 2>/dev/null || { ok=0; break; }; [ "${#ses}" -le 128 ] && [ "${#typ}" -le 128 ] && [ "${#rag}" -le 128 ] || { ok=0; break; }; case "$mb" in ''|*[!0-9]*|0[0-9]*) ok=0; break ;; esac; case "$exp" in ''|*[!0-9]*|0[0-9]*) ok=0; break ;; esac; case "${st:-}" in ''|*[!0-9]*|0[0-9]*) ok=0; break ;; esac; rid="${rid:--}"; rag="${rag:--}"; case "$rid" in -) ;; *) { [ "${#rid}" -eq 32 ] && case "$rid" in *[!0-9a-f]*) false ;; *) true ;; esac; } || { ok=0; break; } ;; esac; case "${ses:-}${typ:-}$rag" in *[!A-Za-z0-9._:-]*) ok=0; break ;; esac; [ -z "${extra:-}" ] || { ok=0; break; }; [ -n "${ses:-}" ] && [ -n "${typ:-}" ] && [ "${#mb}" -le 7 ] && [ "${#exp}" -le 12 ] || { ok=0; break; }; case "$f" in *.expired) continue ;; esac; if [ "$st" != 0 ] || [ "$((10#$exp))" -gt "$now" ]; then r=$((r + 10#$mb)); fi; done; [ "$r" -le 1000000 ] || ok=0; fi; else case "$dst" in *"No such file or directory"*) : ;; *) ok=0 ;; esac; fi
+if dst=$(stat -c %F -- "$d" 2>&1); then if [ "$dst" != directory ] || ! [ -r "$d" ] || ! [ -x "$d" ]; then ok=0; else for f in "$d"/*; do [ "$f" = "$d/*" ] && break; [ -L "$f" ] && { ok=0; break; }; stat -c %n -- "$f" >/dev/null 2>&1 || { ok=0; break; }; case "$f" in *.tmp) ok=0; break ;; esac; [ -f "$f" ] && [ -r "$f" ] || { ok=0; break; }; read -r mb exp ses typ st rid rag extra < "$f" 2>/dev/null || { ok=0; break; }; record_ok "${mb:-}" "${exp:-}" "${ses:-}" "${typ:-}" "${st:-}" "${rid:--}" "${rag:--}" "${extra:-}" || { ok=0; break; }; case "$f" in *.expired) continue ;; esac; if [ "$st" != 0 ] || [ "$((10#$exp))" -gt "$now" ]; then r=$((r + 10#$mb)); fi; done; [ "$r" -le 1000000 ] || ok=0; fi; else case "$dst" in *"No such file or directory"*) : ;; *) ok=0 ;; esac; fi
 if [ "$ok" = 1 ]; then echo "RESV,OK,$r"; else echo "RESV,ERR"; fi
 if lane=$(ps -eo pid=,ppid=,rss=,comm= 2>/dev/null) && [ -n "$lane" ]; then printf '%s\n' "$lane" | awk '{pp[$1]=$2; rss[$1]=$3; c[$1]=$4; n++; id[n]=$1} END{for(i=1;i<=n;i++){q=id[i]; while(q>1 && (q in pp)){if(c[q]=="claude"){s+=rss[id[i]]; break}; q=pp[q]}}; print "LANE,OK," s+0}'; else echo LANE,ERR; fi
 for p in __PATHS__; do printf 'DISK,%s,%s\n' "$p" "$(df -BG --output=avail "$p" 2>/dev/null | tail -1 | tr -dc 0-9)"; done
@@ -637,11 +638,27 @@ class HostLock:
         return False
 
 
+def record_rule() -> str:
+    """The ONE record rule, read out of scripts/reservation.sh (the block between its begin and end markers) and
+    carried verbatim into the probe: the helper and the probe validate a reservation record with the same functions
+    (#289 r3 ruling 5). Unreadable or missing → Refused: the probe never runs without the rule."""
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "reservation.sh")
+    try:
+        with open(p, encoding="utf-8") as f:
+            text = f.read()
+    except OSError as e:
+        raise Refused(f"the record rule cannot be read from {p} ({e}): no probe without it")
+    m = re.search(r"^# --- record rule begin\n.*?^# --- record rule end\n", text, re.S | re.M)
+    if not m:
+        raise Refused(f"the record rule block is missing from {p}: no probe without it")
+    return m.group(0)
+
+
 def probe_script(fleet: dict, host: str) -> str:
     h = fleet["hosts"][host]
     paths = " ".join(shlex.quote(f["path"]) for f in h.get("disk_floors", [])) or "/"
     pause = (h.get("pause_file") or "").replace("~", "$HOME")
-    return PROBE.replace("__PATHS__", paths).replace("__PAUSE__", pause)
+    return PROBE.replace("__RULE__", record_rule().rstrip("\n")).replace("__PATHS__", paths).replace("__PAUSE__", pause)
 
 
 def cmd_probe_script(a, fleet, cfg) -> int:

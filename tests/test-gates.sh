@@ -404,6 +404,45 @@ FAKE_AVAIL=60000 FAKE_SWAP_USED=0 FAKE_PGREP_COUNT=1 DREAMTEAM_RESERVATIONS="$TM
 chmod 755 "$TMP/roC"
 [ "$GRC" -eq 2 ] && pass "r2-4: a reservations dir the gate cannot create is a block, never a silent admit" || fail "r2-4 mkdir: rc=$GRC $(head -1 "$TMP/err")"
 
+# 2k) #289 round 3 ruling (Sen 2026-11-24 11:15, comments 7141808028 + 7141844194), one red case per item, named
+#     against its guard:
+#   r3-1 no fallback from an explicit --id or --agent: a stop that names an id or an agent releases that one or
+#        nothing (exit 3); only a stop with neither falls to the class                guard: stop's pick/byclass gate
+#   r3-2 the id is remembered BEFORE the rm: a release whose rm fails has already put the id in the seen-set
+#        guard: seen_add before rm in stop
+#   r3-4 the marker is read from ONE structured JSON field (the first user message's content prefix), never a byte
+#        search: a marker in another field, or past the prefix, is not an id        guard: the Python reader
+#   r3-7 transcript tests that cannot pass without reading: the control reads, the negatives refuse (2j, 2k)
+C=cccccccccccccccccccccccccccccccc; D=dddddddddddddddddddddddddddddddd
+fresh_resv; a=$(RC add 300 90 s-a morpheus --id $C); RC start s-a morpheus --agent ag-1 >/dev/null 2>&1
+r=$(RC stop s-a morpheus --id $D >/dev/null 2>&1; echo $?)
+[ "$r" -eq 3 ] && [ -e "$a" ] && pass "r3-1: stop --id of an id not on the ledger releases nothing (exit 3): no fallback to the class" || fail "r3-1 --id fallback: rc=$r a=$([ -e "$a" ] && echo y || echo n)"
+r=$(RC stop s-a morpheus --agent ag-9 >/dev/null 2>&1; echo $?)
+[ "$r" -eq 3 ] && [ -e "$a" ] && pass "r3-1: stop --agent of an agent bound to nothing releases nothing (exit 3): no fallback to the class" || fail "r3-1 --agent fallback: rc=$r a=$([ -e "$a" ] && echo y || echo n)"
+r=$(RC stop s-a morpheus >/dev/null 2>&1; echo $?)
+[ "$r" -eq 0 ] && [ ! -e "$a" ] && pass "r3-1: a stop with neither id nor agent releases one started reservation of the class (control)" || fail "r3-1 class stop: rc=$r"
+fresh_resv; a=$(RC add 300 90 s-a morpheus --id $C); RC start s-a morpheus --agent ag-1 >/dev/null 2>&1; chmod 555 "$RESV"
+r=$(RC stop s-a morpheus --id $C >/dev/null 2>&1; echo $?); chmod 755 "$RESV"
+[ "$r" -eq 1 ] && [ -e "$a" ] && grep -q "^$C " "$(dirname "$RESV")/released-ids" && pass "r3-2: a release whose rm fails has already remembered the id (seen-set written before the rm), file kept, exit 1" || fail "r3-2 id before rm: rc=$r seen=$(grep -c "^$C " "$(dirname "$RESV")/released-ids" 2>/dev/null)"
+# r3-4: the structured read
+sdir="$TMP/sessK"; fresh_resv; mkdir -p "$sdir/s-k/subagents"
+FAKE_AVAIL=60000 FAKE_SWAP_USED=0 FAKE_PGREP_COUNT=1 DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HL" \
+  run_gate "$MEM_GATE" "$(printf '{"session_id":"s-k","transcript_path":"%s/s-k.jsonl","tool_name":"Agent","tool_input":{"prompt":"x","subagent_type":"morpheus"}}' "$sdir")"
+afile=$(ls "$RESV"/* | head -1); rid=$(awk '{print $6}' "$afile"); RC start s-k morpheus --agent ag-z >/dev/null 2>&1
+b=$(RC add 300 90 s-k morpheus --id eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee); RC start s-k morpheus --agent ag-k >/dev/null 2>&1
+tr_k="$sdir/s-k/subagents/agent-ag-k.jsonl"
+printf '{"type":"user","message":{"role":"user","content":"hello"},"note":"[dreamteam reservation %s]"}\n' "$rid" > "$tr_k"   # the marker in ANOTHER field
+printf '{"hook_event_name":"SubagentStop","session_id":"s-k","transcript_path":"%s/s-k.jsonl","agent_id":"ag-k","agent_type":"morpheus","agent_transcript_path":"%s"}' "$sdir" "$tr_k" | RC stop-hook >/dev/null 2>&1
+[ -e "$afile" ] && [ ! -e "$b" ] && pass "r3-4: a marker in another JSON field is not an id (release by agent_id, b): the read is structured, not a byte search" || fail "r3-4 other field: afile=$([ -e "$afile" ] && echo y || echo n) b=$([ -e "$b" ] && echo y || echo n)"
+b=$(RC add 300 90 s-k morpheus --id dddddddddddddddddddddddddddddddd); RC start s-k morpheus --agent ag-k >/dev/null 2>&1
+printf '{"type":"user","message":{"role":"user","content":"hello [dreamteam reservation %s]"}}\n' "$rid" > "$tr_k"   # the marker not at the prefix
+printf '{"hook_event_name":"SubagentStop","session_id":"s-k","transcript_path":"%s/s-k.jsonl","agent_id":"ag-k","agent_type":"morpheus","agent_transcript_path":"%s"}' "$sdir" "$tr_k" | RC stop-hook >/dev/null 2>&1
+[ -e "$afile" ] && [ ! -e "$b" ] && pass "r3-4: a marker that is not the content's prefix is not an id (release by agent_id)" || fail "r3-4 not prefix: afile=$([ -e "$afile" ] && echo y || echo n) b=$([ -e "$b" ] && echo y || echo n)"
+b=$(RC add 300 90 s-k morpheus --id ffffffffffffffffffffffffffffffff); RC start s-k morpheus --agent ag-k >/dev/null 2>&1
+printf '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[dreamteam reservation %s]\\nx"}]}}\n' "$rid" > "$tr_k"   # content as blocks
+printf '{"hook_event_name":"SubagentStop","session_id":"s-k","transcript_path":"%s/s-k.jsonl","agent_id":"ag-k","agent_type":"morpheus","agent_transcript_path":"%s"}' "$sdir" "$tr_k" | RC stop-hook >/dev/null 2>&1
+[ ! -e "$afile" ] && [ -e "$b" ] && pass "r3-4 + r3-7: the marker as the prefix of the first user message's content (block form) is read: the id's file released, b stays" || fail "r3-4 blocks: afile=$([ -e "$afile" ] && echo y || echo n) b=$([ -e "$b" ] && echo y || echo n)"
+
 # 2e) xreview #256 r4 (Sen 2026-11-18 20:58), one red case per item:
 #   1  scan errors are nonzero and delete nothing: an unreadable directory, a malformed file (evidence kept); a
 #      missing directory is "0 0" (never reserved), an unreadable one is an error the gate turns into a block
