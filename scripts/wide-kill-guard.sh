@@ -26,6 +26,16 @@
 # WIDE_KILL_OK=1 (it lets a JUDGED wide kill through; it does not excuse a command the detector could not judge).
 # Kill switch: config `widekill.enforce=false`. A missing config ENFORCES.
 #
+# THE TWO BYPASSES, AND WHAT THEY LEAVE BEHIND (lead ruling on #279, 2026-11-24):
+#   • `widekill.enforce=false` skips the BLOCK, never the JUDGEMENT: the interpreter check and the detector run
+#     exactly as when enforcing. What the switch let through is written down: a judged wide kill, and also a
+#     command that could NOT be judged (no python3, a detector that failed), with that reason.
+#   • `WIDE_KILL_OK=1` lets a judged wide kill through, and is written down the same way.
+#   One line per bypass in $DREAMTEAM_WIDEKILL_LOG (default ~/.claude/state/dreamteam/wide-kill-guard.log):
+#       2026-11-24 01:02:03 wide-kill-guard ALLOWED bypass=WIDE_KILL_OK=1 verdict=wide-kill cmd=<the command, one line, 300 chars>
+#   A log that cannot be written does not turn an allow into a block: the line goes to stderr instead.
+#   A command judged NOT a wide kill bypasses nothing and writes nothing.
+#
 # A SPEED BUMP, NOT A BOUNDARY: it matches command text, so a kill hidden in a script file passes and a
 # command that only prints such a line is blocked (except a heredoc body that ends as data, #191's reader).
 # FAIL OPEN only where nothing can be read at all: a malformed payload, no jq. FAIL CLOSED once the text is
@@ -46,12 +56,23 @@ TOOL=""; CMD=""
 printf '%s' "$CMD" | grep -Eq '(pkill|killall|pgrep|pidof|(^|[^[:alnum:]_.-])ps[[:space:]])' || exit 0
 
 ENFORCE=$(jq -r 'if .widekill.enforce == false then "false" else "true" end' "$CFG" 2>/dev/null || echo true)
-[ "$ENFORCE" = "false" ] && exit 0
+LOG="${DREAMTEAM_WIDEKILL_LOG:-$HOME/.claude/state/dreamteam/wide-kill-guard.log}"
+# bypass <which> <verdict>: the ONE line a bypass leaves, naming the bypass and the command.
+bypass() {
+  # bash builtins only (the time, the one-line form, the cut): a host so broken that python3 is gone may have
+  # lost date, tr and cut as well, and that is exactly when this line matters
+  local line c="${CMD//[$'\n\r\t']/ }" now
+  printf -v now '%(%F %T)T' -1
+  line="$now wide-kill-guard ALLOWED bypass=$1 verdict=$2 cmd=${c:0:300}"
+  { { [ -d "${LOG%/*}" ] || mkdir -p "${LOG%/*}"; } && printf '%s\n' "$line" >> "$LOG"; } 2>/dev/null || printf '%s\n' "$line" >&2
+}
 
 # FAIL CLOSED from here (Sen, xreview #279 r1 and r2; as no-poll-guard does): this text names a killer or a
-# listing, and if it cannot be judged it is not run. The kill switch above is the ONLY bypass of that: the
+# listing, and if it cannot be judged it is not run. The kill switch does NOT skip any of this: it is looked at
+# only where a block would happen, and then the allow is logged with what was (or could not be) judged. The
 # WIDE_KILL_OK=1 prefix is looked at after the detector has answered, and only lets a JUDGED wide kill through.
 if ! command -v python3 >/dev/null 2>&1; then
+  if [ "$ENFORCE" = "false" ]; then bypass "widekill.enforce=false" "UNJUDGED(python3-missing)"; exit 0; fi
   echo "🛑 DREAMTEAM WIDE-KILL GUARD — python3 is missing, so this kill or listing command cannot be judged: blocked (kill switch: config widekill.enforce=false)" >&2
   exit 2
 fi
@@ -62,10 +83,13 @@ JRC=$?
 # that ended without a verdict.
 [ "$JRC" -eq 21 ] && exit 0
 if [ "$JRC" -ne 20 ]; then
+  if [ "$ENFORCE" = "false" ]; then bypass "widekill.enforce=false" "UNJUDGED(detector-exit-$JRC)"; exit 0; fi
   echo "🛑 DREAMTEAM WIDE-KILL GUARD — the detector failed (exit $JRC, not a verdict), so this kill or listing command cannot be judged: blocked (kill switch: config widekill.enforce=false)" >&2
   exit 2
 fi
-case "$CMD" in WIDE_KILL_OK=1\ *) exit 0 ;; esac          # a judged wide kill, and the caller says they mean it
+# A JUDGED wide kill. Two things let it through, and each leaves its line.
+if [ "$ENFORCE" = "false" ]; then bypass "widekill.enforce=false" "wide-kill"; exit 0; fi
+case "$CMD" in WIDE_KILL_OK=1\ *) bypass "WIDE_KILL_OK=1" "wide-kill"; exit 0 ;; esac    # the caller says they mean it
 
 {
   echo "🛑 DREAMTEAM WIDE-KILL GUARD — a host-wide kill of a test runner, blocked"

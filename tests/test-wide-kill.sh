@@ -20,10 +20,12 @@ GUARD="$ROOT/scripts/wide-kill-guard.sh"
 KM="$ROOT/scripts/kill-mine.py"
 
 PASS=0; FAIL=0
+BLOG_SET=1   # the bypass log goes to this run's temp dir (set below, once it exists)
 pass() { echo "PASS: $1"; PASS=$((PASS+1)); }
 fail() { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
 
 TMP="$(mktemp -d)" && TMP="$(cd "$TMP" && pwd -P)" || { echo "FAIL: no temp dir"; exit 1; }
+export DREAMTEAM_WIDEKILL_LOG="$TMP/bypass.log"
 PIDS=""                                      # informational only: NOTHING here signals a remembered pid number
 # Cleanup never trusts a pid it wrote down (a number can be reused by another lane's live suite, xreview #279
 # r1). Every fixture stands in a directory under $TMP, which exists for this run only. So: take a pidfd, THEN
@@ -194,8 +196,27 @@ allow "kill-mine named after a listing inside one pipeline" 'echo "$(pgrep -fc p
 allow "an ordinary command" 'ls -la && git status'
 allow "the word skill" 'cat skills/dreamteam/SKILL.md | grep pytest'
 
-run Bash 'pkill -f pytest' "$TMP/off.json"
-if [ "$GRC" -eq 0 ]; then pass "kill switch widekill.enforce=false allows"; else fail "kill switch ignored — exit $GRC"; fi
+# ── the two bypasses leave a line each (lead ruling on #279) ────────────────────────────────────────────────
+BL="$DREAMTEAM_WIDEKILL_LOG"
+[ ! -s "$BL" ] && pass "everything allowed or blocked so far wrote NO bypass line (a not-wide command bypasses nothing; a block is not a bypass)… except the stated override, checked next" \
+  || { [ "$(wc -l < "$BL")" -eq 1 ] && grep -q 'bypass=WIDE_KILL_OK=1 ' "$BL" && pass "so far exactly ONE bypass line exists: the stated override's" || fail "unexpected bypass lines so far: $(cat "$BL")"; }
+: > "$BL"; run Bash 'WIDE_KILL_OK=1 pkill -f pytest'
+if [ "$GRC" -eq 0 ] && [ "$(wc -l < "$BL")" -eq 1 ] && grep -qE '^[0-9-]{10} [0-9:]{8} wide-kill-guard ALLOWED bypass=WIDE_KILL_OK=1 verdict=wide-kill cmd=WIDE_KILL_OK=1 pkill -f pytest$' "$BL"; then
+  pass "WIDE_KILL_OK=1 on a judged wide kill: allowed AND logged, one line naming the bypass and the command"; else fail "override not logged: rc $GRC, log: $(cat "$BL")"; fi
+: > "$BL"; run Bash 'WIDE_KILL_OK=1 pkill -f server.py'
+if [ "$GRC" -eq 0 ] && [ ! -s "$BL" ]; then pass "WIDE_KILL_OK=1 on a command that is NOT a wide kill: nothing was bypassed, nothing is logged"; else fail "override on a harmless command: rc $GRC, log: $(cat "$BL")"; fi
+: > "$BL"; run Bash 'pkill -f pytest'
+if blocked && [ ! -s "$BL" ]; then pass "a BLOCKED wide kill writes no bypass line"; else fail "block wrote a bypass line: $(cat "$BL")"; fi
+: > "$BL"; run Bash 'pkill -f pytest' "$TMP/off.json"
+if [ "$GRC" -eq 0 ] && [ "$(wc -l < "$BL")" -eq 1 ] && grep -q 'ALLOWED bypass=widekill.enforce=false verdict=wide-kill cmd=pkill -f pytest$' "$BL"; then
+  pass "kill switch widekill.enforce=false: a judged wide kill is allowed AND logged (the judgement still ran: the line carries its verdict)"; else fail "kill switch: rc $GRC, log: $(cat "$BL")"; fi
+: > "$BL"; run Bash 'pkill -f server.py' "$TMP/off.json"
+if [ "$GRC" -eq 0 ] && [ ! -s "$BL" ]; then pass "kill switch on a command judged NOT wide: allowed, nothing bypassed, nothing logged"; else fail "kill switch, harmless command: rc $GRC, log: $(cat "$BL")"; fi
+: > "$BL"; run Bash $'ps -eo pid,args | grep pytest |\n  awk \'{print $1}\' |\n\txargs kill' "$TMP/off.json"
+if [ "$GRC" -eq 0 ] && [ "$(wc -l < "$BL")" -eq 1 ]; then pass "a command of several lines is ONE log line"; else fail "multi-line command: rc $GRC, $(wc -l < "$BL") line(s)"; fi
+: > "$TMP/notadir"; GRC=0; jq -nc '{tool_name:"Bash",tool_input:{command:"WIDE_KILL_OK=1 pkill -f pytest"}}' | DREAMTEAM_WIDEKILL_LOG="$TMP/notadir/x.log" DREAMTEAM_CONFIG="$TMP/on.json" bash "$GUARD" 2>"$TMP/err" || GRC=$?
+if [ "$GRC" -eq 0 ] && [ "$(wc -l < "$TMP/err")" -eq 1 ] && grep -q 'ALLOWED bypass=WIDE_KILL_OK=1 verdict=wide-kill' "$TMP/err"; then pass "a log that cannot be written: the allow stands and the line goes to stderr"; else fail "unwritable log: rc $GRC, err: $(cat "$TMP/err")"; fi
+: > "$BL"
 run Bash 'pkill -f pytest' "$TMP/absent.json"
 if blocked; then pass "a MISSING config still enforces"; else fail "missing config disabled the guard — exit $GRC"; fi
 run Monitor 'pkill -f pytest'
@@ -233,7 +254,7 @@ for t in jq grep cat bash dirname; do ln -s "$(command -v "$t")" "$TMP/nopy/$t" 
 GRC=0; jq -nc '{tool_name:"Bash",tool_input:{command:"pkill -f pytest"}}' | PATH="$TMP/nopy" DREAMTEAM_CONFIG="$TMP/on.json" "$(command -v bash)" "$GUARD" 2>/dev/null || GRC=$?
 GRC=0; jq -nc '{tool_name:"Bash",tool_input:{command:"pkill -f pytest"}}' | PATH="$TMP/nopy" DREAMTEAM_CONFIG="$TMP/on.json" "$(command -v bash)" "$GUARD" 2>"$TMP/err" || GRC=$?
 if [ "$GRC" -eq 2 ] && [ "$(wc -l < "$TMP/err")" -eq 1 ] && grep -q 'python3 is missing' "$TMP/err"; then pass "no python3 on PATH is a BLOCK, with one line"; else fail "no python3 → exit $GRC: $(cat "$TMP/err")"; fi
-# the judge's own exit codes: 0 and 1 are verdicts, anything else is the failure blocked above
+# the judge's own exit codes: 20 and 21 are the verdicts; anything else (0 and 1 included) is the failure blocked above
 printf '%s' 'pkill -f pytest' | python3 -I "$ROOT/scripts/lib/widekill_text.py"; rc=$?
 printf '%s' 'pkill -f server.py' | python3 -I "$ROOT/scripts/lib/widekill_text.py"; rc2=$?
 if [ "$rc" -eq 20 ] && [ "$rc2" -eq 21 ]; then pass "the detector's verdicts are 20 (wide) and 21 (not): codes no failure produces"; else fail "detector exits $rc / $rc2"; fi
@@ -256,8 +277,15 @@ brk import 'import a_module_that_does_not_exist_anywhere'
 if [ "$GRC" -eq 2 ] && [ "$(wc -l < "$TMP/err")" -eq 1 ]; then pass "a failed import in the detector BLOCKS, with exactly one line"; else fail "detector import error → exit $GRC"; fi
 brk exitzero 'import sys; sys.exit(0)'
 if [ "$GRC" -eq 2 ]; then pass "a detector that ends with 0 and no verdict BLOCKS"; else fail "detector exit 0 → exit $GRC"; fi
-brk exception 'raise RuntimeError("boom")' 'pkill -f server.py' "$TMP/off.json"
-if [ "$GRC" -eq 0 ]; then pass "the kill switch bypasses a broken detector"; else fail "kill switch with a broken detector → exit $GRC"; fi
+# the kill switch skips the BLOCK, never the JUDGEMENT: with a broken detector or no interpreter the health checks
+# still run, and what could not be judged is written down
+: > "$BL"; brk exception 'raise RuntimeError("boom")' 'pkill -f server.py' "$TMP/off.json"
+if [ "$GRC" -eq 0 ] && [ "$(wc -l < "$BL")" -eq 1 ] && grep -q 'ALLOWED bypass=widekill.enforce=false verdict=UNJUDGED(detector-exit-1) cmd=pkill -f server.py$' "$BL"; then
+  pass "kill switch with a BROKEN detector: allowed, and the log says the command was NOT judged and why (the health check ran)"; else fail "kill switch, broken detector: rc $GRC, log: $(cat "$BL")"; fi
+: > "$BL"; GRC=0; jq -nc '{tool_name:"Bash",tool_input:{command:"pkill -f pytest"}}' | PATH="$TMP/nopy" DREAMTEAM_CONFIG="$TMP/off.json" "$(command -v bash)" "$GUARD" 2>/dev/null || GRC=$?
+if [ "$GRC" -eq 0 ] && [ "$(wc -l < "$BL")" -eq 1 ] && grep -q 'bypass=widekill.enforce=false verdict=UNJUDGED(python3-missing) cmd=pkill -f pytest$' "$BL"; then
+  pass "kill switch with NO python3: allowed, logged as not judged (the interpreter check ran)"; else fail "kill switch, no python3: rc $GRC, log: $(cat "$BL")"; fi
+: > "$BL"
 # (2) the WIDE_KILL_OK=1 prefix does NOT excuse a command that could not be judged
 brk exception 'raise RuntimeError("boom")' 'WIDE_KILL_OK=1 pkill -f pytest'
 if [ "$GRC" -eq 2 ]; then pass "WIDE_KILL_OK=1 with a failing detector: still blocked (only the kill switch bypasses a failure)"; else fail "override with a failing detector → exit $GRC"; fi
