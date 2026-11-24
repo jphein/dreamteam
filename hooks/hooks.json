@@ -236,7 +236,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/lane-style-hook.sh\"",
-            "timeout": 6
+            "timeout": 8
           }
         ]
       }

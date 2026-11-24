@@ -83,19 +83,26 @@ that have content), twelve lines at most, no restating and no closing offers. It
 never what it checks. A failure, anything needed to act safely, every "Not verified" item and required
 disclosure, and anything asked for in full keep their length.
 
-Nobody switches it on per lane. `scripts/lane-style-hook.sh` runs at every session start (startup, resume,
-clear, compact) and gives the style to a session by its ROLE, which is the tmux session name:
+`scripts/lane-style-hook.sh` injects that text as context at every SessionStart event (startup, resume, clear,
+compact). It is injection, repeated each time; it is not an `outputStyle` setting and nothing is stored per
+session. Who gets it, first match wins:
 
 | The session | Gets the style |
 |---|---|
-| a lead: `.laneStyle.lead` in `config.json` (default `spire`) or `$DREAMTEAM_LEAD_SESSION` | never (checked first) |
-| a name matching `.laneStyle.exclude` (put the owner's own sessions here, in the host overlay) | no |
-| any other tmux session matching `.laneStyle.lanes` (default `*`) | yes, at every start |
-| a session outside tmux (a one-off `claude -p`, a nightly job) | no |
+| on katana, or on a host in `.laneStyle.neverHosts` | never |
+| outside tmux (a one-off `claude -p`, a nightly job) | no |
+| the lead: the session id or pane recorded in `lead.session`; or a tmux session named `spire`, `$DREAMTEAM_LEAD_SESSION`, or in `.laneStyle.lead` | never |
+| a tmux session whose name is EXACTLY in `.laneStyle.lanes` | yes, at every event |
+| any other session, such as one a person opens and types in | no |
 
-`scripts/lane-style-hook.sh --who <name>` says what a session of that name gets and why. `.laneStyle.enabled:
-false` switches it off. Measured on 2026-11-24 with three fixed prompts (`tests/probe-lane-tokens.sh`): median
-output tokens fell by 27 % (fix a failing test), 53 % (explain a script) and 15 % (report a failing build, whole).
+`.laneStyle.lanes` ships empty and takes exact names, no patterns. To make a host's lanes use the style, list
+them in that host's overlay:
+
+    config.<host>.json:   { "laneStyle": { "lanes": ["luna-map", "morpheus-roam"] } }
+
+`scripts/lane-style-hook.sh --who <name>` says what a session of that name gets on this host and why. Each
+injection starts with a stamp (`[lane style given <time> on <event> to <name>]`) and leaves a line in
+`~/.claude/state/dreamteam/lane-style.log`.
 
 ## Fleet lessons
 

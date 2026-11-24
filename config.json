@@ -79,10 +79,10 @@
   },
   "laneStyle": {
     "enabled": true,
-    "lead": ["spire"],
-    "exclude": [],
-    "lanes": ["*"],
-    "_notes": "scripts/lane-style-hook.sh (SessionStart): every LANE session gets the token-saving output style output-styles/lane.md at every start, resume, clear and compact. The role is the tmux session name. lead: names that are NEVER styled (checked first; $DREAMTEAM_LEAD_SESSION is one too). exclude: globs of sessions that are not lanes (the owner's own sessions, by name, in the host overlay). lanes: globs of lane names, default every other tmux session. A session outside tmux is not a lane. enabled=false switches it off. Flow row d1a1c56a."
+    "lanes": [],
+    "lead": [],
+    "neverHosts": ["katana"],
+    "_notes": "scripts/lane-style-hook.sh (SessionStart): a LANE session is given the token-saving output style output-styles/lane.md as context at every start, resume, clear and compact. It is context injection repeated per event, not an outputStyle setting. lanes: the EXACT tmux session names that are lanes, no patterns. It ships EMPTY: each lane host names its lanes in its own overlay config.<host>.json, so a session nobody listed (one the owner opens and types in) is never styled. lead: more lead names, never styled; spire, $DREAMTEAM_LEAD_SESSION and the session recorded in lead.session are refused by the code whatever this says. neverHosts: hosts where nobody is styled; katana is refused by the code as well. enabled=false switches it off. Flow row d1a1c56a."
   },
   "org": {
     "agentsCatalog": "~/Projects/lexicon.realm.watch/catalog/agents.yaml",
