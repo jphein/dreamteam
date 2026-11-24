@@ -43,7 +43,8 @@ trap 'tmux -L lwtest kill-server 2>/dev/null; reap_stubs; rm -rf "$T"' EXIT
 mkdir -p "$T/bin" "$T/state" "$T/checks" "$T/leadcwd"
 cat > "$T/bin/claude" <<'EOF'
 #!/bin/bash
-echo "stub claude $*" > "${STUB_OUT:?}/claude.args"; pwd -P > "$STUB_OUT/claude.cwd"; ls -l /proc/$$/fd > "$STUB_OUT/claude.fds" 2>&1; echo $$ > "$STUB_OUT/claude.pid"; sleep 40
+echo "stub claude $*" > "${STUB_OUT:?}/claude.args"; pwd -P > "$STUB_OUT/claude.cwd"; ls -l /proc/$$/fd > "$STUB_OUT/claude.fds" 2>&1; echo $$ > "$STUB_OUT/claude.pid"; echo x >> "$STUB_OUT/claude.starts"
+got=""; IFS= read -r -t 3 got; printf '%s' "$got" > "$STUB_OUT/claude.stdin"; sleep 40
 EOF
 chmod +x "$T/bin/claude"
 printf '#!/bin/bash\nexit 0\n' > "$T/bin/true-mail"; chmod +x "$T/bin/true-mail"
@@ -70,7 +71,7 @@ bad() { fail=$((fail+1)); echo "FAIL $1"; }
 run() { bash "$WD" 2>&1; }
 SID=11111111-2222-3333-4444-555555555555
 OTHER=99999999-8888-7777-6666-555555555555
-reset() { reap_stubs; rm -f "$T/claude.args" "$T/claude.cwd" "$T/claude.pid" "$T/state/lead-watchdog.relaunches" "$T/state/lead-watchdog.off" "$T/scope-run.log" "$T/scope-fail.log" "$T/hook.count" "$T/hook.at" "$T/hook.send" "$T/claude.fds" "$T/state/lead-launch.last"; }
+reset() { reap_stubs; rm -f "$T/claude.args" "$T/claude.cwd" "$T/claude.pid" "$T/state/lead-watchdog.relaunches" "$T/state/lead-watchdog.off" "$T/scope-run.log" "$T/scope-fail.log" "$T/hook.count" "$T/hook.at" "$T/hook.send" "$T/hook.send-pane" "$T/hook.respawn" "$T/elsewhere.out" "$T/claude.fds" "$T/claude.stdin" "$T/claude.starts" "$T/state/lead-launch.last"; }
 sess_file() { printf 'session=%s\npane=%s\ncwd=%s\n' "$SID" "${1:-lwtest:0.0}" "${2:-$CWDR}" > "$T/state/lead.session"; }
 fresh() {  # a server with one session `lwtest`, one pane at a bash prompt; $1 = text to print first
     tmux -L lwtest kill-server 2>/dev/null; reset
@@ -169,11 +170,11 @@ fresh ""; sess_file; touch "$T/state/lead-watchdog.off"; out=$(run)
 grep -q '^CHECK lead-liveness warn · watchdog off' <<<"$out" && [ ! -e "$T/claude.args" ] && ok "kill-switch → warn, nothing typed" || bad "kill-switch: $out"
 fresh ""; sess_file; now=$(date +%s); printf '%s\n%s\n%s\n' "$((now-100))" "$((now-200))" "$((now-300))" > "$T/state/lead-watchdog.relaunches"; out=$(run)
 grep -q '^CHECK lead-liveness fail · .*3 relaunches already' <<<"$out" && [ ! -e "$T/claude.args" ] && ok "loop guard → fail after 3 in an hour" || bad "loop: $out"
-fresh ""; sess_file; ( exec 8>"$T/state/lead-watchdog.lock"; flock 8; sleep 4 ) & holder=$!; sleep 0.4; out=$(run); wait "$holder" 2>/dev/null
-grep -q '^CHECK lead-liveness warn · another lead-watchdog run holds the lock' <<<"$out" && typed_nothing && ok "the lock is held by another run: nothing done this tick" || bad "lock: $out"
-fresh ""; sess_file; ( exec 7>"$T/state/lead-launch.lock"; flock 7; sleep 4 ) & holder=$!; sleep 0.6; out=$(run); wait "$holder" 2>/dev/null
-grep -q '^CHECK lead-liveness warn · a launch of the lead is in progress (the launch lock is held): nothing made, nothing typed' <<<"$out" && typed_nothing \
-  && ok "a launch is in progress (someone holds the launch lock): nothing made, nothing typed" || bad "launch in progress: $out"
+fresh ""; sess_file; ( exec 8>"$T/state/lead.lock"; flock 8; sleep 4 ) & holder=$!; sleep 0.4; out=$(run); wait "$holder" 2>/dev/null
+grep -q '^CHECK lead-liveness warn · the lead lock is held (a launch of the lead, or another lead-watchdog run): nothing done this tick' <<<"$out" && typed_nothing \
+  && ok "THE lead lock is held (another run, or a launch in progress: it is one lock): nothing done this tick" || bad "lock: $out"
+grep -q 'exec 9>"\$LOCK"' "$WD" && grep -q '^LOCK="\$STATE/lead.lock"' "$WD" && grep -q 'exec 8>"\$STATE/lead.lock"' "$LA" && ! grep -q 'lead-launch.lock\|lead-watchdog.lock' "$WD" "$LA" \
+  && ok "the watchdog and the launcher name the SAME lock file, <state>/lead.lock, and no other" || bad "lock path"
 
 # ── the place is restored as recorded ───────────────────────────────────────────────────────────────────────
 tmux -L lwtest kill-server 2>/dev/null; sleep 0.5; reset; sess_file lwtest:3.0
@@ -256,7 +257,13 @@ cat > "$T/bin/hook" <<EOF
 start() { ( cd "$T" && setsid "$T/bin/claude" --resume $SID > /dev/null 2>&1 < /dev/null & ); for i in 1 2 3 4 5 6 7 8 9 10; do [ -s "$T/claude.pid" ] && break; sleep 0.2; done; rm -f "$T/claude.args"; }
 case "\$1" in
   gate) n=\$(( \$(cat "$T/hook.count" 2>/dev/null || echo 0) + 1 )); echo "\$n" > "$T/hook.count"; [ "\$n" = "\$(cat "$T/hook.at" 2>/dev/null)" ] && start ;;
-  send) echo sent >> "$T/hook.count"; [ -e "$T/hook.send" ] && start ;;
+  send) echo sent >> "$T/hook.count"
+        [ -e "$T/hook.send" ] && start
+        # a LAUNCH typed into the lead's own pane at this very moment (a person, or another tool, using the launcher)
+        [ -e "$T/hook.send-pane" ] && { tmux -L lwtest send-keys -t "\$(cat "$T/hook.send-pane")" -l "bash $LA"; tmux -L lwtest send-keys -t "\$(cat "$T/hook.send-pane")" Enter; sleep 1; } ;;
+  respawn) echo respawn >> "$T/hook.count"
+        # a launch started ELSEWHERE between the gate and respawn-pane: it must wait for the lock
+        [ -e "$T/hook.respawn" ] && { ( cd "$T" && setsid bash "$LA" > "$T/elsewhere.out" 2>&1 < /dev/null & ); sleep 1; } ;;
 esac
 exit 0
 EOF
@@ -274,6 +281,26 @@ grep -q "^CHECK lead-liveness warn · the lead's id 11111111 is in the command l
   && [ ! -e "$T/claude.args" ] && [ "$(holders)" = 1 ] && [ -z "$(pgrep -P "$(tmux -L lwtest display -p -t lwtest:0.0 '#{pane_pid}')")" ] \
   && ok "RACE: a lead starts AFTER the last gate, before the keys land: the launcher refuses; exactly ONE lead on the host" || bad "race after the last gate: holders=$(holders) $out"
 grep -q sent "$T/hook.count" && tmux -L lwtest capture-pane -p -t lwtest:0.0 | grep -q 'lead-launch: refused: a lead is already there' && ok "…the hook ran between the gate and the keys, and the pane shows the launcher's refusal" || bad "after-gate fixture: $(cat "$T/hook.count" 2>&1)"
+
+# ── THE RULING'S RACE (PR comment 7128795764): a launch appears BETWEEN the gate and the act ─────────────────
+# (a) …in the lead's OWN pane, between the last gate and the keys. Someone runs the launcher there. It cannot start
+#     a lead while the watchdog holds the lock: it waits. The watchdog's keys then land in a pane where that
+#     launcher is waiting; when the lock is free the launcher starts the lead and must have DISCARDED those keys.
+#     Exactly one lead, started once, and not one character of the watchdog's line reached it.
+reap_stubs; fresh ""; sess_file; echo lwtest:0.0 > "$T/hook.send-pane"; sleep 1.0; out=$(LEAD_WATCHDOG_TEST_HOOK="$T/bin/hook" run); sleep 4.5
+[ "$(holders)" = 1 ] && [ "$(wc -l < "$T/claude.starts" 2>/dev/null)" = 1 ] && ok "RACE in the pane, between the gate and the keys: exactly ONE lead, started once" || bad "race in the pane: holders=$(holders) starts=$(cat "$T/claude.starts" 2>/dev/null | wc -l) $out"
+[ -e "$T/claude.stdin" ] && [ ! -s "$T/claude.stdin" ] && ok "…and NOTHING was typed into it: the lead read no input (the launcher discarded the watchdog's line)" || bad "typed into the lead: '$(cat "$T/claude.stdin" 2>&1)'"
+grep -q "^CHECK lead-liveness ok · relaunched 11111111 in lwtest:0.0" <<<"$out" && ok "…the line reports the one lead in the pane" || bad "race in the pane, line: $out"
+! tmux -L lwtest capture-pane -p -t lwtest:0.0 | grep -q 'refused' && ok "…no second launch ran in that pane afterwards (the typed line was not left for a shell either)" || bad "a second launch ran: $(tmux -L lwtest capture-pane -p -t lwtest:0.0 | tail -3)"
+# (b) …elsewhere, between the gate and respawn-pane. The pane is at a continuation prompt, so it is respawned. A
+#     launch started at that moment waits for the lock; afterwards two launchers want to start the lead, one after
+#     the other under the lock: exactly one does.
+reap_stubs; fresh ""; sess_file; tmux -L lwtest send-keys -t lwtest:0.0 -l "if true; then echo x"; tmux -L lwtest send-keys -t lwtest:0.0 Enter; sleep 1.0
+touch "$T/hook.respawn"; out=$(LEAD_WATCHDOG_TEST_HOOK="$T/bin/hook" run); sleep 3
+grep -q respawn "$T/hook.count" && [ "$(holders)" = 1 ] && [ "$(wc -l < "$T/claude.starts" 2>/dev/null)" = 1 ] && ok "RACE before the respawn: a launch started between the gate and respawn-pane waited; exactly ONE lead, started once" || bad "race before respawn: holders=$(holders) starts=$(cat "$T/claude.starts" 2>/dev/null | wc -l) $out"
+grep -q 'refused: a lead is already there' "$T/elsewhere.out" 2>/dev/null || tmux -L lwtest capture-pane -p -t lwtest:0.0 | grep -q 'refused: a lead is already there' \
+  && ok "…the other launcher was refused by name (a lead is already there)" || bad "no refusal seen: $(cat "$T/elsewhere.out" 2>&1 | head -2)"
+reap_stubs
 fresh ""; sess_file; tmux -L lwtest send-keys -t lwtest:0.0 -l "if true; then echo x"; tmux -L lwtest send-keys -t lwtest:0.0 Enter; sleep 1.0
 pid_before=$(tmux -L lwtest display -p -t lwtest:0.0 '#{pane_pid}'); echo 2 > "$T/hook.at"; out=$(LEAD_WATCHDOG_TEST_HOOK="$T/bin/hook" run)
 grep -q 'nothing typed (before the respawn)' <<<"$out" && [ "$(tmux -L lwtest display -p -t lwtest:0.0 '#{pane_pid}')" = "$pid_before" ] && typed_nothing \
@@ -291,7 +318,7 @@ reap_stubs; fresh ""; sess_file; sleep 1.0; out=$(run)
 mkdir -p "$T/fdbin"
 for prog in tmux systemctl date awk sleep tee grep mv touch wc seq tail head pgrep stat cat rm; do
   real=$(command -v "$prog") || continue
-  printf '#!/bin/bash\necho %s >> "%s/fd.seen"\nfor f in /proc/$$/fd/*; do case "$(readlink "$f" 2>/dev/null)" in *lead-watchdog.lock|*lead-launch.lock) echo "%s $f" >> "%s/fd.leak" ;; esac; done\nexec %s "$@"\n' "$prog" "$T" "$prog" "$T" "$real" > "$T/fdbin/$prog"
+  printf '#!/bin/bash\necho %s >> "%s/fd.seen"\nfor f in /proc/$$/fd/*; do case "$(readlink "$f" 2>/dev/null)" in *lead.lock) echo "%s $f" >> "%s/fd.leak" ;; esac; done\nexec %s "$@"\n' "$prog" "$T" "$prog" "$T" "$real" > "$T/fdbin/$prog"
   chmod +x "$T/fdbin/$prog"
 done
 reap_stubs; fresh ""; sess_file; sleep 1.0; rm -f "$T/fd.seen" "$T/fd.leak"; out=$(PATH="$T/fdbin:$PATH" run)
@@ -299,8 +326,8 @@ resumed && [ ! -s "$T/fd.leak" ] && ok "a whole relaunch: no program the watchdo
 seen=$(sort -u "$T/fd.seen" 2>/dev/null | tr '\n' ' ')
 for prog in tmux systemctl date awk sleep tee grep pgrep; do case " $seen " in *" $prog "*) : ;; *) bad "fd fixture: $prog was never called through its wrapper (seen: $seen)" ;; esac; done
 ok "fd fixture: the wrappers were really called (tmux systemctl date awk sleep tee grep pgrep among: $seen)"
-! grep -q 'lead-launch.lock\|lead-watchdog.lock' "$T/claude.fds" 2>/dev/null && [ -s "$T/claude.fds" ] && ok "the lead itself holds neither lock (the launch lock ends at the exec)" || bad "the lead holds a lock: $(grep lock "$T/claude.fds" 2>&1)"
-flock -n "$T/state/lead-launch.lock" true && ok "…and the launch lock is free while the lead runs" || bad "launch lock still held while the lead runs"
+! grep -q 'lead.lock' "$T/claude.fds" 2>/dev/null && [ -s "$T/claude.fds" ] && ok "the lead itself does not hold the lock (it ends at the launcher's exec)" || bad "the lead holds the lock: $(grep lock "$T/claude.fds" 2>&1)"
+flock -n "$T/state/lead.lock" true && ok "…and the lock is free while the lead runs (the watchdog let go of it right after the keys)" || bad "the lead lock is still held while the lead runs"
 
 # ── the launcher alone: every refusal starts nothing ────────────────────────────────────────────────────────
 la() { ( cd "$T" && timeout 10 bash "$LA" ) 2>&1; }
@@ -308,9 +335,17 @@ reap_stubs; fresh ""; reset; rm -f "$T/state/lead.session"; out=$(la); rc=$?
 [ "$rc" = 3 ] && grep -q 'refused: no valid lead.session: there is no lead.session' <<<"$out" && [ ! -e "$T/claude.args" ] && ok "launcher: no record → exit 3, nothing started" || bad "launcher no record: rc=$rc $out"
 sess_file; elsewhere; out=$(la); rc=$?
 [ "$rc" = 4 ] && grep -q "refused: a lead is already there: the session id is in the command line of $(cat "$T/claude.pid")(claude)" <<<"$out" && [ ! -e "$T/claude.args" ] && [ "$(holders)" = 1 ] && ok "launcher: a lead is alive → exit 4, no second lead" || bad "launcher with a live lead: rc=$rc $out"
-reap_stubs; reset; sess_file; ( exec 7>"$T/state/lead-launch.lock"; flock 7; sleep 3 ) & lh=$!; sleep 0.4; out=$(la); rc=$?; wait "$lh" 2>/dev/null
-[ "$rc" = 75 ] && [ ! -e "$T/claude.args" ] && ok "launcher: another launch holds the launch lock → exit 75, nothing started" || bad "launcher lock: rc=$rc $out"
-( exec 7>"$T/state/lead-launch.lock"; flock 7; sleep 3 ) & lh=$!; sleep 0.4; rm -f "$T/fd.seen" "$T/fd.leak"; out=$(PATH="$T/fdbin:$PATH" la); rc=$?; wait "$lh" 2>/dev/null
+reap_stubs; reset; sess_file; ( exec 7>"$T/state/lead.lock"; flock 7; sleep 4 ) & lh=$!; sleep 0.4; out=$(LEAD_LAUNCH_LOCK_WAIT=1 la); rc=$?
+[ "$rc" = 75 ] && [ ! -e "$T/claude.args" ] && grep -q 'the lead lock is still held after 1 s' <<<"$out" && ok "launcher: the lead lock stays held past its wait → exit 75, nothing started" || bad "launcher lock: rc=$rc $out"
+wait "$lh" 2>/dev/null
+# …and while the lock is held it WAITS: it starts nothing before the holder lets go, and starts the lead after
+reap_stubs; reset; sess_file; ( exec 7>"$T/state/lead.lock"; flock 7; sleep 3 ) & lh=$!; sleep 0.4
+( cd "$T" && LEAD_LAUNCH_LOCK_WAIT=20 setsid bash "$LA" > /dev/null 2>&1 < /dev/null & ); sleep 1.5
+[ ! -e "$T/claude.args" ] && ok "launcher: while the lock is held (the watchdog between a gate and its act) it has started NOTHING" || bad "launcher did not wait for the lock"
+wait "$lh" 2>/dev/null; for _i in 1 2 3 4 5 6 7 8 9 10 11 12; do [ -s "$T/claude.args" ] && break; sleep 0.3; done
+resumed && ok "…and once the lock is free it starts the lead" || bad "launcher after the lock: $(cat "$T/claude.args" 2>&1)"
+reap_stubs; reset; sess_file
+( exec 7>"$T/state/lead.lock"; flock 7; sleep 3 ) & lh=$!; sleep 0.4; rm -f "$T/fd.seen" "$T/fd.leak"; out=$(LEAD_LAUNCH_LOCK_WAIT=1 PATH="$T/fdbin:$PATH" la); rc=$?; wait "$lh" 2>/dev/null
 [ "$rc" = 75 ] && [ ! -s "$T/fd.leak" ] && grep -qx date "$T/fd.seen" && ok "…and nothing that refusal started (its date) had the launch lock's descriptor" || bad "launcher refusal leaked the lock: rc=$rc $(cat "$T/fd.leak" 2>&1) seen=$(sort -u "$T/fd.seen" 2>/dev/null | tr '\n' ' ')"
 reset; sess_file; out=$(LEAD_SCOPE_RUN= la); rc=$?
 [ "$rc" = 5 ] && grep -q 'no systemd-run here: the lead is never started outside its named scope' <<<"$out" && [ ! -e "$T/claude.args" ] && ok "launcher: no scope runner → exit 5, the lead is NOT started outside a scope" || bad "launcher no runner: rc=$rc $out"

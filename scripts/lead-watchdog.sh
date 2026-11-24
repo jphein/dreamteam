@@ -26,13 +26,20 @@
 #     launch takes, then execs the lead inside its own named scope (lead-<session>.scope, oomd preference set at
 #     creation). No scope runner → nothing is typed: the lead is never started outside its scope.
 #
-# NEVER TWO LEADS. The gate (pane child, host-wide command-line search, named scope, launch lock) runs inside the
-# lock immediately before every step that creates, respawns or types. NOTHING is sent to the pane before the last
-# gate, and what is sent after it is one tmux call (clear the line, the launcher's line, Enter) with no wait and no
-# step in between. A lead that starts after that gate is seen by the launcher's own look, which refuses.
+# NEVER TWO LEADS, AND NO ACT WITHOUT ITS GATE (the ruling after review round 3). There is ONE lock on this host
+# for everything that can start or disturb the lead: <state>/lead.lock. This script takes it for its whole
+# CHECK-AND-ACT section, and scripts/lead-launch.sh (the one way the lead is started, by this script or by a
+# person) takes the SAME lock for its own check-and-exec. So while this script is between a gate and its act,
+# no launch can start a lead: a launcher run at that moment waits for the lock. Inside the lock the gate (pane
+# child, host-wide command-line search, named scope) runs again IMMEDIATELY before `respawn-pane` and
+# IMMEDIATELY before `send-keys`; not one key reaches the pane before that last gate, and what is sent is one
+# tmux call. The lock is released right after the keys: the launcher this script just typed takes it, makes
+# its own look, discards anything typed at its terminal meanwhile, and execs the lead.
+# What the lock cannot cover is a process that does not take it: a bare `claude --resume <id>` typed by hand.
+# The contract is that the lead is started ONLY through lead-launch.sh (lead.session's launch= line names it).
 #
-# THE LOCK IS THIS PROCESS'S ALONE: everything after it runs as `main 9>&-`, so no program this script starts
-# (tmux, systemctl, date, awk, a pipeline, a sleep, the mailer, a tmux server) ever holds the lock's descriptor.
+# THE LOCK'S DESCRIPTOR REACHES NO CHILD: the check-and-act section runs as `act 9>&-`, so no program started
+# there (tmux, systemctl, date, awk, a pipeline, a sleep, the mailer, a tmux server) ever holds it.
 #
 # Guards: a kill-switch file; no relaunch while a client typed in the session within 60 s; at most 3 an hour.
 # A tmux SERVER this script has to start is started in a scope of its own (a child of this unit would be ended
@@ -61,8 +68,9 @@ tell() { "$MAIL" send sen "lead-watchdog $(date +%H:%M): $1" >/dev/null 2>&1 || 
 
 [ -e "$OFF" ] && { line warn "watchdog off ($OFF present)"; exit 0; }
 
-exec 9>"$STATE/lead-watchdog.lock" || { line fail "cannot open the lock file in $STATE"; exit 0; }
-flock -n 9 || { exec 9>&-; line warn "another lead-watchdog run holds the lock: nothing done this tick"; exit 0; }
+LOCK="$STATE/lead.lock"                     # the ONE lock: this script and lead-launch.sh (lib/lead-record.sh names it too)
+exec 9>"$LOCK" || { line fail "cannot open the lead lock in $STATE"; exit 0; }
+flock -n 9 || { exec 9>&-; line warn "the lead lock is held (a launch of the lead, or another lead-watchdog run): nothing done this tick"; exit 0; }
 
 tm() { tmux ${LEAD_TMUX_SOCKET:+-L "$LEAD_TMUX_SOCKET"} "$@"; }   # LEAD_TMUX_SOCKET: a private server (tests)
 SHELL_CMD="${LEAD_SHELL_CMD:-}"                                    # what a pane made here runs (default: the user's shell)
@@ -83,9 +91,9 @@ prompt_now() {
 }
 wait_prompt() { local i; for i in $(seq 1 25); do prompt_now && return 0; sleep 0.2; done; return 1; }
 scope_active() { systemctl --user is-active --quiet "$UNIT.scope" 2>/dev/null; }
-launch_in_progress() { [ -f "$STATE/lead-launch.lock" ] && ! flock -n "$STATE/lead-launch.lock" true 2>/dev/null; }
-# Test seam (a plain path, tests only), called with `gate` before every gate and with `send` between the LAST gate
-# and the keys: it lets a test start a lead at exactly those moments.
+# Test seam (a plain path, tests only; unset in production, where it is one failed pattern match): called with
+# `gate` before every gate, with `respawn` between the gate and respawn-pane, and with `send` between the LAST
+# gate and the keys. It lets a test start a launch at exactly the moments the lock has to cover.
 hook() { [[ "${LEAD_WATCHDOG_TEST_HOOK:-}" =~ $LR_PLAIN ]] && "$LEAD_WATCHDOG_TEST_HOOK" "$1" >/dev/null 2>&1; return 0; }
 # THE GATE: is a lead alive, anywhere, in any form? Run inside the lock right before every step that creates,
 # respawns or types.
@@ -96,12 +104,12 @@ gate() {
     if pane_exists && p=$(pane_child) && [ -n "$p" ]; then alive="pane $PANE has a running child (pid $p)"; return 1; fi
     if p=$(lead_id_holders "$SID"); then alive="the lead's id ${SID:0:8} is in the command line of $(echo $p), outside $PANE"; return 1; fi
     if scope_active; then alive="the lead's scope $UNIT.scope is active"; return 1; fi
-    if launch_in_progress; then alive="a launch of the lead is in progress (the launch lock is held)"; return 1; fi
     return 0
 }
 stop_alive() { line warn "$alive: nothing made, nothing typed${1:+ ($1)}"; tell "$alive; not relaunching"; exit 0; }
 
-main() {
+typed=0
+act() {
     # 0. THE RECORD FIRST. Not valid → fail, before any pane, session or process is looked at.
     if ! lead_record_read "$STATE/lead.session"; then
         line fail "no valid lead.session ($LR_ERR): the record is the only source of the lead's id, pane and directory, so nothing is looked at, made or typed"
@@ -178,7 +186,7 @@ main() {
     # 5. Nothing is typed into a pane that is dead (remain-on-exit) or whose childless shell does not show a prompt:
     #    it is respawned, which ends only that shell, and the fresh one is at a prompt in the recorded directory.
     if [ "$(tm display -p -t "$PANE" '#{pane_dead}' 2>/dev/null)" = 1 ] || ! prompt_now; then
-        gate || stop_alive "before the respawn"
+        gate || stop_alive "before the respawn"; hook respawn
         tm respawn-pane -k -t "$PANE" -c "$CWD" ${SHELL_CMD:+"$SHELL_CMD"} 2>/dev/null || { line fail "pane $PANE is dead or not at a prompt and could not be respawned"; tell "lead pane $PANE could not be respawned; relaunch by hand"; exit 0; }
         wait_prompt || { line fail "pane $PANE was respawned but shows no shell prompt: nothing typed"; tell "lead pane $PANE respawned, no prompt; relaunch by hand"; exit 0; }
         made="${made:+$made, }pane respawned"
@@ -193,6 +201,14 @@ main() {
     tm send-keys -t "$PANE" C-e C-u \; send-keys -t "$PANE" -l "bash $LAUNCHER" \; send-keys -t "$PANE" Enter \
         || { line fail "the keys could not be sent to $PANE: nothing typed"; tell "could not type into $PANE; relaunch by hand"; exit 0; }
     echo "$now" >> "$HIST"
+    typed=1
+}
+act 9>&-
+[ "$typed" = 1 ] || exit 0
+# THE LOCK ENDS HERE, right after the keys: the launcher just typed needs it for its own check-and-exec.
+exec 9>&-
+
+await() {
     for i in $(seq 1 "${LEAD_WATCHDOG_WAIT:-20}"); do
         sleep 1
         # started = the pane's child carries the lead's id AND (with real systemd) the named scope is active
@@ -210,4 +226,4 @@ main() {
     tell "launch of ${SID:0:8} typed but nothing started${why:+ ($why)}; look at $PANE"
     exit 0
 }
-main 9>&-
+await
