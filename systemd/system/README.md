@@ -31,6 +31,7 @@ Order on a host, each step reversible:
        device nvme0n1 rlat=2000 wlat=5000 min=25 max=100
        docker mempalace-db 20
        unit syncthing@jp.service 20
+       oomprotect 1000 -500
 
 2. Trial before anything persists: run `scripts/host-io-check.sh` (the before line), then
    `sudo scripts/host/io-shield apply`, then the check again under the same load. `sudo scripts/host/io-shield off`
@@ -43,5 +44,9 @@ Order on a host, each step reversible:
    running is disturbed; the user manager uses the controller from the next boot.
 5. As the user: `.lanes` in `config.<host>.json` (enabled, exclude, weights, memory), `scripts/lane-slice.sh install`,
    link and enable `dreamteam-lane-slice.timer` and `dreamteam-host-io.timer`.
+
+The lead (Flow row f72945bc): `.lanes.lead` names the lead's tmux session; `lane-slice.sh attach` writes the
+`user.oomd_avoid` mark on its pane's scope (systemd-oomd then passes it over), and the `oomprotect <uid> -500`
+line makes root give every process in a marked scope that kernel OOM score. Lanes get neither.
 
 `tests/test-io-shield.sh` runs the tool against fixture files and stub commands; it cannot see a host.

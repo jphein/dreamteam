@@ -149,6 +149,58 @@ ok "status: both in place" 'grep -q "in use by the user manager" "$T/out" && gre
 ok "status: counts each session's processes in the slice, and names the excluded one" 'grep -qx "session alpha: 0 of 4 processes in lanes.slice" "$T/out" && grep -qx "session beta: 1 of 1 processes in lanes.slice" "$T/out" && grep -qx "session lead: excluded (not a lane)" "$T/out"'
 run_ls bogus; ok "an unknown verb is exit 22" '[ "$?" -eq 22 ]'
 
+echo "── the lead (row f72945bc) ──────────────────────────────────────"
+# The lead's pane (pid 900) lives in a scope of its own; the mark is the extended attribute systemd-oomd reads.
+xget() { python3 -I -c 'import os, sys
+try: print(os.getxattr(sys.argv[1], "user.oomd_avoid").decode())
+except OSError: print("none")' "$1"; }
+UM="user.slice/user-$(id -u).slice/user@$(id -u).service"
+LD="$T/cg/$UM/app.slice/tmux-spawn-lead.scope"; AD="$T/cg/$UM/app.slice/tmux-spawn-x.scope"; mkdir -p "$LD" "$AD" "$T/cg/$UM/app.slice/shared.service"
+echo "0::/$UM/app.slice/tmux-spawn-lead.scope" > "$P/900/cgroup"; echo "0::/$UM/app.slice/tmux-spawn-lead.scope" > "$P/901/cgroup"
+for p in 100 101 102 110 555; do echo "0::/$UM/app.slice/tmux-spawn-x.scope" > "$P/$p/cgroup"; done
+if ! python3 -I -c 'import os, sys; os.setxattr(sys.argv[1], "user.probe", b"1")' "$T/cg" 2>/dev/null; then
+  echo "SKIP: this filesystem takes no user extended attributes; the lead-mark cases need one"
+else
+  cfg '{"lanes":{"enabled":true,"exclude":[],"lead":["lead"]}}'; : > "$LOG"; rm -f "$T/scope-up"; run_ls attach; rc=$?
+  ok "attach marks the lead's scope user.oomd_avoid=1" '[ "$rc" -eq 0 ] && [ "$(xget "$LD")" = 1 ] && grep -q "lead lead: marked tmux-spawn-lead.scope" "$T/out"'
+  ok "a lane's scope gets no mark" '[ "$(xget "$AD")" = none ]'
+  ok "a session named in .lanes.lead is never moved into the lanes slice, though exclude is empty" '! grep "AttachProcessesToUnit" "$LOG" | grep -qE "lane-lead| 900| 901"'
+  ok "…and the lanes still are" 'grep -q "AttachProcessesToUnit ssau lane-alpha.scope / 4 100 101 102 110$" "$LOG"'
+  run_ls attach; ok "a second run marks nothing again" '! grep -q "marked" "$T/out"'
+  run_ls status; ok "status names the mark" 'grep -q "lead lead: tmux-spawn-lead.scope carries the oomd avoid mark" "$T/out"'
+  python3 -I -c 'import os, sys; os.removexattr(sys.argv[1], "user.oomd_avoid")' "$LD"
+  run_ls status; ok "status says when the lead's scope is NOT marked, and marks nothing itself" 'grep -q "tmux-spawn-lead.scope is NOT marked" "$T/out" && [ "$(xget "$LD")" = none ]'
+  PATH="$T/nobus:$PATH"; mkdir -p "$T/nobus"
+  touch "$T/busctl-fails"; run_ls attach; rc=$?; rm -f "$T/busctl-fails"
+  ok "the lead is marked even when moving a lane fails (it comes first)" '[ "$rc" -eq 1 ] && [ "$(xget "$LD")" = 1 ]'
+  python3 -I -c 'import os, sys; os.removexattr(sys.argv[1], "user.oomd_avoid")' "$LD"
+  echo "0::/$UM/app.slice/shared.service" > "$P/900/cgroup"; run_ls attach
+  ok "a lead pane that is NOT in a scope of its own is not marked (the unit is shared with others)" '[ "$(xget "$T/cg/$UM/app.slice/shared.service")" = none ] && [ "$(xget "$T/cg/$UM/app.slice")" = none ]'
+  echo "0::/$UM/app.slice/tmux-spawn-lead.scope" > "$P/900/cgroup"
+  cfg '{"lanes":{"enabled":true,"exclude":[],"lead":"lead"}}'; run_ls attach
+  ok "lead that is not a list is refused" '[ "$?" -eq 2 ]'
+  cfg '{"lanes":{"enabled":true,"exclude":["lead"]}}'; run_ls attach
+  ok "no .lanes.lead: nobody is marked" '[ "$(xget "$LD")" = none ]'
+
+  # io-shield oomprotect: root gives the marked cgroup's processes the kernel OOM score
+  python3 -I -c 'import os, sys; os.setxattr(sys.argv[1], "user.oomd_avoid", b"1")' "$LD"
+  mkdir -p "$LD/sub"; printf '900\n901\n' > "$LD/cgroup.procs"; echo 902 > "$LD/sub/cgroup.procs"; printf '100\n101\n' > "$AD/cgroup.procs"
+  PR="$T/fproc"; for p in 900 901 902 100 101; do mkdir -p "$PR/$p"; echo 0 > "$PR/$p/oom_score_adj"; done
+  run_op() { IO_SHIELD_CONF="$T/conf" IO_SHIELD_QOS_FILE="$T/qos" IO_SHIELD_SYSBLOCK="$T/sys" IO_SHIELD_CGROUP_ROOT="$T/cg" IO_SHIELD_PROC="$PR" IO_SHIELD_ASSUME_ROOT=1 PATH="$B:$PATH" bash "$SH" "$@" > "$T/out" 2> "$T/err"; }
+  printf 'oomprotect %s -500\n' "$(id -u)" > "$T/conf"; run_op apply; rc=$?
+  ok "oomprotect: every process in the marked cgroup, sub-cgroups included, gets the score" '[ "$rc" -eq 0 ] && [ "$(cat "$PR/900/oom_score_adj" "$PR/901/oom_score_adj" "$PR/902/oom_score_adj" | tr "\n" " ")" = "-500 -500 -500 " ] && grep -q "3 process(es) set to -500" "$T/out"'
+  ok "oomprotect: a process in an UNMARKED cgroup keeps its score" '[ "$(cat "$PR/100/oom_score_adj" "$PR/101/oom_score_adj" | tr "\n" " ")" = "0 0 " ]'
+  run_op apply; ok "oomprotect: a second run changes nothing" 'grep -q "0 process(es) set to -500" "$T/out"'
+  printf 'oomprotect %s -500\n' "$(( $(id -u) + 1 ))" > "$T/conf"; echo 0 > "$PR/900/oom_score_adj"; run_op apply
+  ok "oomprotect: another uid's line does not reach this user's cgroups" '[ "$(cat "$PR/900/oom_score_adj")" = 0 ]'
+  printf 'oomprotect %s -500\n' "$(id -u)" > "$T/conf"; run_op status
+  ok "status prints the marked processes with their scores and writes nothing" '[ "$(cat "$PR/900/oom_score_adj")" = 0 ] && grep -q "900=0" "$T/out"'
+  for bad in "oomprotect $(id -u)" "oomprotect $(id -u) 100" "oomprotect $(id -u) -2000" "oomprotect jp -500" "oomprotect $(id -u) -500 extra"; do
+    printf '%s\n' "$bad" > "$T/conf"; run_op apply; rc=$?
+    if [ "$rc" -eq 22 ] && [ "$(cat "$PR/900/oom_score_adj")" = 0 ]; then pass "bad oomprotect line refused: $bad"; else fail "bad oomprotect '$bad': rc $rc"; fi
+  done
+fi
+
 echo "── host-io-check.sh ─────────────────────────────────────────────"
 ok "passes bash -n" 'bash -n "$HC"'
 C="$T/checks"; printf 'some avg10=1.00 avg60=2.00 avg300=1.00 total=1\nfull avg10=0.50 avg60=3.40 avg300=1.00 total=1\n' > "$T/psi"

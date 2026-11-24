@@ -21,6 +21,9 @@
 #   exclude        REQUIRED when enabled, may be []: tmux session names that are NOT lanes (the lead's session,
 #                  a person's own). Without the key the tool refuses: a default that put the lead in the lanes
 #                  slice would be the opposite of the point.
+#   lead           tmux session names of the fleet lead (default []). Never a lane (excluded without being listed
+#                  there), and PROTECTED from systemd-oomd: the cgroup of each of its panes gets the
+#                  `user.oomd_avoid` mark on every attach run. See "THE LEAD" below.
 #   cpuWeight 50 · ioWeight 25 · memoryHigh "" · memorySwapMax ""   (empty = not set)
 #   units          user units that are gates or batch timers; each gets <unit>.d/20-lanes-slice.conf with
 #                  Slice=lanes.slice (effective at that unit's next start)
@@ -30,6 +33,25 @@
 # inherit the place. A process inside a dreamteam-*.scope (a memory-capped agent fleet) is left there. A
 # lane-<session>.scope whose session is gone and that holds only its anchor is stopped, by unit name.
 # Nothing here signals or restarts a session.
+#
+# THE LEAD (Flow row f72945bc). 2026-11-22 04:26 systemd-oomd killed the lead's pane scope, 473 MB, out of 127
+# cgroups under the user manager, and the lead was down 37 hours. oomd picks by reclaim activity, not by who
+# matters; a cgroup marked "avoid" is passed over while any unmarked candidate exists. Measured on serialhub
+# 2026-11-23 in a test slice with its own MemoryHigh and its own oomd watch (two scopes, the bigger one the
+# "lead"; /home/jp/work/iotest/oom-test*.sh on that host):
+#     no mark                                                      → oomd killed the LEAD scope
+#     ManagedOOMPreference=avoid given when the scope is created   → the lane scope killed, the lead lives
+#     `systemctl --user set-property --runtime … ManagedOOMPreference=avoid` on the EXISTING scope
+#                                                                  → the property reads "avoid", NO mark is
+#                                                                    written, and oomd killed the LEAD scope
+#     the mark written straight onto the existing scope's cgroup   → the lane scope killed, the lead lives
+# The lead's scope always exists already (tmux made it), so this tool writes the mark itself: the extended
+# attribute user.oomd_avoid=1 on the pane's cgroup directory, which the user owns. No process is moved, nothing
+# restarts, and a relaunched lead (a new scope) is marked again within one timer period. Lanes get no mark.
+# OOMScoreAdjust is the KERNEL's out-of-memory order and a user cannot lower it (measured: a scope refuses the
+# property, a user service is clamped to the manager's 100, a write to /proc/self/oom_score_adj is denied).
+# Root can: scripts/host/io-shield `oomprotect <uid> <score>` gives that score to every process in a cgroup
+# that carries the mark.
 #
 # Exit: 0 done (also: not enabled) · 1 something could not be done · 2 refused (config) · 22 bad argument.
 set -uo pipefail
@@ -70,6 +92,9 @@ fi
 [ "$(get '.lanes | has("exclude")')" = true ] && [ "$(get '.lanes.exclude | type')" = array ] \
   || { echo "lane-slice: .lanes.exclude is required when enabled (a list, may be empty): name the sessions that are not lanes" >&2; exit 2; }
 mapfile -t EXCLUDE < <(get '.lanes.exclude[] | strings')
+[ "$(get '.lanes.lead // [] | type')" = array ] || { echo "lane-slice: .lanes.lead must be a list of tmux session names" >&2; exit 2; }
+mapfile -t LEAD < <(get '.lanes.lead // [] | .[] | strings')
+EXCLUDE+=("${LEAD[@]}")                                   # the lead is never a lane, listed in exclude or not
 CPUW=$(get '.lanes.cpuWeight // 50'); IOW=$(get '.lanes.ioWeight // 25')
 MHIGH=$(get '.lanes.memoryHigh // ""'); MSWAP=$(get '.lanes.memorySwapMax // ""')
 mapfile -t UNITS < <(get '.lanes.units // [] | .[] | strings')
@@ -127,7 +152,25 @@ tree() {   # tree <pid>...: the pids and all their descendants
 cg() { local l; l=$(cat "$PROC/$1/cgroup" 2>/dev/null | tail -n 1) && printf '%s' "${l#*::}"; }
 unit_of() { printf 'lane-%s.scope' "$(printf '%s' "$1" | tr -c 'A-Za-z0-9_-' '_')"; }
 
+# The cgroup directory of a pane's process, if it is a scope of its own below the user manager (never a slice or
+# a service shared with others: marking those would shield whatever else lives there).
+lead_dirs() {   # lead_dirs <session> → one cgroup dir per line
+  local p c
+  while read -r p; do
+    [ -n "$p" ] || continue
+    c=$(cg "$p") || continue
+    case "$c" in */user@*.service/*.scope) printf '%s\n' "$CGROOT$c" ;; esac
+  done < <(tmux list-panes -s -t "=$1" -F '#{pane_pid}' 2>/dev/null) | sort -u
+}
+marked() { python3 -I -c 'import os, sys
+try: sys.exit(0 if os.getxattr(sys.argv[1], "user.oomd_avoid") == b"1" else 1)
+except OSError: sys.exit(1)' "$1" 2>/dev/null; }
+
 if [ "$MODE" = status ]; then
+  for s in "${LEAD[@]}"; do
+    n=0; while read -r d; do [ -n "$d" ] || continue; n=$((n + 1)); if marked "$d"; then echo "lead $s: $(basename "$d") carries the oomd avoid mark"; else echo "lead $s: $(basename "$d") is NOT marked (the next attach run marks it)"; fi; done < <(lead_dirs "$s")
+    [ "$n" -gt 0 ] || echo "lead $s: no pane in a scope of its own (session gone, or its panes share a unit)"
+  done
   echo "slice $SLICE.slice: CPUWeight=$(uc show "$SLICE.slice" -p CPUWeight --value 2>/dev/null) IOWeight=$(uc show "$SLICE.slice" -p IOWeight --value 2>/dev/null) MemoryHigh=$(uc show "$SLICE.slice" -p MemoryHigh --value 2>/dev/null)"
   mine="$CGROOT/user.slice/user-$(id -u).slice/user@$(id -u).service"
   if grep -qw io "$mine/cgroup.controllers" 2>/dev/null && grep -qw io "$mine/cgroup.subtree_control" 2>/dev/null; then echo "io controller: in use by the user manager"
@@ -145,8 +188,17 @@ if [ "$MODE" = status ]; then
 fi
 
 # ── attach ───────────────────────────────────────────────────────────────────────────────────────────────
-command -v busctl >/dev/null 2>&1 && command -v systemd-run >/dev/null 2>&1 || { echo "lane-slice: busctl and systemd-run are needed" >&2; exit 1; }
 rc=0; moved=0
+# the lead first, and before anything that can fail: its mark does not depend on busctl or on any lane
+for s in "${LEAD[@]}"; do
+  while read -r d; do
+    [ -n "$d" ] || continue
+    marked "$d" && continue
+    if python3 -I -c 'import os, sys; os.setxattr(sys.argv[1], "user.oomd_avoid", b"1")' "$d" 2>/dev/null; then echo "lead $s: marked $(basename "$d") for oomd to avoid"
+    else echo "lane-slice: could not mark the lead's scope $(basename "$d")" >&2; rc=1; fi
+  done < <(lead_dirs "$s")
+done
+command -v busctl >/dev/null 2>&1 && command -v systemd-run >/dev/null 2>&1 || { echo "lane-slice: busctl and systemd-run are needed" >&2; exit 1; }
 declare -A LIVE=()
 for s in "${SESSIONS[@]}"; do
   excluded "$s" && continue

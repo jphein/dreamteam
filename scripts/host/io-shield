@@ -27,6 +27,11 @@
 #   docker <container name> <weight>
 #       the same for that container's scope, docker-<full id>.scope (the id changes when it is recreated, so
 #       the timer re-applies every few minutes).
+#   oomprotect <uid> <score>
+#       every process in a cgroup below that user's manager that carries the mark user.oomd_avoid=1 (the lead's
+#       scope: scripts/lane-slice.sh writes it) gets /proc/<pid>/oom_score_adj = <score>, -1000..0. That is the
+#       KERNEL's out-of-memory order, which only root can lower; children started later inherit it. The user
+#       decides WHICH cgroup by marking it; root decides, here, how much the mark is worth.
 #   Blank lines and lines starting with # are skipped. ANY other line, or a bad value, stops the run before
 #   anything is written (exit 22): a half-read config never applies half a policy.
 #
@@ -41,6 +46,8 @@ set -uo pipefail
 CONF="${IO_SHIELD_CONF:-/etc/dreamteam/io-shield.conf}"
 QOS="${IO_SHIELD_QOS_FILE:-/sys/fs/cgroup/io.cost.qos}"
 SYSBLOCK="${IO_SHIELD_SYSBLOCK:-/sys/block}"
+CGROOT="${IO_SHIELD_CGROUP_ROOT:-/sys/fs/cgroup}"
+PROCROOT="${IO_SHIELD_PROC:-/proc}"
 
 usage() { echo "usage: io-shield apply|off|status" >&2; exit 22; }
 [ "$#" -eq 1 ] || usage
@@ -52,7 +59,7 @@ if [ "$MODE" != status ] && [ "${IO_SHIELD_ASSUME_ROOT:-}" != 1 ] && [ "$(id -u)
 fi
 
 num() { [[ "$1" =~ ^[0-9]{1,7}$ ]]; }
-DEVS=(); DEVQ=(); UNITS=(); UNITW=(); DOCK=(); DOCKW=()
+DEVS=(); DEVQ=(); UNITS=(); UNITW=(); DOCK=(); DOCKW=(); OOMU=(); OOMS=()
 n=0
 while IFS= read -r line || [ -n "$line" ]; do
   n=$((n + 1))
@@ -77,7 +84,11 @@ while IFS= read -r line || [ -n "$line" ]; do
         || { echo "io-shield: $CONF line $n: ${w[0]} needs <name> <weight 1-10000>" >&2; exit 22; }
       [[ "${w[1]}" =~ ^[A-Za-z0-9][A-Za-z0-9@_.:\\-]{0,200}$ ]] || { echo "io-shield: $CONF line $n: '${w[1]}' is not a plain name" >&2; exit 22; }
       if [ "${w[0]}" = unit ]; then UNITS+=("${w[1]}"); UNITW+=("${w[2]}"); else DOCK+=("${w[1]}"); DOCKW+=("${w[2]}"); fi ;;
-    *) echo "io-shield: $CONF line $n: unknown word '${w[0]}' (device, unit, docker)" >&2; exit 22 ;;
+    oomprotect)
+      [ "${#w[@]}" -eq 3 ] && [[ "${w[1]}" =~ ^[0-9]{1,9}$ ]] && [[ "${w[2]}" =~ ^(0|-[0-9]{1,4})$ ]] && [ "${w[2]}" -ge -1000 ] \
+        || { echo "io-shield: $CONF line $n: oomprotect needs <uid> <score -1000..0>" >&2; exit 22; }
+      OOMU+=("${w[1]}"); OOMS+=("${w[2]}") ;;
+    *) echo "io-shield: $CONF line $n: unknown word '${w[0]}' (device, unit, docker, oomprotect)" >&2; exit 22 ;;
   esac
 done < "$CONF"
 
@@ -90,9 +101,28 @@ docker_unit() {   # container name → docker-<id>.scope, or nothing
   id=$(docker inspect -f '{{.Id}}' "$1" 2>/dev/null) && [[ "$id" =~ ^[0-9a-f]{64}$ ]] && printf 'docker-%s.scope' "$id"
 }
 
+# oom_marked <uid>: one "pid" per line for every process in a marked cgroup below that user's manager
+oom_marked() {
+  python3 -I -c 'import os, sys
+base = os.path.join(sys.argv[1], "user.slice", "user-%s.slice" % sys.argv[2], "user@%s.service" % sys.argv[2])
+for d, dirs, files in os.walk(base):
+    try:
+        if os.getxattr(d, "user.oomd_avoid") != b"1":
+            continue
+    except OSError:
+        continue
+    for sub, _, _ in os.walk(d):                      # the marked cgroup and everything below it
+        try:
+            print(open(os.path.join(sub, "cgroup.procs")).read(), end="")
+        except OSError:
+            pass
+    dirs[:] = []' "$CGROOT" "$1" 2>/dev/null | sort -un
+}
+
 rc=0
 case "$MODE" in
   status)
+    for i in "${!OOMU[@]}"; do echo "oomprotect uid ${OOMU[$i]}: want ${OOMS[$i]}; marked processes now: $(for p in $(oom_marked "${OOMU[$i]}"); do printf '%s=%s ' "$p" "$(cat "$PROCROOT/$p/oom_score_adj" 2>/dev/null)"; done)"; done
     echo "io.cost.qos: $(tr '\n' ';' < "$QOS" 2>/dev/null)"
     for i in "${!UNITS[@]}"; do echo "unit ${UNITS[$i]}: want ${UNITW[$i]}, IOWeight=$(systemctl show "${UNITS[$i]}" -p IOWeight --value 2>/dev/null)"; done
     for i in "${!DOCK[@]}"; do u=$(docker_unit "${DOCK[$i]}"); echo "docker ${DOCK[$i]}: want ${DOCKW[$i]}, ${u:-not running}${u:+ IOWeight=$(systemctl show "$u" -p IOWeight --value 2>/dev/null)}"; done ;;
@@ -117,6 +147,17 @@ case "$MODE" in
     for i in "${!DOCK[@]}"; do
       u=$(docker_unit "${DOCK[$i]}") || true
       if [ -n "${u:-}" ]; then setw "$u" "${DOCKW[$i]}" "container ${DOCK[$i]}"; else echo "note: container ${DOCK[$i]} is not there now; the next run sets it"; fi
+    done
+    for i in "${!OOMU[@]}"; do
+      c=0
+      for p in $(oom_marked "${OOMU[$i]}"); do
+        f="$PROCROOT/$p/oom_score_adj"
+        [ "$(cat "$f" 2>/dev/null)" = "${OOMS[$i]}" ] && continue
+        # a process of ANOTHER uid in the user's marked cgroup is never touched: the mark is that user's to give
+        [ "$(stat -c %u "$PROCROOT/$p" 2>/dev/null)" = "${OOMU[$i]}" ] || continue
+        if printf '%s\n' "${OOMS[$i]}" > "$f" 2>/dev/null; then c=$((c + 1)); else [ -e "$f" ] && { echo "io-shield: could not set oom_score_adj for $p" >&2; rc=1; }; fi
+      done
+      echo "oomprotect uid ${OOMU[$i]}: $c process(es) set to ${OOMS[$i]}"
     done ;;
 esac
 exit "$rc"
