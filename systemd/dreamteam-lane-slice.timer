@@ -1,0 +1,8 @@
+[Unit]
+Description=dreamteam: lanes.slice attach every 2 minutes (a new session, a respawned pane)
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=15s
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# dreamteam — io-shield-accept: run `io-shield apply` or `off` on THIS host and prove what it did not touch.
+#
+#   sudo io-shield-accept <uid> apply|off
+#
+# THE ACCEPTANCE RULE (fleet-incidents 2026-11-23; xreview #282 r2): the helper writes an OOM score only to a
+# process in the lead's unit that had none, and undoes only its own recorded writes. Every negative score that
+# existed before the run and is not one of the helper's own records must be EXACTLY as it was after the run.
+# This script takes that list before, runs the helper, reads the same processes again (same pid AND same start
+# time), and says which is which. It exits 1 and prints REJECT if any of them changed.
+#
+# MUST STAY UNTOUCHED, by name, on familiar (their units give them these scores; uid 1000 runs them):
+#     palace-daemon.service        -500
+#     qwen3-coder.service          -500
+#     familiar-loadguard.service   -800
+#     donkey-llm.service           -100
+# and on serialhub octoprint.service, ustreamer.service, ustreamer-builtin.service (-900 each), the three an
+# earlier version reset on 2026-11-23 23:21. Each named unit is reported by name: `untouched`, `CHANGED`, or
+# `absent` (no process of <uid> with a negative score in that unit on this host; on the host it belongs to,
+# `absent` is itself a finding). The list is $IO_SHIELD_MUST_STAY (space-separated unit names) or the seven above.
+# Every OTHER pre-existing negative score of <uid> is checked the same way and counted.
+#
+# Run it for `apply` at the first enabling, for `off` at a rollback, and keep the output with the PR or the row.
+# Exit: 0 ACCEPT · 1 REJECT (something changed) · 2 the helper itself failed or cannot be run · 22 bad argument.
+set -uo pipefail
+[ "$#" -eq 2 ] && [[ "$1" =~ ^[0-9]{1,9}$ ]] && { [ "$2" = apply ] || [ "$2" = off ]; } || { echo "usage: io-shield-accept <uid> apply|off" >&2; exit 22; }
+UIDN=$1; VERB=$2
+BIN="${IO_SHIELD_BIN:-/usr/local/sbin/dreamteam-io-shield}"
+PROCROOT="${IO_SHIELD_PROC:-/proc}"
+LEDGER="${IO_SHIELD_LEDGER:-${IO_SHIELD_RUN_DIR:-/run}/dreamteam-io-shield}"
+MUST="${IO_SHIELD_MUST_STAY:-palace-daemon.service qwen3-coder.service familiar-loadguard.service donkey-llm.service octoprint.service ustreamer.service ustreamer-builtin.service}"
+[ -x "$BIN" ] || [ -f "$BIN" ] || { echo "io-shield-accept: no helper at $BIN" >&2; exit 2; }
+T=$(mktemp -d) || exit 2
+trap 'rm -rf "$T"' EXIT
+
+# snap <file>: "pid start score unit" for every process of the uid that holds a negative score and is NOT one of
+# the helper's own records (same pid and start time in the ledger)
+snap() {
+  python3 -I -c 'import os, sys
+procroot, ledger, uid = sys.argv[1:4]
+for pid in sorted((p for p in os.listdir(procroot) if p.isdigit()), key=int):
+    d = os.path.join(procroot, pid)
+    try:
+        if os.stat(d).st_uid != int(uid):
+            continue
+        score = open(d + "/oom_score_adj").read().strip()
+        if not score.startswith("-"):
+            continue
+        stat = open(d + "/stat").read()
+        start = stat[stat.rindex(")") + 2:].split()[19]
+        unit = open(d + "/cgroup").read().strip().split("\n")[-1].split("::", 1)[-1].rstrip("/").split("/")[-1]
+        try:
+            rec = dict(kv.split("=", 1) for kv in open(os.path.join(ledger, pid)).read().split())
+            if rec.get("start") == start:
+                continue                                  # the helper recorded this one: it may undo it
+        except (OSError, ValueError):
+            pass
+        print(pid, start, score, unit)
+    except (OSError, ValueError, IndexError):
+        continue' "$PROCROOT" "$LEDGER" "$UIDN" > "$1"
+}
+
+snap "$T/before"
+echo "== before: $(wc -l < "$T/before") process(es) of uid $UIDN hold a negative OOM score that the helper has no record of"
+echo "== running: $BIN $VERB"
+"$BIN" "$VERB" > "$T/helper.out" 2> "$T/helper.err"; hrc=$?
+sed 's/^/   /' "$T/helper.out"; sed 's/^/   stderr: /' "$T/helper.err"
+[ "$hrc" -eq 0 ] || { echo "io-shield-accept: the helper exited $hrc" >&2; exit 2; }
+
+while read -r pid start score unit; do
+  [ -n "${pid:-}" ] || continue
+  now=$(cat "$PROCROOT/$pid/oom_score_adj" 2>/dev/null) || now=gone
+  if [ "$now" != gone ]; then
+    s=$(sed 's/^.*) //' "$PROCROOT/$pid/stat" 2>/dev/null | awk '{print $20}')
+    [ "$s" = "$start" ] || now=gone                      # that pid is another process now
+  fi
+  if [ "$now" = "$score" ]; then echo "untouched  $unit pid $pid $score"
+  elif [ "$now" = gone ]; then echo "untouched  $unit pid $pid $score (the process has exited since)"
+  else echo "CHANGED    $unit pid $pid $score → $now"; fi
+done < "$T/before" > "$T/report"
+cat "$T/report"
+total=$(wc -l < "$T/before"); changed=$(grep -c '^CHANGED' "$T/report" || true); same=$((total - changed))
+for u in $MUST; do
+  grep -q "^[a-zA-Z]* *$u pid " "$T/report" || echo "absent     $u (no process of uid $UIDN with a negative score in it on this host)"
+done
+scored=$(grep -oE '[0-9]+ process\(es\) scored' "$T/helper.out" | awk '{n += $1} END {print n + 0}')
+unitname=$(grep -oE 'unit lead-[A-Za-z0-9_-]+\.scope' "$T/helper.out" | head -1 | cut -d' ' -f2)
+if [ "$changed" -eq 0 ]; then
+  echo "ACCEPT: $total negative score(s) existed before, all $same unchanged${unitname:+; $scored scored in $unitname}"
+  exit 0
+fi
+echo "REJECT: $changed of $total pre-existing negative score(s) were changed by '$BIN $VERB'. Put them back from their units' OOMScoreAdjust and do not enable this helper."
+exit 1
