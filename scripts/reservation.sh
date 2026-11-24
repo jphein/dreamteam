@@ -119,6 +119,7 @@ case "${1:-}" in
     if [ "$1" = live ]; then echo "$sum"; else echo "$sum $n"; fi ;;
   start)
     ses=$(san "${2:?session}"); typ=$(san "${3:?type}"); take_lock; mkdir -p "$DIR" 2>/dev/null
+    for f in "$DIR"/*.expired; do [ -e "$f" ] || continue; parse "$f" || exit 1; done   # tombstones validated BEFORE any prune (#280 r3 ruling 2)
     oldest=""
     pick() { if [ "$6" = counting ] && [ "$3" = "$ses" ] && [ "$4" = "$typ" ] && [ "$5" = 0 ]; then if [ -z "$oldest" ] || [ "$1" -ot "$oldest" ]; then oldest="$1"; fi; fi; }
     scan pick || exit 1

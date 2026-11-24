@@ -190,6 +190,27 @@ resv=$(python3 "$LIB" probe-script gpu1 | DREAMTEAM_RESERVATIONS="$rd/10-1" PATH
 check "$resv" "RESV,ERR" "sampler: a regular file where the reservations directory should be is RESV,ERR (r4 item 5)"
 order=$(python3 "$LIB" probe-script gpu1 | HOME="$h" DREAMTEAM_RESERVATIONS= PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep -o '^RESV\|^LANE' | tr '\n' ' ')
 check "$order" "RESV LANE " "sampler: reservations are sampled before the live RSS (r4 item 2)"
+# #280 r3 ruling (1): the probe and the reservation reader share ONE validity rule, pinned by ONE loop feeding both the
+# same records: every malformed record is an error for `outstanding` (exit 1) and RESV,ERR for the probe; every valid
+# one counts the same MB in both
+rl="$TMP/rl"; R="$ROOT/scripts/reservation.sh"; nowr=$(date +%s)
+both() { # both <record> <expect: ERR|<mb>> <label>
+  rm -rf "$rl"; mkdir -p "$rl"; printf '%s\n' "$1" > "$rl/1-1-1"
+  o=$(DREAMTEAM_RESERVATIONS="$rl" DREAMTEAM_HOST_LOCK="$TMP/rl.lock" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$R" outstanding 2>/dev/null); orc=$?
+  p=$(python3 "$LIB" probe-script gpu1 | DREAMTEAM_RESERVATIONS="$rl" PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^RESV,')
+  if [ "$2" = ERR ]; then [ "$orc" -ne 0 ] && [ "$p" = "RESV,ERR" ] && pass "one validity rule: $3 is an error for both (helper exit $orc, probe $p)" || fail "one validity rule: $3: helper rc=$orc out=[$o] probe=[$p]"
+  else [ "$orc" -eq 0 ] && [ "${o%% *}" = "$2" ] && [ "$p" = "RESV,OK,$2" ] && pass "one validity rule: $3 counts $2 in both" || fail "one validity rule: $3: helper rc=$orc out=[$o] probe=[$p] want $2"; fi
+}
+both "400" ERR "a record with one field"
+both "0400 $((nowr + 60)) s-a morpheus 0" ERR "a leading-zero MB"
+both "300 0$((nowr + 60)) s-a morpheus 0" ERR "a leading-zero expiry"
+both "300 abc s-a morpheus 0" ERR "a non-numeric expiry"
+both "300 $((nowr + 60)) s-a morpheus x" ERR "a non-numeric started field"
+both "99999999 $((nowr + 60)) s-a morpheus 0" ERR "an MB past the bound"
+both "garbage" ERR "garbage"
+both "700 $((nowr + 60)) s-a morpheus 0" 700 "a valid unstarted record"
+both "300 $((nowr - 5)) s-a morpheus $((nowr - 10))" 300 "a started record past its expiry (counts until SubagentStop)"
+both "300 $((nowr - 5)) s-a morpheus 0" 0 "an expired unstarted record (counts nothing in both)"
 printf '300 %s s-a morpheus %s\n' "$((nowe - 5))" "$((nowe - 10))" > "$rd/16-7"       # started, past its expiry: still counted
 resv=$(python3 "$LIB" probe-script gpu1 | HOME="$h" DREAMTEAM_RESERVATIONS= PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^RESV,')
 check "$resv" "RESV,OK,1300" "sampler: a STARTED reservation past its expiry still counts (1000 + 300): released by SubagentStop, not by time (r4 item 2)"

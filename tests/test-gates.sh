@@ -228,6 +228,11 @@ r=$(DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HLOCK" DREAMTEAM_HOST_L
 rm -rf "$RESV"; mkdir -p "$RESV"; printf '300 0%s s-a morpheus 0\n' "$(( $(date +%s) - 1 ))" > "$RESV/4-4-4.expired"
 r=$(DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HLOCK" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$RS" start s-a morpheus >/dev/null 2>&1; echo $?)
 [ "$r" -eq 1 ] && [ -e "$RESV/4-4-4.expired" ] && pass "a malformed tombstone (leading-zero expiry) is an error for start (exit 1), kept, no octal arithmetic" || fail "unparsed tombstone: rc=$r kept=$([ -e "$RESV/4-4-4.expired" ] && echo y || echo n)"
+# #280 r3 ruling (2): start validates the tombstones BEFORE any prune: a malformed tombstone beside a valid live record
+# is exit 1 and leaves both exactly as they were (the live record is not tombstoned, the tombstone is kept)
+rm -rf "$RESV"; mkdir -p "$RESV"; echo garbage > "$RESV/2-2-2.expired"; printf '300 %s s-a morpheus 0\n' "$(( $(date +%s) - 1 ))" > "$RESV/2-2-3"
+r=$(DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HLOCK" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$RS" start s-a morpheus >/dev/null 2>&1; echo $?)
+[ "$r" -eq 1 ] && [ -f "$RESV/2-2-2.expired" ] && [ -f "$RESV/2-2-3" ] && [ ! -e "$RESV/2-2-3.expired" ] && pass "start validates tombstones before any prune: a malformed tombstone beside a valid expired record leaves both untouched (exit 1)" || fail "tombstones before prune: rc=$r files=[$(ls "$RESV" | tr '\n' ' ')]"
 # #280 r2 items 1+2: the prune step is the only writer and runs only after a clean scan: with a malformed file present,
 # live is exit 1 and an expired record beside it stays a plain file; once the malformed file is gone, live prunes it
 rm -rf "$RESV"; mkdir -p "$RESV"; printf '300 %s s-a morpheus 0\n' "$(( $(date +%s) - 1 ))" > "$RESV/3-3-3"; echo garbage > "$RESV/3-3-4"
