@@ -147,7 +147,7 @@ r=$(DREAMTEAM_RESERVATIONS="$RESV_DIR" DREAMTEAM_HOST_LOCK="$TMP/host.lock" DREA
 [ "$r" -eq 0 ] && pass "the lane's SubagentStart marks its token started (r3 item 3)" || fail "start returned $r"
 sed -i 's/^LANE,.*/LANE,OK,1024000/' "$PROBES/gpu1.probe"
 check "$(claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 4322 --peak-vram 3000)" 75 "the lane is live now: refused on its RSS plus the still-counting reservation (r3 item 2: no undercount window)"
-check "$(claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 2878 --peak-vram 3000)" 75 "until SubagentStop releases the reservation a 2.81 GiB run is refused too (4322 + 2878 + 1536 = 8736 > 10444 - 2000): the handoff over-counts for at most 90 s, never under"
+check "$(claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 2878 --peak-vram 3000)" 75 "until SubagentStop releases the reservation a 2.81 GiB run is refused too (4322 + 2878 + 1536 = 8736 > 10444 - 2000): a started reservation counts until its lane's SubagentStop releases it, never by time"
 r=$(DREAMTEAM_RESERVATIONS="$RESV_DIR" DREAMTEAM_HOST_LOCK="$TMP/host.lock" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$R" stop s-a morpheus >/dev/null 2>&1; echo $?)
 [ "$r" -eq 0 ] && pass "the lane's SubagentStop releases its started reservation (r4 item 2: by stop, never by time)" || fail "stop returned $r"
 check "$(claim gpu1:1 --lane reverie-gems --until 2h --peak-ram 2878 --peak-vram 3000)" 0 "once released only the live RSS counts: the 2.81 GiB run fits (8736 <= 9444)"
@@ -159,6 +159,7 @@ h="$TMP/h"; rd="$h/.local/state/dreamteam/reservations"; mkdir -p "$rd"; nowe=$(
 printf '700 %s s-a morpheus 0\n' "$((nowe + 60))" > "$rd/10-1"; printf '500 %s s-a morpheus 0\n' "$((nowe - 1))" > "$rd/11-2"; printf '300 %s s-b luna 0\n' "$((nowe + 30))" > "$rd/13-4"
 resv=$(python3 "$LIB" probe-script gpu1 | HOME="$h" DREAMTEAM_RESERVATIONS= PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^RESV,')
 check "$resv" "RESV,OK,1000" "sampler: unexpired reservations summed (700 + 300), the expired one ignored"
+[ -f "$rd/11-2" ] && [ ! -e "$rd/11-2.expired" ] && pass "sampler: the PROBE never mutates: the expired record is still a plain file (prune is the helper's one writer, #280 r2)" || fail "PROBE mutated: $(ls "$rd" | tr '\n' ' ')"
 check "$(DREAMTEAM_RESERVATIONS="$rd" bash "$R" live)" "1000" "the helper's live sum agrees with the probe's"
 # r3 item 5: a printed RESV line is evidence of a successful read, or it is RESV,ERR: a malformed file, a value past
 # the bound (1000000 MB), or a directory that cannot be listed; each refuses a claim

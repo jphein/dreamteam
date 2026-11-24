@@ -184,7 +184,7 @@ fi
 #     host lock. start marks the oldest unexpired, unstarted reservation of that session and type (the lane's own);
 #     another session's or type's cannot be taken (exit 3, nothing changed); the lock held → exit 4, nothing changed;
 #     an expired match is pruned, logged as a late start and exit 5 (item 4: a SubagentStart hook cannot cancel a
-#     start, so the late start is on record). The reservation keeps counting until it expires: no deletion, so the
+#     start, so the late start is on record). A started reservation counts until SubagentStop releases it (never by time), so the
 #     live sampler never undercounts the handoff (item 2).
 RS="$ROOT/scripts/reservation.sh"; rm -rf "$RESV"
 tok=$(DREAMTEAM_RESERVATIONS="$RESV" bash "$RS" add 400 90 s-a morpheus)
@@ -198,7 +198,7 @@ r=$(DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HLOCK" DREAMTEAM_HOST_L
 pkill -P "$HOLDER" 2>/dev/null; kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null
 r=$(DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HLOCK" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$RS" start s-a morpheus >/dev/null 2>&1; echo $?)
 [ "$r" -eq 0 ] && ! grep -q " 0$" "$tok" && pass "start: the lane's own token is marked started (lock free)" || fail "start own: rc=$r $(cat "$tok")"
-[ "$(DREAMTEAM_RESERVATIONS="$RESV" bash "$RS" live)" -eq 400 ] && pass "a started reservation still counts until it expires (no deletion: no undercount window)" || fail "live after start: $(DREAMTEAM_RESERVATIONS="$RESV" bash "$RS" live)"
+[ "$(DREAMTEAM_RESERVATIONS="$RESV" bash "$RS" live)" -eq 400 ] && pass "a started reservation counts until SubagentStop releases it, never by time (no deletion: no undercount window)" || fail "live after start: $(DREAMTEAM_RESERVATIONS="$RESV" bash "$RS" live)"
 r=$(DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HLOCK" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$RS" start s-a morpheus >/dev/null 2>&1; echo $?)
 [ "$r" -eq 3 ] && pass "start twice: the started token is not taken again (exit 3)" || fail "start twice: rc=$r"
 printf '400 %s s-a morpheus 0\n' "$(( $(date +%s) - 1 ))" > "$RESV/9-9-9"
@@ -223,6 +223,16 @@ out=$(DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HLOCK" DREAMTEAM_HOST
 rm -rf "$RESV"; mkdir -p "$RESV"; printf '300 %s s-a morpheus 0\n' "$(( $(date +%s) - 1 ))" > "$RESV/6-6-6"; echo garbage > "$RESV/6-6-7"
 r=$(DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HLOCK" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$RS" live >/dev/null 2>&1; echo $?)
 [ "$r" -ne 0 ] && [ -e "$RESV/6-6-6" ] && [ ! -e "$RESV/6-6-6.expired" ] && pass "a scan that meets an error renames and deletes nothing (the expired record is still a plain file)" || fail "all-or-nothing: rc=$r files=[$(ls "$RESV" | tr '\n' ' ')]"
+# #280 r2 item 3: every numeric read goes through parse(): a tombstone with a leading-zero expiry is malformed, so a
+# start that meets it is an error (exit 1) and the tombstone is kept, never arithmetic on "0795…"
+rm -rf "$RESV"; mkdir -p "$RESV"; printf '300 0%s s-a morpheus 0\n' "$(( $(date +%s) - 1 ))" > "$RESV/4-4-4.expired"
+r=$(DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HLOCK" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$RS" start s-a morpheus >/dev/null 2>&1; echo $?)
+[ "$r" -eq 1 ] && [ -e "$RESV/4-4-4.expired" ] && pass "a malformed tombstone (leading-zero expiry) is an error for start (exit 1), kept, no octal arithmetic" || fail "unparsed tombstone: rc=$r kept=$([ -e "$RESV/4-4-4.expired" ] && echo y || echo n)"
+# #280 r2 items 1+2: the prune step is the only writer and runs only after a clean scan: with a malformed file present,
+# live is exit 1 and an expired record beside it stays a plain file; once the malformed file is gone, live prunes it
+rm -rf "$RESV"; mkdir -p "$RESV"; printf '300 %s s-a morpheus 0\n' "$(( $(date +%s) - 1 ))" > "$RESV/3-3-3"; echo garbage > "$RESV/3-3-4"
+DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HLOCK" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$RS" live >/dev/null 2>&1
+[ -f "$RESV/3-3-3" ] && rm -f "$RESV/3-3-4" && DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HLOCK" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$RS" live >/dev/null 2>&1 && [ -e "$RESV/3-3-3.expired" ] && pass "prune runs only after a clean scan: untouched beside a malformed file, tombstoned once the scan is clean" || fail "prune order: files=[$(ls "$RESV" | tr '\n' ' ')]"
 
 # 2e) xreview #256 r4 (Sen 2026-11-18 20:58), one red case per item:
 #   1  scan errors are nonzero and delete nothing: an unreadable directory, a malformed file (evidence kept); a

@@ -127,9 +127,11 @@ Every job prints its measured peak, and the claim is updated from it.
   never race; a lock not taken in time refuses (fail closed). The gate's lock ends when the gate exits, before the
   lane is a process, so an admitted spawn leaves a RESERVATION (`scripts/reservation.sh`: `perAgentMB`, 90 s, token =
   session id + subagent type) that the gate itself subtracts from its next budget and the probe's `RESV,OK,<mb>` line
-  adds to the footprint; the lane's SubagentStart marks it started under the lock and it counts until it expires
-  (over-counting the handoff for at most 90 s, never under). `RESV,ERR`, like `LANE,ERR`, refuses. `admit` holds the
-  lock like `claim`. Pinned by test-gpu.sh §2b and test-gates.sh 1b–2d.
+  adds to the footprint; the lane's SubagentStart marks it started under the lock and a started reservation counts
+  until the lane's SubagentStop releases it, never by time (an unstarted one expires after 90 s and becomes a
+  tombstone). `RESV,ERR`, like `LANE,ERR`, refuses. `admit` holds the lock like `claim` and records its admission on
+  the ledger inside it. The helper's scan is read-only; one prune step, after a clean scan, is the only writer, and
+  the probe never writes. Pinned by test-gpu.sh §2b and test-gates.sh 1b–2d.
 - STAGE3's measured full-run VmHWM: 26 bands 3.2 GiB, 32 bands 3.43, 34 bands 3.53, 46 bands 4.22. The 46-band pair
   is 2 × 4.22 + 1.5 = 9.94, so it fits.
 - The evidence: a 26-band pair on gpu1 was kernel-OOM-killed at 19:29:47 on 09-28 at 5.23 GiB each. The
