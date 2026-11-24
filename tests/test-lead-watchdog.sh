@@ -1,5 +1,7 @@
 #!/bin/bash
 # tests/test-lead-watchdog.sh — the lead watchdog against a throwaway tmux server (-L), a stub `claude` and a stub mailer.
+# 2026-11-22 cases (13-22): session gone → recreated (through a scope when no server runs), pane gone → new window,
+# pane dead or not at a prompt → respawned; no id, a bad id, the kill-switch and the loop guard each still stop it.
 # Cases: alive → ok, no relaunch · dead with hint → relaunch typed, stub claude started, ok line · dead without hint → fail,
 # no relaunch · kill-switch → warn · loop protection → fail after 3 · recent keypress → warn.
 set -u
@@ -104,6 +106,79 @@ grep -q '^CHECK lead-liveness fail · pane lwtest:0.0 is at a shell with no' <<<
 fresh "no hint here"; printf 'session=%s\npane=lwtest:0.0\n' "$SID2" > "$T/real.session"; rm -f "$T/state/lead.session"; ln -s "$T/real.session" "$T/state/lead.session"; out=$(run)
 grep -q '^CHECK lead-liveness fail · ' <<<"$out" && [ ! -e "$T/claude.args" ] && ok "a symlinked lead.session is not read" || bad "symlinked file: $out"
 rm -f "$T/state/lead.session"
+
+# ── 2026-11-22: the session or the pane is GONE, or the pane is not at a prompt (Flow row 8c258c8b) ─────────────
+# oomd killed the lead's pane scope at 04:26; the session went with its only pane and the watchdog said "relaunch
+# by hand" every 2 minutes for 37 hours. In these cases the panes it makes run a plain bash (LEAD_SHELL_CMD), and a
+# tmux server it has to start goes through a stub scope runner that logs its call (LEAD_SCOPE_RUN).
+export LEAD_SHELL_CMD="bash --norc --noprofile"
+printf '#!/bin/bash\necho "$*" >> "%s/scope-run.log"\nexec "$@"\n' "$T" > "$T/bin/scope-run"; chmod +x "$T/bin/scope-run"
+export LEAD_SCOPE_RUN="$T/bin/scope-run"
+sess_file() { printf 'session=%s\npane=%s\n' "$SID2" "${1:-lwtest:0.0}" > "$T/state/lead.session"; }
+reset() { rm -f "$T/claude.args" "$T/state/lead-watchdog.relaunches" "$T/state/lead-watchdog.off" "$T/scope-run.log"; }
+
+# 13. no tmux SERVER at all, lead.session has the id → the session is recreated in a scope of its own, the lead resumed
+tmux -L lwtest kill-server 2>/dev/null; sleep 0.5; reset; sess_file
+out=$(env -u LEAD_PANE bash "$WD" 2>&1)
+if grep -q '^CHECK lead-liveness ok · relaunched 11111111 in lwtest:[0-9]*\.[0-9]* .* from lead.session, session recreated' <<<"$out" \
+   && grep -q -- "--resume $SID2 --permission-mode bypassPermissions" "$T/claude.args" 2>/dev/null && tmux -L lwtest has-session -t =lwtest 2>/dev/null; then
+  ok "no server: the session is recreated and the lead resumed from lead.session"; else bad "recreate, no server: $out"; fi
+grep -q 'new-session -d -s lwtest' "$T/scope-run.log" 2>/dev/null && ok "a tmux server started by the watchdog goes through the scope runner (never a child of the unit)" || bad "scope runner not used: $(cat "$T/scope-run.log" 2>&1)"
+[ "$(wc -l < "$T/state/lead-watchdog.relaunches")" = 1 ] && ok "a recreation counts as one relaunch" || bad "recreate history"
+
+# 14. the server is alive (another session), only the lead's session is gone → recreated WITHOUT the scope runner
+tmux -L lwtest kill-server 2>/dev/null; sleep 0.5
+for _try in 1 2 3 4 5; do tmux -L lwtest new-session -d -s other "bash --norc --noprofile" 2>/dev/null; sleep 0.4; tmux -L lwtest has-session -t =other 2>/dev/null && break; done
+reset; sess_file; out=$(env -u LEAD_PANE bash "$WD" 2>&1)
+if grep -q '^CHECK lead-liveness ok · relaunched 11111111 .* session recreated' <<<"$out" && [ ! -e "$T/scope-run.log" ] && tmux -L lwtest has-session -t =other 2>/dev/null; then
+  ok "server alive, session gone: recreated by the running server; the other session is untouched"; else bad "recreate, server alive: $out $(cat "$T/scope-run.log" 2>&1)"; fi
+
+# 15. session gone and NO id anywhere → fail, nothing made, nothing guessed
+tmux -L lwtest kill-session -t =lwtest 2>/dev/null; reset; rm -f "$T/state/lead.session"; out=$(run)
+grep -q "^CHECK lead-liveness fail · no tmux session 'lwtest' and no lead.session id" <<<"$out" && ! tmux -L lwtest has-session -t =lwtest 2>/dev/null && [ ! -e "$T/claude.args" ] \
+  && ok "session gone, no id: fail, no session made" || bad "no id: $out"
+
+# 16. session gone, a BAD id in lead.session → the same refusal
+reset; printf 'session=zzz; touch %s/BADID\npane=lwtest:0.0\n' "$T" > "$T/state/lead.session"; out=$(run)
+grep -q "no lead.session id" <<<"$out" && ! tmux -L lwtest has-session -t =lwtest 2>/dev/null && [ ! -e "$T/BADID" ] && ok "session gone, bad id: nothing made, nothing run" || bad "bad id recreate: $out"
+
+# 17. session gone, kill-switch → warn, nothing made
+reset; sess_file; touch "$T/state/lead-watchdog.off"; out=$(run)
+grep -q '^CHECK lead-liveness warn · watchdog off' <<<"$out" && ! tmux -L lwtest has-session -t =lwtest 2>/dev/null && ok "kill-switch holds for a recreation too" || bad "kill-switch recreate: $out"
+
+# 18. session gone, 3 relaunches in the last hour → fail, nothing made
+reset; sess_file; now=$(date +%s); printf '%s\n%s\n%s\n' "$((now-100))" "$((now-200))" "$((now-300))" > "$T/state/lead-watchdog.relaunches"; out=$(run)
+grep -q "^CHECK lead-liveness fail · no tmux session 'lwtest'; 3 relaunches already" <<<"$out" && ! tmux -L lwtest has-session -t =lwtest 2>/dev/null && [ ! -e "$T/claude.args" ] \
+  && ok "the loop guard holds for a recreation too" || bad "loop recreate: $out"
+
+# 19. the session lives (two windows) but the lead's PANE is gone → a new window for it, the lead resumed there
+fresh "no hint here"; tmux -L lwtest new-window -d -t lwtest "bash --norc --noprofile"; sleep 0.4
+tmux -L lwtest kill-pane -t lwtest:0.0; sleep 0.4; reset; sess_file lwtest:0.0
+out=$(env -u LEAD_PANE bash "$WD" 2>&1)
+if grep -q '^CHECK lead-liveness ok · relaunched 11111111 in lwtest:[0-9]*\.0 .* window recreated' <<<"$out" && grep -q -- "--resume $SID2" "$T/claude.args" 2>/dev/null; then
+  ok "pane gone, session alive: a new window is made and the lead resumed in it"; else bad "window recreate: $out"; fi
+tmux -L lwtest display -p -t lwtest:1.0 '#{pane_pid}' > /dev/null 2>&1 && [ -z "$(pgrep -P "$(tmux -L lwtest display -p -t lwtest:1.0 '#{pane_pid}')")" ] && ok "…and the session's other window was not typed into" || bad "the other window was touched"
+
+# 20. the pane's shell sits at a continuation prompt (an unfinished `if`): the first version warned forever. Now the
+#     pane is respawned and the lead resumed; the unfinished command NEVER runs.
+fresh "$HINT"; tmux -L lwtest send-keys -t lwtest:0.0 -l "if true; then touch $T/PS2RAN"; tmux -L lwtest send-keys -t lwtest:0.0 Enter; sleep 1.2; reset
+out=$(run); sleep 0.5
+if grep -q '^CHECK lead-liveness ok · relaunched 3f2afe4b .* pane respawned' <<<"$out" && [ ! -e "$T/PS2RAN" ] && grep -q -- '--resume 3f2afe4b-df91-402b-8792-e19b2a007cf6' "$T/claude.args" 2>/dev/null; then
+  ok "a pane not at a prompt is respawned and the lead resumed; the unfinished command never runs"; else bad "not-a-prompt: $out ran=$(ls "$T/PS2RAN" 2>&1)"; fi
+
+# 21. a DEAD pane kept by remain-on-exit (what a killed pane looks like there) → respawned, resumed from lead.session
+fresh "no hint here"; tmux -L lwtest set-option -t lwtest remain-on-exit on; tmux -L lwtest send-keys -t lwtest:0.0 -l "exit"; tmux -L lwtest send-keys -t lwtest:0.0 Enter; sleep 0.8
+[ "$(tmux -L lwtest display -p -t lwtest:0.0 '#{pane_dead}')" = 1 ] && ok "fixture: the pane is dead and kept" || bad "fixture: pane_dead=$(tmux -L lwtest display -p -t lwtest:0.0 '#{pane_dead}' 2>&1)"
+reset; sess_file; out=$(run)
+if grep -q '^CHECK lead-liveness ok · relaunched 11111111 in lwtest:0.0 .* from lead.session, pane respawned' <<<"$out" && grep -q -- "--resume $SID2" "$T/claude.args" 2>/dev/null; then
+  ok "a dead pane is respawned and the lead resumed"; else bad "dead pane: $out"; fi
+
+# 22. a pane with something RUNNING is never respawned, whatever its last line looks like
+fresh ""; tmux -L lwtest send-keys -t lwtest:0.0 -l "sleep 20; echo not-a-prompt-line"; tmux -L lwtest send-keys -t lwtest:0.0 Enter; sleep 0.6
+pid_before=$(tmux -L lwtest display -p -t lwtest:0.0 '#{pane_pid}'); reset; sess_file; out=$(run)
+grep -q '^CHECK lead-liveness ok · pane lwtest:0.0 has a running child' <<<"$out" && [ "$(tmux -L lwtest display -p -t lwtest:0.0 '#{pane_pid}')" = "$pid_before" ] && [ ! -e "$T/claude.args" ] \
+  && ok "a live pane is left alone (no respawn, nothing typed)" || bad "live pane touched: $out"
+rm -f "$T/state/lead.session"; unset LEAD_SHELL_CMD LEAD_SCOPE_RUN
 
 # 11. the writer hook: only the lead's session (tmux session name + cwd = HOME) writes the file
 WR="$here/scripts/lead-session-write.sh"
