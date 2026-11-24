@@ -1,0 +1,7 @@
+[Unit]
+Description=dreamteam: move lane sessions' processes into lanes.slice (scripts/lane-slice.sh attach)
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Projects/dreamteam
+ExecStart=/usr/bin/bash %h/Projects/dreamteam/scripts/lane-slice.sh attach
+TimeoutStartSec=1min

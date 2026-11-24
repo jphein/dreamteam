@@ -227,6 +227,11 @@
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/lead-session-write.sh\"",
             "timeout": 8
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/lane-slice.sh\" attach --hook",
+            "timeout": 8
           }
         ]
       }
