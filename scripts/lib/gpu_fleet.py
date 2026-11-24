@@ -21,6 +21,7 @@ import json
 import math
 import os
 import re
+import select
 import shlex
 import socket
 import subprocess
@@ -249,7 +250,39 @@ def eff_vram(c: dict, fleet: dict) -> int:
     return int(math.ceil(c.get("peak_vram_mib", 0) * (fleet.get("defaults", {}).get("grows_margin", 1.5) if c.get("grows") else 1)))
 
 
-def host_budget(fleet: dict, host: str, claims: list, add: dict | None = None) -> list:
+
+def lane_footprint(fleet: dict, host: str) -> tuple:
+    """(MB, line): the live RSS of the claude sessions and their children on a host that also runs lanes (#241, Sen
+    2026-11-17 option b). The lane floor keeps a lane from starting beside a pair; this keeps a pair from being admitted
+    beside a running lane, which the fixed pair limit never saw. UNREADABLE REFUSES (xreview #256 r1 item 1): an
+    asleep host runs no job anyway (wake it, then claim); an older probe without the LANE line is an update to make;
+    a failed sampler (LANE,ERR) is not a measured zero (LANE,OK,0). Hosts without "lanes" in fleet.json: nothing."""
+    h = fleet["hosts"][host]
+    if not h.get("lanes"):
+        return 0, ""
+    p = probe(fleet, host)
+    if not p.get("reachable"):
+        raise Refused(f"{host} lane footprint: unreadable (asleep?): an asleep host runs no job anyway; wake it "
+                      f"(realm wol wake {host}), then claim")
+    if p.get("lane_err"):
+        raise Refused(f"{host} lane footprint: ps failed on the host (LANE,ERR), and a failure is not a measured "
+                      f"zero; check the host, then claim")
+    if p.get("resv_err"):
+        raise Refused(f"{host} lane footprint: the reservations could not be read on the host (RESV,ERR: a listing, "
+                      f"a file or a value failed), and a failure is not a zero; check ~/.local/state/dreamteam/"
+                      f"reservations there, then claim")
+    if "lane_mb" not in p or "resv_mb" not in p:
+        raise Refused(f"{host} lane footprint: the probe has no {'LANE' if 'lane_mb' not in p else 'RESV'} line (an "
+                      f"older dreamteam on {host}?); update it, then claim")
+    # + the reservations (scripts/reservation.sh LIFECYCLE): lanes mem-gate admitted under the host lock. An unstarted
+    # reservation counts for 90 s (then it is a tombstone, not counted); a started one counts until the lane's
+    # SubagentStop releases it, never by time, so the handoff to live RSS over-counts and never under-counts
+    total = p["lane_mb"] + p["resv_mb"]
+    return total, (f"{host} lane footprint: {total} MB = {p['lane_mb']} MB live (claude sessions and their children) "
+                   f"+ reserved {p['resv_mb']} MB (lanes admitted, not yet running), subtracted from the pair limit "
+                   f"(#241, #256)")
+
+def host_budget(fleet: dict, host: str, claims: list, add: dict | None = None, lane: tuple | None = None) -> list:
     """The host-level arithmetic over claims that overlap in time, as lines. Raises Refused when it fails."""
     h = fleet["hosts"][host]
     b = h.get("budget", {})
@@ -263,11 +296,15 @@ def host_budget(fleet: dict, host: str, claims: list, add: dict | None = None) -
     if form == "remote":
         lim = b.get("pair_limit_mib", h["ram_mb"] - 512)
         margin = b.get("pair_margin_mib", 1536)
+        lane_mb, lane_line = lane or (0, "")
+        if lane_line:
+            lines.append(lane_line)
+        eff_lim = lim - lane_mb
         peaks = [(c["lane"], eff_peak(c, fleet)) for c in on_host]
         need = sum(p for _, p in peaks) + margin
         lines.append(f"{host} pair rule: peaks {' + '.join(f'{p} ({l})' for l, p in peaks) or '0'} + {margin} margin"
-                     f" = {need} MB <= limit {lim} MB")
-        if need > lim:
+                     f" = {need} MB <= limit {lim} MB" + (f" - lane footprint {lane_mb} MB = {eff_lim} MB" if lane_mb else ""))
+        if need > eff_lim:
             raise Refused(lines[-1].replace("<=", ">") + " (FAMILIAR-RULES rule 7, keyed to the host's idle MemAvailable)")
     elif form == "guest":
         caps = [cap_mb(c["peak_ram_mb"], c.get("grows", False), fleet) for c in on_host]
@@ -290,7 +327,7 @@ def host_budget(fleet: dict, host: str, claims: list, add: dict | None = None) -
 
 
 def check_claim(fleet: dict, claims: dict, new: dict, windows: dict, vulkan: bool = False,
-                override: str | None = None) -> list:
+                override: str | None = None, lane: tuple | None = None) -> list:
     """Every check a new claim must pass against the claims overlapping it in time. Returns the arithmetic lines,
     or raises Refused. A granter's --override REASON passes a window, exclusivity, solo or host-budget refusal
     (and says so in the lines); nothing overrides the physics: a compute-blocked card, or VRAM."""
@@ -343,7 +380,7 @@ def check_claim(fleet: dict, claims: dict, new: dict, windows: dict, vulkan: boo
         soft(lines[-1].replace("<=", ">") + shared)
     on_host = [v for v in over if fleet["cards"].get(v["card"], {}).get("host") == c["host"]]
     try:
-        lines += host_budget(fleet, c["host"], on_host, add=new)
+        lines += host_budget(fleet, c["host"], on_host, add=new, lane=lane)
     except Refused as e:
         soft(str(e))
     return lines
@@ -362,8 +399,10 @@ def cmd_claim(a, fleet, cfg) -> int:
            "until": parse_until(a.until, start), "peak_ram_mb": parse_mb(a.peak_ram), "peak_vram_mib": parse_mb(a.peak_vram),
            "grows": a.grows, "protected": a.protected, "estimate": a.estimate, "solo": a.solo, "exclusive": a.exclusive,
            "override": a.override or None, "by": lane_of(me) or "orchestrator", "jobs": []}
-    with Ledger(write=not a.dry_run) as L:
-        lines = check_claim(fleet, L.data["claims"], new, L.data["windows"], vulkan=a.vulkan, override=a.override)
+    host = card_of(fleet, a.card)["host"]
+    with HostLock(fleet, host), Ledger(write=not a.dry_run) as L:   # the lock spans probe → record (#256 r1 item 3)
+        lines = check_claim(fleet, L.data["claims"], new, L.data["windows"], vulkan=a.vulkan, override=a.override,
+                            lane=lane_footprint(fleet, host))
         new["cap_mb"] = cap_mb(new["peak_ram_mb"], new["grows"], fleet)
         for ln in lines:
             print("  " + ln)
@@ -480,7 +519,7 @@ def _recheck_peak(a, fleet, L, t, claim, peak, grows):
     host = fleet["cards"][a.card]["host"]
     others = [v for v in L.live(t).values() if claim_key(v) != claim_key(claim)
               and fleet["cards"].get(v["card"], {}).get("host") == host]
-    return host_budget(fleet, host, others, add={**claim, "peak_ram_mb": peak, "grows": grows})
+    return host_budget(fleet, host, others, add={**claim, "peak_ram_mb": peak, "grows": grows}, lane=lane_footprint(fleet, host))
 
 
 def live_vram_check(fleet: dict, card: str, peak_vram_mib: int) -> str:
@@ -506,13 +545,17 @@ def live_vram_check(fleet: dict, card: str, peak_vram_mib: int) -> str:
 
 def cmd_admit(a, fleet, cfg) -> int:
     t = now()
-    with Ledger() as L:
+    host = card_of(fleet, a.card)["host"]
+    with HostLock(fleet, host), Ledger(write=True) as L:   # the lock spans the peak recheck and the ledger, as in claim (#256 r3 item 6)
         claim = _authorize_run(a, fleet, cfg, L, t)
         peak, grows, cap = _peaks_for_run(a, claim, fleet)
         print(f"  cap: peak {peak} MB x {'1.5 (grows)' if grows else '1.2'} = {cap} MB")
         print("  " + live_vram_check(fleet, a.card, claim.get("peak_vram_mib", 0)))
         for ln in _recheck_peak(a, fleet, L, t, claim, peak, grows):
             print("  " + ln)
+        # the admission is on the ledger's history, written while the host lock is still held: the lock order is what
+        # makes "admitted" and "recorded" one step (the stub's UNLOCK line counts admits; #280 r1 item 5)
+        L.log("admit", card=a.card, lane=claim["lane"], peak=peak, cap=cap, by=caller() or "orchestrator")
     print(f"ADMITTED (static): {a.card} for {claim['lane']}, cap {cap} MB. The launcher re-checks live memory on the host.")
     return 0
 
@@ -522,6 +565,10 @@ PROBE = r"""
 nvidia-smi --query-gpu=index,pci.bus_id,memory.used,memory.total,utilization.gpu --format=csv,noheader,nounits 2>/dev/null | sed 's/^/GPU,/'
 nvidia-smi --query-compute-apps=gpu_bus_id,pid,used_memory,process_name --format=csv,noheader,nounits 2>/dev/null | sed 's/^/APP,/'
 awk '/MemAvailable/{a=$2}/SwapTotal/{t=$2}/SwapFree/{f=$2}END{print "MEM,"a","t","f}' /proc/meminfo
+d="${DREAMTEAM_RESERVATIONS:-$HOME/.local/state/dreamteam/reservations}"; r=0; ok=1; now=$(date +%s)
+if [ -e "$d" ]; then if ! [ -d "$d" ] || ! [ -r "$d" ] || ! [ -x "$d" ]; then ok=0; else for f in "$d"/*; do [ -e "$f" ] || continue; case "$f" in *.expired|*.tmp) continue ;; esac; [ -f "$f" ] && [ -r "$f" ] || { ok=0; break; }; read -r mb exp ses typ st < "$f" 2>/dev/null || { ok=0; break; }; case "$mb" in ''|*[!0-9]*|0[0-9]*) ok=0; break ;; esac; case "$exp" in ''|*[!0-9]*|0[0-9]*) ok=0; break ;; esac; case "${st:-}" in ''|*[!0-9]*) ok=0; break ;; esac; [ -n "${ses:-}" ] && [ -n "${typ:-}" ] && [ "${#mb}" -le 7 ] && [ "${#exp}" -le 12 ] || { ok=0; break; }; if [ "$st" != 0 ] || [ "$((10#$exp))" -gt "$now" ]; then r=$((r + 10#$mb)); fi; done; [ "$r" -le 1000000 ] || ok=0; fi; fi
+if [ "$ok" = 1 ]; then echo "RESV,OK,$r"; else echo "RESV,ERR"; fi
+if lane=$(ps -eo pid=,ppid=,rss=,comm= 2>/dev/null) && [ -n "$lane" ]; then printf '%s\n' "$lane" | awk '{pp[$1]=$2; rss[$1]=$3; c[$1]=$4; n++; id[n]=$1} END{for(i=1;i<=n;i++){q=id[i]; while(q>1 && (q in pp)){if(c[q]=="claude"){s+=rss[id[i]]; break}; q=pp[q]}}; print "LANE,OK," s+0}'; else echo LANE,ERR; fi
 for p in __PATHS__; do printf 'DISK,%s,%s\n' "$p" "$(df -BG --output=avail "$p" 2>/dev/null | tail -1 | tr -dc 0-9)"; done
 if [ -n "__PAUSE__" ] && [ -e "__PAUSE__" ]; then echo PAUSE,1; else echo PAUSE,0; fi
 """
@@ -539,11 +586,72 @@ def _ssh(host: str, script: str, timeout: float = 12):
                           capture_output=True, text=True, timeout=timeout)
 
 
-def probe(fleet: dict, host: str) -> dict:
+HOST_LOCK_SCRIPT = ('mkdir -p "$HOME/.local/state/dreamteam" && exec flock -w 5 "$HOME/.local/state/dreamteam/host.lock" '
+                    "-c 'echo LOCKED; cat >/dev/null'")
+
+
+class HostLock:
+    """The host-level lock a claim holds from its probe to its record, shared with the lane start on that host
+    (scripts/mem-gate.sh takes the same file around its measurement): xreview #256 r1 item 3. Over ssh: flock -w 5 on
+    ~/.local/state/dreamteam/host.lock, held by a cat on our pipe until we close it after the record is written. Not
+    taken within the wait (a lane is starting there, or the host is unreachable) → Refused: fail closed. Hosts without
+    lanes: no lock."""
+
+    def __init__(self, fleet: dict, host: str):
+        self.host, self.needed, self.proc, self.rc = host, bool(fleet["hosts"][host].get("lanes")), None, None
+
+    def __enter__(self):
+        if not self.needed:
+            return self
+        if self.host == local_host() and not os.environ.get("DREAMTEAM_GPU_SSH"):
+            argv = ["bash", "-c", HOST_LOCK_SCRIPT]
+        else:
+            argv = [os.environ.get("DREAMTEAM_GPU_SSH", "ssh"), "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
+                    self.host, HOST_LOCK_SCRIPT]
+        self.proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                     text=True)
+        ready, _, _ = select.select([self.proc.stdout], [], [], 12)
+        line = self.proc.stdout.readline().strip() if ready else ""
+        if line != "LOCKED":
+            self._release()
+            if self.rc == 255:          # ssh could not reach the host: asleep
+                raise Refused(f"{self.host} unreachable (asleep?): an asleep host runs no job anyway; wake it "
+                              f"(realm wol wake {self.host}), then claim")
+            raise Refused(f"{self.host} host lock not taken within 5 s (a lane is starting there): try again")
+        return self
+
+    def _release(self):
+        if self.proc is None:
+            return
+        with contextlib.suppress(OSError):
+            self.proc.stdin.close()
+        try:
+            self.rc = self.proc.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            self.rc = self.proc.wait()
+        self.proc = None
+
+    def __exit__(self, *_):
+        self._release()
+        return False
+
+
+def probe_script(fleet: dict, host: str) -> str:
     h = fleet["hosts"][host]
     paths = " ".join(shlex.quote(f["path"]) for f in h.get("disk_floors", [])) or "/"
     pause = (h.get("pause_file") or "").replace("~", "$HOME")
-    script = PROBE.replace("__PATHS__", paths).replace("__PAUSE__", pause)
+    return PROBE.replace("__PATHS__", paths).replace("__PAUSE__", pause)
+
+
+def cmd_probe_script(a, fleet, cfg) -> int:
+    """Print the probe script for a host: the tests run it against a stubbed ps (the sampler, #256 r1 item 5)."""
+    print(probe_script(fleet, a.host))
+    return 0
+
+
+def probe(fleet: dict, host: str) -> dict:
+    script = probe_script(fleet, host)
     try:
         r = _ssh(host, script)
     except subprocess.TimeoutExpired:
@@ -563,6 +671,14 @@ def probe(fleet: dict, host: str) -> dict:
             a, tot, free = (int(x or 0) for x in parts[1:4])
             out["avail_mb"] = a // 1024
             out["swap_pct"] = int(100 * (tot - free) / tot) if tot else 0
+        elif parts[0] == "LANE" and len(parts) >= 3 and parts[1] == "OK" and parts[2].isdigit():   # kB (#241)
+            out["lane_mb"] = int(parts[2]) // 1024
+        elif parts[0] == "LANE":                                       # LANE,ERR: ps failed on the host (#256 r1 item 2)
+            out["lane_err"] = True
+        elif parts[0] == "RESV" and len(parts) >= 3 and parts[1] == "OK" and parts[2].isdigit():   # MB reserved (#256 r2)
+            out["resv_mb"] = int(parts[2])
+        elif parts[0] == "RESV":                                       # RESV,ERR: the reservations could not be read (r3 item 5)
+            out["resv_err"] = True
         elif parts[0] == "DISK" and len(parts) >= 3:
             out["disk"][parts[1]] = int(parts[2]) if parts[2].isdigit() else None
         elif parts[0] == "PAUSE":
@@ -983,6 +1099,9 @@ def main(argv=None) -> int:
     p.add_argument("--json", action="store_true")
     p.add_argument("--guard", action="store_true", help="list every would-block since midnight, not the last 10")
     p.set_defaults(fn=cmd_board)
+    p = sub.add_parser("probe-script", help="print the probe script for HOST (the sampler; tests run it against a stubbed ps)")
+    p.add_argument("host")
+    p.set_defaults(fn=cmd_probe_script)
     p = sub.add_parser("inventory", help="the cards and their capabilities (--check HOST re-measures)")
     p.add_argument("--json", action="store_true")
     p.add_argument("--check", metavar="HOST")
