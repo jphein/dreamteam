@@ -1130,7 +1130,7 @@ measured sizes and each host's admission rules in `gpu/fleet.json`. Spec:
   training. The granter runs `dreamteam gpu claim <card> --lane <you> --until 3h --peak-ram 2.9G --peak-vram 3500M`.
   Admission refuses (exit 75) anything that breaks the host's rules:
   - the cap is peak × 1.2, or × 1.5 when it grows;
-  - gpu0/gpu1 pair rule: Σ caps + 1.5 GiB ≤ RAM − 0.5 GiB;
+  - gpu0/gpu1 pair rule: Σ peaks + 1.5 GiB ≤ the host's idle-MemAvailable limit, minus the live lane footprint when a lane runs there (#241);
   - katana/game guest budgets are sums (katana 12 GB and 9 GiB; game 8 GB and 3.5 GiB);
   - familiar: one heavy job;
   - VRAM leaves 1 GiB beside the resident services; katana's desktop is one, at about 2.7 GiB. A growing job's VRAM
