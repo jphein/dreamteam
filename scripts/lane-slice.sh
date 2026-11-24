@@ -75,6 +75,19 @@ if [ "$HOOK" -eq 1 ] && [ -z "${LANE_SLICE_HOOK_INNER:-}" ]; then
   exit 0
 fi
 if [ "$HOOK" -eq 1 ]; then exec >/dev/null 2>&1; trap 'exit 0' EXIT; fi
+# ONE LOCK over discovery AND mutation (xreview #288 r1): install, attach (the timer's, the SessionStart hook's, a
+# person's) and uninstall each read the sessions and cgroups and then move processes and set properties. Two of
+# them at once could act on each other's half-done state. Every mutating verb runs once more under `flock -o`
+# (the lock is held by flock itself, so nothing this script starts inherits it) and waits its turn; `status`
+# changes nothing and takes no lock. Exit 75 when the lock stays held for the whole wait: nothing was done.
+LOCK="${LANE_SLICE_LOCK:-${XDG_RUNTIME_DIR:-/tmp}/dreamteam-lane-slice.lock}"
+if [ "$MODE" != status ] && [ -z "${LANE_SLICE_LOCKED:-}" ]; then
+  w="${LANE_SLICE_LOCK_WAIT:-30}"; [[ "$w" =~ ^[0-9]{1,3}$ ]] || w=30
+  command -v flock >/dev/null 2>&1 || { echo "lane-slice: flock is needed" >&2; exit 1; }
+  LANE_SLICE_LOCKED=1 flock -o -E 75 -w "$w" "$LOCK" bash "${BASH_SOURCE[0]}" "$@"; lrc=$?
+  [ "$lrc" -ne 75 ] || echo "lane-slice: another lane-slice run holds $LOCK (waited $w s): nothing done" >&2
+  exit "$lrc"
+fi
 command -v jq >/dev/null 2>&1 || { echo "lane-slice: jq is needed" >&2; exit 1; }
 uc() { systemctl --user "$@"; }
 ours() { [ -f "$1" ] && [ ! -L "$1" ] && head -n 1 "$1" 2>/dev/null | grep -qxF "$MARK"; }
@@ -221,12 +234,27 @@ fi
 # ── attach ───────────────────────────────────────────────────────────────────────────────────────────────
 command -v busctl >/dev/null 2>&1 && command -v systemd-run >/dev/null 2>&1 || { echo "lane-slice: busctl and systemd-run are needed" >&2; exit 1; }
 rc=0
-declare -A LIVE=() FLEET=()
+declare -A LIVE=() FLEET=() LEADFLEET=()
+MYUID="${LANE_SLICE_UID:-$(id -u)}"; [[ "$MYUID" =~ ^[0-9]{1,9}$ ]] || MYUID=$(id -u)       # LANE_SLICE_UID: the fixture tree's uid (tests)
+MINE="/user.slice/user-$MYUID.slice/user@$MYUID.service/"
+# fleet_unit <cgroup path> → the dreamteam-*.scope name in it, ONLY when the path is inside this user's own
+# manager; nothing otherwise. The NAME comes from a cgroup path, so it is validated against the fleet-scope shape
+# at the one place it is handed to systemctl (the weights loop below), never trusted before.
+fleet_unit() {
+  local c=$1 f
+  case "$c" in "$MINE"*) ;; *) return 1 ;; esac
+  f=${c##*/dreamteam-}; printf '%s' "dreamteam-${f%%/*}"
+}
 for s in "${SESSIONS[@]}"; do
   if excluded "$s"; then
     # never a lane: anything of it found inside the slice is moved OUT
     out=()
-    while read -r p; do [ -n "$p" ] || continue; c=$(cg "$p") || continue; case "$c" in */"$SLICE.slice"/*) out+=("$p") ;; esac; done < <(session_pids "$s")
+    while read -r p; do [ -n "$p" ] || continue; c=$(cg "$p") || continue
+      case "$c" in
+        */"$SLICE.slice"/*) out+=("$p") ;;
+        */dreamteam-*.scope*) fu=$(fleet_unit "$c") && LEADFLEET[$fu]=1 ;;      # a fleet scope the lead (or an excluded session) lives in
+      esac
+    done < <(session_pids "$s")
     if [ "${#out[@]}" -gt 0 ]; then
       if move "out-$(safe "$s").scope" "" "${out[@]}"; then echo "session $s is not a lane: ${#out[@]} process(es) moved OUT of $SLICE.slice (out-$(safe "$s").scope)"
       else echo "lane-slice: session $s is not a lane but its processes could not be moved out of $SLICE.slice" >&2; rc=1; fi
@@ -240,8 +268,12 @@ for s in "${SESSIONS[@]}"; do
     c=$(cg "$p") || continue
     [ -n "$c" ] || continue                              # gone already
     case "$c" in
+      /system.slice/*|/system.slice) echo "note: pid $p of session $s is under system.slice ($c): never moved, never weighted"; continue ;;
+      */lead-*.scope|*/lead-*.scope/*) echo "note: pid $p of session $s is in a lead scope ($c): never moved out of it"; continue ;;
       */"$SLICE.slice"/*) continue ;;
-      */dreamteam-*.scope*) f=${c##*/dreamteam-}; FLEET["dreamteam-${f%%/*}"]=1; continue ;;
+      */dreamteam-*.scope*)
+        if fu=$(fleet_unit "$c"); then FLEET[$fu]=1; else echo "note: pid $p of session $s is in '$c': not a fleet scope of this user by its path or name, left alone"; fi
+        continue ;;
     esac
     pend+=("$p")
   done < <(session_pids "$s")
@@ -256,6 +288,8 @@ for s in "${SESSIONS[@]}"; do
 done
 # a fleet scope that holds lane processes is not moved; it gets the lanes' weights
 for u in "${!FLEET[@]}"; do
+  [[ "$u" =~ ^dreamteam-[A-Za-z0-9_.-]{1,80}\.scope$ ]] || { echo "note: '$u' (from a cgroup path) is not a plain fleet-scope name: nothing is set on it"; continue; }
+  if [ -n "${LEADFLEET[$u]:-}" ]; then echo "fleet scope $u also holds the lead's (or an excluded session's) processes: NOT given the lanes' weights"; continue; fi
   uc set-property --runtime "$u" "CPUWeight=$CPUW" "IOWeight=$IOW" 2>/dev/null && echo "fleet scope $u: CPUWeight=$CPUW IOWeight=$IOW (its memory stays under its own cap)" || { echo "lane-slice: could not set weights on $u" >&2; rc=1; }
 done
 # a lane scope whose session is gone and that holds only its anchor

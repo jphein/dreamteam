@@ -42,7 +42,7 @@ ok "passes bash -n" 'bash -n "$LS"'
 X="$T/xdg"; P="$T/proc"; mkdir -p "$X" "$P"
 U="$X/systemd/user"
 cfg() { printf '%s\n' "$1" > "$T/config.json"; }
-run_ls() { DREAMTEAM_CONFIG="$T/config.json" DREAMTEAM_HOST=test-nooverlay XDG_CONFIG_HOME="$X" DREAMTEAM_PROC="$P" DREAMTEAM_CGROUP_ROOT="$T/cg" PATH="$B:$PATH" bash "$LS" "$@" > "$T/out" 2> "$T/err"; }
+run_ls() { LANE_SLICE_LOCK="$T/lane.lock" LANE_SLICE_UID=1000 DREAMTEAM_CONFIG="$T/config.json" DREAMTEAM_HOST=test-nooverlay XDG_CONFIG_HOME="$X" DREAMTEAM_PROC="$P" DREAMTEAM_CGROUP_ROOT="$T/cg" PATH="$B:$PATH" bash "$LS" "$@" > "$T/out" 2> "$T/err"; }
 # sessions: lead (excluded), alpha (panes 100 → 101 → 102, and 110), beta (200, already in the slice), gamma (300 in a dreamteam scope)
 stub tmux 'case "$*" in
   *list-sessions*) printf "lead\nalpha\nbeta\ngamma\n" ;;
@@ -147,6 +147,36 @@ rm -f "$T/scope-up"
 # a fleet scope holding a lane's processes is not moved; it gets the lanes' weights
 cfg '{"lanes":{"enabled":true,"exclude":["lead"],"cpuWeight":40,"ioWeight":20}}'; : > "$LOG"; run_ls attach
 ok "a dreamteam-*.scope with a lane's processes gets the slice's CPUWeight and IOWeight" 'grep -qxF "systemctl --user set-property --runtime dreamteam-proj.scope CPUWeight=40 IOWeight=20" "$LOG"'
+# ── xreview #288 r1 / Sen 09:46: what is NEVER moved or weighted, and the name that reaches systemctl ──────────
+raw() { mkdir -p "$P/$1"; echo "0::$2" > "$P/$1/cgroup"; }      # a cgroup path given whole
+restore() { for p in 100 101 102 110 900 901 555; do pcg $p "app.slice/tmux-spawn-x.scope"; done; pcg 200 "lanes.slice/lane-beta.scope"; pcg 300 "lanes.slice/lane-gamma.scope"; pcg 301 "app.slice/dreamteam-proj.scope"; }
+raw 301 "/system.slice/dreamteam-proj.scope"; : > "$LOG"; run_ls attach
+ok "a lane's process under /system.slice, in a unit NAMED like a fleet scope: never weighted (no set-property for it), never moved, and said" '! grep -q "set-property --runtime dreamteam-proj.scope" "$LOG" && ! grep "AttachProcessesToUnit" "$LOG" | grep -q " 301" && grep -q "pid 301 of session gamma is under system.slice" "$T/out"'
+raw 110 "/system.slice/some.service"; : > "$LOG"; run_ls attach
+ok "a lane's pane process that sits in a system service: NOT moved into the slice" '! grep "AttachProcessesToUnit" "$LOG" | grep -qw 110 && grep -q "pid 110 of session alpha is under system.slice" "$T/out" && grep "AttachProcessesToUnit" "$LOG" | grep -qw 100'
+restore; pcg 102 "app.slice/lead-spire.scope"; : > "$LOG"; run_ls attach
+ok "a lane's process found in the lead's scope (lead-spire.scope): never moved out of it" '! grep "AttachProcessesToUnit" "$LOG" | grep -qw 102 && grep -q "pid 102 of session alpha is in a lead scope" "$T/out"'
+restore; raw 301 "/user.slice/user-1001.slice/user@1001.service/app.slice/dreamteam-proj.scope"; : > "$LOG"; run_ls attach
+ok "a dreamteam-*.scope in ANOTHER user's manager: its name never reaches systemctl" '! grep -q "set-property --runtime dreamteam-proj.scope" "$LOG" && grep -q "not a fleet scope of this user" "$T/out"'
+for badname in 'dreamteam-a b.scope' 'dreamteam-x;id.scope' 'dreamteam-$(id).scope' 'dreamteam-.scope' "dreamteam-$(printf 'x%.0s' $(seq 1 90)).scope"; do
+  restore; raw 301 "/user.slice/user-1000.slice/user@1000.service/app.slice/$badname"; : > "$LOG"; run_ls attach
+  if ! grep "set-property" "$LOG" | grep -q "dreamteam-"; then pass "a cgroup path whose unit name is not a plain fleet-scope name (${badname:0:24}…): nothing is handed to set-property"; else fail "unvalidated unit name reached systemctl: $(grep set-property "$LOG")"; fi
+done
+restore; pcg 901 "app.slice/dreamteam-proj.scope"; : > "$LOG"; run_ls attach
+ok "a fleet scope that ALSO holds the lead's processes (the lead is excluded): NOT given the lanes' weights, and said" '! grep -q "set-property --runtime dreamteam-proj.scope" "$LOG" && grep -q "fleet scope dreamteam-proj.scope also holds the lead" "$T/out"'
+restore; : > "$LOG"; run_ls attach
+ok "(control: with the fixture restored the fleet scope gets its weights again)" 'grep -qxF "systemctl --user set-property --runtime dreamteam-proj.scope CPUWeight=40 IOWeight=20" "$LOG"'
+# ONE lock over discovery and mutation
+( exec 7>"$T/lane.lock"; flock 7; sleep 9 ) & lh=$!; sleep 0.4; : > "$LOG"      # held through all five calls below (each waits 1 s at most)
+LANE_SLICE_LOCK_WAIT=1 run_ls attach; rc=$?
+ok "attach while another run holds the lock past its wait: exit 75 and NOTHING was looked at or changed" '[ "$rc" -eq 75 ] && [ ! -s "$LOG" ] && grep -q "another lane-slice run holds" "$T/err"'
+LANE_SLICE_LOCK_WAIT=1 run_ls install; rc=$?; ok "install while the lock is held: exit 75, nothing done" '[ "$rc" -eq 75 ] && [ ! -s "$LOG" ]'
+LANE_SLICE_LOCK_WAIT=1 run_ls uninstall; rc=$?; ok "uninstall while the lock is held: exit 75, nothing done" '[ "$rc" -eq 75 ] && [ ! -s "$LOG" ]'
+LANE_SLICE_LOCK_WAIT=1 run_ls status; rc=$?; ok "status takes no lock: it answers while the lock is held" '[ "$rc" -eq 0 ] && grep -q "^slice lanes.slice" "$T/out"'
+: > "$LOG"; LANE_SLICE_LOCK_WAIT=1 run_ls attach --hook; rc=$?; ok "the hook form while the lock is held: still 0, still silent, nothing done" '[ "$rc" -eq 0 ] && [ ! -s "$T/out" ] && [ ! -s "$LOG" ]'
+wait "$lh" 2>/dev/null; : > "$LOG"; run_ls attach; rc=$?
+ok "once the lock is free attach works again" '[ "$rc" -eq 0 ] && grep -q "set-property --runtime dreamteam-proj.scope" "$LOG"'
+ok "the lock is taken with flock -o, so nothing the script starts inherits it, and it covers install, attach and uninstall" 'grep -q "LANE_SLICE_LOCKED=1 flock -o -E 75 -w" "$LS" && grep -q "if \[ \"\$MODE\" != status \] && \[ -z \"\${LANE_SLICE_LOCKED:-}\" \]; then" "$LS"'
 run_ls status
 ok "status counts a lane's processes that sit in a fleet scope" 'grep -q "^session gamma: 1 of 2 processes in lanes.slice, 1 in a fleet scope (weights only)$" "$T/out"'
 
