@@ -32,7 +32,9 @@
 #     The panes listed there must be the panes this shell lists on the same socket. Different → exit 3, the timer
 #     NOT enabled. "No server on that socket" is accepted only when BOTH probes ran and both say so (a host whose
 #     lanes are not up yet; the script's own line warns when claude processes run and no server is found).
-# A refused install (exit 3) leaves the units linked and the timer NOT enabled: nothing runs; `uninstall` removes the links.
+# A refused install (exit 3) DISABLES the timer (also one that an earlier install had enabled), writes no drop-in
+# before the proof has passed, and puts our drop-in back as it was when the last check fails. The units may stay
+# linked; nothing runs; `uninstall` removes the links.
 # One timer watches one socket. Lanes on a second server need a second instance with its own socket.
 #
 # Exit: 0 done · 1 a systemctl step failed · 2 refused (root, a unit file missing, a socket path that is not
@@ -106,22 +108,35 @@ case "$1" in
     for u in "${UNITS[@]}"; do [ -f "$u" ] || { echo "quota-resume-ctl: $u is missing" >&2; exit 2; }; done
     find_socket
     echo "tmux socket: $SOCK (from $SOCK_FROM)"
+    # A REFUSAL NEVER LEAVES A TIMER RUNNING (ruling after round 3): a timer enabled by an earlier install is
+    # disabled before this exits, so nothing keeps running on a socket that was not proved.
+    refuse() { uc disable --now quota-resume.timer > /dev/null 2>&1 || true; echo "quota-resume-ctl: $1: the timer is DISABLED (also one an earlier install had enabled)" >&2; exit 3; }
+    # 1. THE PROOF FIRST, on the chosen socket, before anything is written
+    prove; p=$?
+    [ "$p" -eq 3 ] && refuse "the user manager does not reach the lanes' tmux server on $SOCK"
+    # 2. only now the drop-in: the new one under a temp name, the one that was there kept until the end
+    rm -f -- "$DROP.new" "$DROP.old"
+    had_ours=0; [ -f "$DROP" ] && grep -qxF "$MARK" "$DROP" && { had_ours=1; cp -p -- "$DROP" "$DROP.old"; }
     if [ "$SOCK" != "$DEFAULT_SOCK" ]; then
-      mkdir -p "$DROPDIR" && printf '%s\n[Service]\nEnvironment=QUOTA_RESUME_TMUX_SOCKET=%s\n' "$MARK" "$SOCK" > "$DROP.tmp" && mv -f "$DROP.tmp" "$DROP" \
-        || { echo "quota-resume-ctl: cannot write $DROP" >&2; exit 1; }
+      mkdir -p "$DROPDIR" && printf '%s\n[Service]\nEnvironment=QUOTA_RESUME_TMUX_SOCKET=%s\n' "$MARK" "$SOCK" > "$DROP.new" && mv -f "$DROP.new" "$DROP" \
+        || { rm -f -- "$DROP.new" "$DROP.old"; echo "quota-resume-ctl: cannot write $DROP" >&2; exit 1; }
       echo "socket drop-in written: $DROP"
-    elif [ -f "$DROP" ] && grep -qxF "$MARK" "$DROP"; then
+    elif [ "$had_ours" -eq 1 ]; then
       rm -f "$DROP"; echo "socket drop-in removed (the lanes are on the default socket)"
     fi
-    uc link "${UNITS[@]}" || { echo "quota-resume-ctl: link failed" >&2; exit 1; }
-    uc daemon-reload || exit 1
-    # ONE socket: what the service will use must be what was chosen, and THAT is what gets proved
-    effective_socket || { echo "quota-resume-ctl: the user manager does not say which socket the service will use: timer NOT enabled" >&2; exit 3; }
+    undo_dropin() {  # put OUR drop-in back to what it was before this run (or remove the one this run wrote)
+      if [ "$had_ours" -eq 1 ]; then mv -f -- "$DROP.old" "$DROP"; elif [ -f "$DROP" ] && grep -qxF "$MARK" "$DROP"; then rm -f -- "$DROP"; fi
+      rm -f -- "$DROP.old"; uc daemon-reload > /dev/null 2>&1 || true
+    }
+    uc link "${UNITS[@]}" || { undo_dropin; echo "quota-resume-ctl: link failed" >&2; exit 1; }
+    uc daemon-reload || { undo_dropin; exit 1; }
+    # 3. ONE socket: what the service will use must be the socket that was chosen and proved
+    effective_socket || { undo_dropin; refuse "the user manager does not say which socket the service will use"; }
     if [ "$EFFECTIVE" != "$SOCK" ]; then
-      echo "quota-resume-ctl: the service would use $EFFECTIVE, not $SOCK (a drop-in or setting that is not ours names it): timer NOT enabled. Remove it, or install with QUOTA_RESUME_TMUX_SOCKET=$EFFECTIVE" >&2; exit 3
+      undo_dropin
+      refuse "the service would use $EFFECTIVE, not $SOCK (a drop-in or setting that is not ours names it). Remove it, or install with QUOTA_RESUME_TMUX_SOCKET=$EFFECTIVE"
     fi
-    prove; p=$?
-    [ "$p" -eq 3 ] && { echo "quota-resume-ctl: the user manager does not reach the lanes' tmux server: timer NOT enabled" >&2; exit 3; }
+    rm -f -- "$DROP.old"
     uc enable --now quota-resume.timer || { echo "quota-resume-ctl: enable failed" >&2; exit 1; }
     echo "quota-resume.timer enabled for $(id -un); first run within 2 minutes" ;;
   uninstall)

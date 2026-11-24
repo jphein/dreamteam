@@ -45,10 +45,11 @@ The line names EVERY walled pane. With no tmux server it is ok (a host without l
 this user run here: then it warns that the timer is looking at the wrong user or socket.
 
 ROUND 2 of that review (7125633596):
-- WORKING IS LOOKED FOR OVER THE WHOLE CAPTURE. In the live area (after the stall's first line, the input box, and
-  everything BELOW the box, where Claude Code draws "esc to interrupt" and the spinner's footer) a marker means the
-  agent works: the pane is not walled. ABOVE the stall it is history, and this script cannot tell a quoted marker
-  from a real one, so it does not type: the pane is named "(a working marker is on screen above the stall…)".
+- WORKING IS LOOKED FOR OVER THE WHOLE CAPTURE, AND ONLY THE FOOTER CAN UNWALL A PANE (ruling after round 3). A
+  marker BELOW the input box, where Claude Code draws its footer ("esc to interrupt", the spinner's line), means
+  the agent works: the pane is not walled. A marker anywhere ABOVE the box is transcript body: a quoted
+  "esc to interrupt" in an answer reads exactly like a real one, so it never unwalls a pane. Such a pane stays
+  walled and NAMED, "(a working marker is on screen above the input box: not typed into)", and gets no key.
 - A TURN'S IDENTITY IS NOT ITS TEXT, AND NOT WHAT THE SCREEN SHOWS (ruling after round 3). The key is the pane,
   the stall block, and a DURABLE element read from the session's own transcript: the id of its last assistant
   record at the time of the sighting. Every turn the model (or the proxy's failover model) answers appends one
@@ -342,8 +343,8 @@ def look(raw):
     elif block and ERR.search(collapsed):
         kind = "wall"
     return {"kind": kind, "collapsed": collapsed, "context": context,
-            "working": any(WORKING.search(l) for l in lines[start + 1:]),
-            "above": any(WORKING.search(l) for l in lines[:start]),
+            "working": any(WORKING.search(l) for l in lines[box + 1:]),      # the footer, below the box: the live UI
+            "above": any(WORKING.search(l) for l in lines[:box]),          # anywhere in the transcript body: not judged
             "dialog": "Do you want" in text or "Enter to select" in text or "Enter to confirm" in text,
             "typed": typed_text(raw_lines[keep[box]])}
 
@@ -375,6 +376,7 @@ seen_now = set()
 read = 0
 walled = []          # (name, why it was or was not resumed), in pane order
 unmarked = set()     # failover panes whose transcript could not be read: their turns are told apart by time
+refused = 0          # sends that tmux refused: the resume itself could not be typed → the line is FAIL
 try:
     all_panes = list(panes())
 except RuntimeError as e:
@@ -397,8 +399,8 @@ for pid, cmd, raw in all_panes:
         if DRY: print(f"skip {pid}: working again")
         continue   # the agent is already working again
     if v["above"]:
-        if DRY: print(f"skip {pid}: a working marker above the stall")
-        walled.append((name, kind + "a working marker is on screen above the stall: not typed into"))
+        if DRY: print(f"skip {pid}: a working marker above the input box")
+        walled.append((name, kind + "a working marker is on screen above the input box: not typed into"))
         continue
     if v["dialog"]:
         if DRY: print(f"skip {pid}: dialog on screen")
@@ -471,6 +473,7 @@ for pid, cmd, raw in all_panes:
         failed = "the text is typed but Enter was refused: it sits in the box"
     if failed:
         log(f"send failed {pid}: {failed}")
+        refused += 1
         walled.append((name, kind + "send failed (" + failed + ")"))
         continue
     if FIXTURES:
@@ -489,7 +492,8 @@ if not DRY:
     if walled:
         # EVERY walled pane is named, with its reason: the line exists so that none of them sits unseen
         note = f"; no transcript found for {', '.join(sorted(unmarked))}: turns told apart by time" if unmarked else ""
-        check_line("warn", f"{read} panes read, {len(walled)} walled: " + ", ".join(f"{n} ({why})" for n, why in walled) + note)
+        # a key tmux REFUSED means this script cannot do its one job on that pane: fail, with every pane still named
+        check_line("fail" if refused else "warn", f"{read} panes read, {len(walled)} walled: " + ", ".join(f"{n} ({why})" for n, why in walled) + note)
     elif read == 0 and NO_SERVER and claude_running():
         check_line("warn", f"no tmux server for this user at {TMUX_SOCKET}, yet claude processes run here: this timer runs as the wrong user or on the wrong socket, and sees no lane (quota-resume-ctl.sh install sets the socket)")
     else:

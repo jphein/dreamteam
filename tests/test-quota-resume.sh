@@ -99,10 +99,10 @@ fresh_state; live fx-dialog; seed; live fx-dialog
 t "a dialog on a walled pane: not touched, named with the reason" bash -c 'grep -q "fx-dialog (a dialog is open)" <<<"$1" && ! grep -qs "would resume" "$2"/quota_resume.*.log' _ "$(line)" "$S"
 printf '%s\n' '● Working on it' '' "$WALL Quota resets in 5m." '✢ Wibbling… (3m 49s · ↓ 17.0k tokens)' '────────' '❯ ' '────────' > "$T/busy"
 fresh_state; live busy
-t "a pane that is working again is not walled" grep -q '1 panes read, 0 walled' <<<"$(line)"
+t "a spinner line in the transcript BODY (above the box) does not unwall the pane: walled, named, not typed into" bash -c 'grep -q "1 walled: busy (a working marker is on screen above the input box: not typed into)" <<<"$1" && ! grep -qs "would resume" "$2"/quota_resume.*.log' _ "$(line)" "$S"
 printf '%s\n' '● Working on it' '' "$WALL Quota resets in 5m." '✢ Wibbling… (3m 49s · ↓ 17.0k tokens)' 'Do you want to proceed?' '────────' '❯ ' '────────' > "$T/busydialog"
 fresh_state; live busydialog
-t "…also when a dialog is open on it (working is not walled, dialog or not)" grep -q '1 panes read, 0 walled' <<<"$(line)"
+t "…also with a dialog open: still walled and named for the marker" grep -q '1 walled: busydialog (a working marker is on screen above the input box' <<<"$(line)"
 for i in 1 2 3 4 5 6 7 8 9 10; do mk "fx-lane$i" 'Quota resets in 5m.' '❯ '; done
 fresh_state; live fx-lane1 fx-lane2 fx-lane3 fx-lane4 fx-lane5 fx-lane6 fx-lane7 fx-lane8 fx-lane9 fx-lane10
 t "nothing was written beside the script (state and log go to the state dir)" bash -c '[ -z "$(ls "$1"/scripts/quota_resume_state.* "$1"/scripts/quota_resume.*.log 2>/dev/null)" ] || git -C "$1" diff --quiet -- scripts' _ "$ROOT"
@@ -159,7 +159,7 @@ fresh_state; live fx-quote
 t "a pane that only QUOTES the mark mid-sentence is not stalled" grep -q '1 panes read, 0 walled' <<<"$(line)"
 printf '%s\n' '● Working on it' '' "$FO" '✢ Wibbling… (3m 49s · ↓ 17.0k tokens)' '────────' '❯ ' '────────' > "$T/fx-fobusy"
 fresh_state; live fx-fobusy
-t "a failover mark with the agent working again below it is not stalled" grep -q '1 panes read, 0 walled' <<<"$(line)"
+t "a failover mark with a spinner line in the body after it: walled and named, never silently unwalled" grep -q '1 walled: fx-fobusy (failover turn, a working marker is on screen above the input box' <<<"$(line)"
 fo realpane 'I cannot run tools.' '❯ '
 fresh_state; : > "$T/tmux.log"; real; seed; real
 t "real path: the failover message is what gets typed, into that pane" bash -c 'grep -qF "tmux send-keys -t %7 -l continue (auto-resume: your last turn was served by the local failover model" "$1" && grep -qxF "tmux send-keys -t %7 Enter" "$1"' _ "$T/tmux.log"
@@ -224,13 +224,13 @@ quota '"live_seats":2,' "$(seat claude active 0.2 0.4)"
 
 # (3) a key tmux refuses stops the sequence, is reported, and is not a resume
 start; echo text > "$T/tmux-fail"; real
-t "the text refused: no Enter is sent, the line says so, nothing is recorded as resumed" bash -c '! grep -q "send-keys -t %7 Enter" "$1" && grep -q "morpheus-topology (send failed (the text was refused: nothing sent))" <<<"$2" && ! grep -q "resumed %7" "$3"/quota_resume.*.log' _ "$T/tmux.log" "$(L)" "$S"
+t "the text refused: no Enter is sent, the line says so, nothing is recorded as resumed" bash -c '! grep -q "send-keys -t %7 Enter" "$1" && grep -q "^CHECK quota-resume-serialhub fail · .*morpheus-topology (send failed (the text was refused: nothing sent))" <<<"$2" && ! grep -q "resumed %7" "$3"/quota_resume.*.log' _ "$T/tmux.log" "$(L)" "$S"
 rm -f "$T/tmux-fail" "$T/cap.count"; : > "$T/tmux.log"; real
-t "…and the next run tries again (a failed send is not 'done')" bash -c 'grep -q "morpheus-topology (resumed)" <<<"$1"' _ "$(L)"
+t "…and the next run tries again (a failed send is not 'done'), and the line is back to warn" bash -c 'grep -q "^CHECK quota-resume-serialhub warn · .*morpheus-topology (resumed)" <<<"$1"' _ "$(L)"
 start; echo enter > "$T/tmux-fail"; real
-t "Enter refused: reported as typed-but-not-sent, not as resumed" bash -c 'grep -q "send failed (the text is typed but Enter was refused: it sits in the box)" <<<"$1" && ! grep -q "resumed %7" "$2"/quota_resume.*.log' _ "$(L)" "$S"
+t "Enter refused: reported as typed-but-not-sent, not as resumed" bash -c 'grep -q "^CHECK quota-resume-serialhub fail · .*send failed (the text is typed but Enter was refused: it sits in the box)" <<<"$1" && ! grep -q "resumed %7" "$2"/quota_resume.*.log' _ "$(L)" "$S"
 start; echo cu > "$T/tmux-fail"; real
-t "the clearing key refused: nothing else is sent" bash -c '[ "$1" = 1 ] && grep -q "the clearing key was refused: nothing typed" <<<"$2"' _ "$(sent)" "$(L)"
+t "the clearing key refused: nothing else is sent" bash -c '[ "$1" = 1 ] && grep -q "^CHECK quota-resume-serialhub fail · .*the clearing key was refused: nothing typed" <<<"$2"' _ "$(sent)" "$(L)"
 fo realpane 'I cannot run tools.' '❯ '; start; echo enter > "$T/tmux-fail"; real; rm -f "$T/tmux-fail"
 t "a failed send does not use up the failover allowance" bash -c '! grep -q "_failover" "$1"/quota_resume_state.*.json' _ "$S"
 mk realpane 'Quota resets in 5m.' '❯ '
@@ -326,7 +326,16 @@ start; printf '%s\n' '  esc to interrupt' '● Working on it' '' "$WALL Quota re
 t "RE-CAPTURE: a working marker now stands ABOVE the stall (same stall block, same turn, empty box): NO key" bash -c '[ "$1" = 0 ] && grep -q "changed while being looked at" <<<"$2"' _ "$(sent)" "$(L)"
 printf '%s\n' '● Earlier output' '✢ Wibbling… (3m 49s · ↓ 17.0k tokens)' '' "$WALL Quota resets in 5m." '' '────────' '❯ ' '────────' > "$T/fx-above"
 fresh_state; live fx-above; seed; live fx-above
-t "a working marker ABOVE the stall (history or a quote, not judged): never typed into, and NAMED with that reason" bash -c 'grep -q "1 walled: fx-above (a working marker is on screen above the stall: not typed into)" <<<"$1" && ! grep -qs "would resume" "$2"/quota_resume.*.log' _ "$(line)" "$S"
+t "a working marker ABOVE the stall (history or a quote, not judged): never typed into, and NAMED with that reason" bash -c 'grep -q "1 walled: fx-above (a working marker is on screen above the input box: not typed into)" <<<"$1" && ! grep -qs "would resume" "$2"/quota_resume.*.log' _ "$(line)" "$S"
+
+# RULING 7139681565 item 2: a QUOTED "esc to interrupt" inside the stall's own answer (the transcript body) must not
+# unwall the pane: before, it read as work and the pane vanished from the line as "0 walled"
+printf '%s\n' '● Working on it' '' "$FO" '' '  The footer says "esc to interrupt" while a turn runs; I cannot run tools.' '' '────────' '❯ ' '────────' > "$T/fx-quoted"
+fresh_state; live fx-quoted; seed; live fx-quoted
+t "a QUOTED 'esc to interrupt' in the body of the stalled answer: the pane stays WALLED and NAMED, and gets no key" bash -c 'grep -q "1 panes read, 1 walled: fx-quoted (failover turn, a working marker is on screen above the input box: not typed into)" <<<"$1" && ! grep -qs "would resume" "$2"/quota_resume.*.log' _ "$(line)" "$S"
+printf '%s\n' '● Working on it' '' "$FO" '' '  I cannot run tools.' '' '────────' '❯ ' '────────' '  claude-fable-5-2 · ctx 41% · esc to interrupt' > "$T/fx-foot"
+fresh_state; live fx-foot; seed; live fx-foot
+t "the same marker in the FOOTER line (below the box, with the model and ctx fields): the agent works, not walled" grep -q '1 panes read, 0 walled' <<<"$(line)"
 
 # (2) RULING fix 1: a turn is identified by a DURABLE element, the id of the transcript's last assistant record,
 #     not by anything on the screen. The screen below is byte-identical in every step: the stall block and an
@@ -421,34 +430,45 @@ t "a later install on the default socket removes OUR drop-in" [ ! -e "$DROPF" ]
 # RULING fix 2: a drop-in that is NOT ours names another socket. It is left alone, AND the install is refused: the
 # service would use that socket, not the one that was chosen and would be proved
 mkdir -p "$(dirname "$DROPF")"; printf '[Service]\nEnvironment=QUOTA_RESUME_TMUX_SOCKET=/someone/elses\n' > "$DROPF"; : > "$T/sc.log"; TMUX= QUOTA_RESUME_TMUX_SOCKET= ctl install; rc=$?
-t "a foreign drop-in names ANOTHER socket: exit 3, the timer is NOT enabled, and the message names both sockets" bash -c '[ "$1" = 3 ] && ! grep -q "enable" "$2" && grep -q "the service would use /someone/elses, not $4" "$3"' _ "$rc" "$T/sc.log" "$T/out" "$DEF"
-t "…and nothing was proved on a socket the service would not use (no probe ran)" bash -c '! grep -q "^systemd-run" "$1"' _ "$T/sc.log"
+t "a foreign drop-in names ANOTHER socket: exit 3, the timer is NOT enabled, and the message names both sockets" bash -c '[ "$1" = 3 ] && ! grep -q " enable --now" "$2" && grep -q "disable --now quota-resume.timer" "$2" && grep -q "the service would use /someone/elses, not $4" "$3"' _ "$rc" "$T/sc.log" "$T/out" "$DEF"
+t "…the proof ran on the CHOSEN socket only, never on the one the service would have used" bash -c 'grep -q "^systemd-run .* _ $2\$" "$1" && ! grep -q "^systemd-run .*someone/elses" "$1"' _ "$T/sc.log" "$DEF"
 TMUX= QUOTA_RESUME_TMUX_SOCKET= ctl uninstall
 t "…the foreign drop-in itself is left alone by install and uninstall" grep -qx 'Environment=QUOTA_RESUME_TMUX_SOCKET=/someone/elses' "$DROPF"
 : > "$T/sc.log"; printf '%%1\n' > "$T/ctl-here"; printf '%%1\n' > "$T/ctl-mgr"; TMUX= QUOTA_RESUME_TMUX_SOCKET=/someone/elses ctl install; rc=$?
 t "…installing FOR that socket by name is accepted: the chosen, the effective and the proved socket are one" bash -c '[ "$1" = 0 ] && grep -q "^systemd-run .* _ /someone/elses\$" "$2" && grep -q "enable --now" "$2"' _ "$rc" "$T/sc.log"
 rm -rf "$T/xdg"
 cclean; echo "$DEF" > "$T/ctl-display"; printf '%%1\n' > "$T/ctl-here"; printf '%%1\n' > "$T/ctl-mgr"; echo "QUOTA_RESUME_TMUX_SOCKET=/from/an/environment.d" > "$T/ctl-env"; TMUX= QUOTA_RESUME_TMUX_SOCKET= ctl install; rc=$?
-t "the manager reports another socket for the service from ANYWHERE (not a drop-in of ours): exit 3, not enabled" bash -c '[ "$1" = 3 ] && ! grep -q "enable" "$2"' _ "$rc" "$T/sc.log"
+t "the manager reports another socket for the service from ANYWHERE (not a drop-in of ours): exit 3, not enabled" bash -c '[ "$1" = 3 ] && ! grep -q " enable --now" "$2" && grep -q "disable --now quota-resume.timer" "$2"' _ "$rc" "$T/sc.log"
 cclean; echo "$DEF" > "$T/ctl-display"; printf '%%1\n' > "$T/ctl-here"; printf '%%1\n' > "$T/ctl-mgr"; touch "$T/ctl-show-fail"; TMUX= QUOTA_RESUME_TMUX_SOCKET= ctl install; rc=$?
-t "the manager cannot say which socket the service will use: exit 3, not enabled" bash -c '[ "$1" = 3 ] && ! grep -q "enable" "$2"' _ "$rc" "$T/sc.log"
+t "the manager cannot say which socket the service will use: exit 3, not enabled" bash -c '[ "$1" = 3 ] && ! grep -q " enable --now" "$2" && grep -q "disable --now quota-resume.timer" "$2"' _ "$rc" "$T/sc.log"
 cclean; printf '%%1\n' > "$T/ctl-here"; printf '%%1\n' > "$T/ctl-mgr"; TMUX="/var/lanes/tmux.sock,4321,0" QUOTA_RESUME_TMUX_SOCKET=/srv/x/explicit.sock ctl install
 t "QUOTA_RESUME_TMUX_SOCKET wins over TMUX" grep -qxF "Environment=QUOTA_RESUME_TMUX_SOCKET=/srv/x/explicit.sock" "$DROPF"
 TMUX= QUOTA_RESUME_TMUX_SOCKET= ctl uninstall
 t "uninstall removes our drop-in" [ ! -e "$DROPF" ]
 cclean; echo "$DEF" > "$T/ctl-display"; printf '%%1\n%%2\n' > "$T/ctl-here"; printf '%%9\n' > "$T/ctl-mgr"; TMUX= QUOTA_RESUME_TMUX_SOCKET= ctl install; rc=$?
-t "the user manager sees OTHER panes than this shell (another server): exit 3, the timer is NOT enabled" bash -c '[ "$1" = 3 ] && grep -q "proof FAILED" "$2" && ! grep -q "enable" "$3"' _ "$rc" "$T/out" "$T/sc.log"
+t "the user manager sees OTHER panes than this shell (another server): exit 3, the timer is NOT enabled" bash -c '[ "$1" = 3 ] && grep -q "proof FAILED" "$2" && ! grep -q " enable --now" "$3" && grep -q "disable --now quota-resume.timer" "$3"' _ "$rc" "$T/out" "$T/sc.log"
 cclean; echo "$DEF" > "$T/ctl-display"; printf '%%1\n%%2\n' > "$T/ctl-here"; printf '%%1\n%%2\n' > "$T/ctl-mgr"; echo none > "$T/ctl-mgr-probe"; TMUX= QUOTA_RESUME_TMUX_SOCKET= ctl install; rc=$?
-t "the manager's probe did not RUN (no last line), whatever was printed: exit 3, not enabled" bash -c '[ "$1" = 3 ] && ! grep -q "enable" "$2" && grep -q "the probe did not run in the user manager" "$3"' _ "$rc" "$T/sc.log" "$T/out"
+t "the manager's probe did not RUN (no last line), whatever was printed: exit 3, not enabled" bash -c '[ "$1" = 3 ] && ! grep -q " enable --now" "$2" && grep -q "disable --now quota-resume.timer" "$2" && grep -q "the probe did not run in the user manager" "$3"' _ "$rc" "$T/sc.log" "$T/out"
 # RULING fix 3: EMPTY outputs on both sides and a probe that did not run. This used to read "no server, alike".
 cclean; echo "$DEF" > "$T/ctl-display"; echo none > "$T/ctl-mgr-probe"; TMUX= QUOTA_RESUME_TMUX_SOCKET= ctl install; rc=$?
-t "EMPTY output from both sides and the manager's probe did not run: a FAILURE (exit 3, not enabled), never 'no server'" bash -c '[ "$1" = 3 ] && ! grep -q "enable" "$2" && ! grep -q "neither finds a tmux server" "$3"' _ "$rc" "$T/sc.log" "$T/out"
+t "EMPTY output from both sides and the manager's probe did not run: a FAILURE (exit 3, not enabled), never 'no server'" bash -c '[ "$1" = 3 ] && ! grep -q " enable --now" "$2" && grep -q "disable --now quota-resume.timer" "$2" && ! grep -q "neither finds a tmux server" "$3"' _ "$rc" "$T/sc.log" "$T/out"
 cclean; echo "$DEF" > "$T/ctl-display"; echo 127 > "$T/ctl-mgr-probe"; TMUX= QUOTA_RESUME_TMUX_SOCKET= ctl install; rc=$?
-t "the manager's probe ran but could not execute tmux (rc 127), empty output: exit 3, not enabled" bash -c '[ "$1" = 3 ] && ! grep -q "enable" "$2" && grep -q "tmux could not be run" "$3"' _ "$rc" "$T/sc.log" "$T/out"
+t "the manager's probe ran but could not execute tmux (rc 127), empty output: exit 3, not enabled" bash -c '[ "$1" = 3 ] && ! grep -q " enable --now" "$2" && grep -q "disable --now quota-resume.timer" "$2" && grep -q "tmux could not be run" "$3"' _ "$rc" "$T/sc.log" "$T/out"
 cclean; echo "$DEF" > "$T/ctl-display"; TMUX= QUOTA_RESUME_TMUX_SOCKET= ctl install; rc=$?
 t "both probes RAN and neither finds a server (tmux rc 1 on both sides): said so, and enabled" bash -c '[ "$1" = 0 ] && grep -q "both probes ran and neither finds a tmux server" "$3" && grep -q "enable --now" "$2"' _ "$rc" "$T/sc.log" "$T/out"
 cclean; TMUX="/var/lanes/tmux.sock,1,0" QUOTA_RESUME_TMUX_SOCKET= ctl install; rc=$?
 t "another socket with the manager not reaching it and this shell seeing none: no drop-in guesswork is hidden (said, enabled)" bash -c '[ "$1" = 0 ] && grep -q "proof: both probes ran and neither finds a tmux server on /var/lanes/tmux.sock" "$2"' _ "$rc" "$T/out"
+# RULING 7139681565 item 3: a REINSTALL that is refused. An earlier install wrote our drop-in for /var/lanes/tmux.sock
+# and enabled the timer; now the proof fails for another socket.
+cclean; printf '%%1\n' > "$T/ctl-here"; printf '%%1\n' > "$T/ctl-mgr"; TMUX="/var/lanes/tmux.sock,1,0" QUOTA_RESUME_TMUX_SOCKET= ctl install; before=$(sha256sum < "$DROPF")
+: > "$T/sc.log"; printf '%%9\n' > "$T/ctl-mgr"; TMUX="/other/place.sock,1,0" QUOTA_RESUME_TMUX_SOCKET= ctl install; rc=$?
+t "a refused REINSTALL (the proof fails): exit 3, the timer an earlier install enabled is DISABLED, and nothing was enabled" bash -c '[ "$1" = 3 ] && grep -qxF "systemctl --user disable --now quota-resume.timer" "$2" && ! grep -q " enable --now" "$2"' _ "$rc" "$T/sc.log"
+t "…and the drop-in is byte for byte what it was: nothing is written before the proof has passed" bash -c '[ "$(sha256sum < "$1")" = "$2" ] && [ ! -e "$1.new" ] && [ ! -e "$1.old" ]' _ "$DROPF" "$before"
+t "…no link and no reload happened either (the proof comes first)" bash -c '! grep -q " link \| daemon-reload" "$1"' _ "$T/sc.log"
+: > "$T/sc.log"; printf '%%1\n' > "$T/ctl-mgr"; echo "QUOTA_RESUME_TMUX_SOCKET=/from/an/environment.d" > "$T/ctl-env"; TMUX="/other/place.sock,1,0" QUOTA_RESUME_TMUX_SOCKET= ctl install; rc=$?; rm -f "$T/ctl-env"
+t "a refused reinstall at the LAST check (the service would use another socket): exit 3, timer disabled, OUR drop-in put back as it was" bash -c '[ "$1" = 3 ] && grep -qxF "systemctl --user disable --now quota-resume.timer" "$2" && ! grep -q " enable --now" "$2" && [ "$(sha256sum < "$3")" = "$4" ] && [ ! -e "$3.old" ]' _ "$rc" "$T/sc.log" "$DROPF" "$before"
+cclean; printf '%%1\n' > "$T/ctl-here"; printf '%%1\n' > "$T/ctl-mgr"; echo "QUOTA_RESUME_TMUX_SOCKET=/from/an/environment.d" > "$T/ctl-env"; TMUX="/var/lanes/tmux.sock,1,0" QUOTA_RESUME_TMUX_SOCKET= ctl install; rc=$?
+t "a FIRST install refused at the last check: the drop-in this run wrote is removed again" bash -c '[ "$1" = 3 ] && [ ! -e "$2" ]' _ "$rc" "$DROPF"
 cclean; TMUX= QUOTA_RESUME_TMUX_SOCKET='/x y; touch /nope' ctl install; rc=$?
 t "a socket path that is not plain: exit 2, nothing linked, nothing written" bash -c '[ "$1" = 2 ] && ! grep -q "link\|enable" "$2" && [ ! -e "$3" ]' _ "$rc" "$T/sc.log" "$DROPF"
 
