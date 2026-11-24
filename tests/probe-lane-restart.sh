@@ -15,8 +15,8 @@
 # the pane's tmux session name. A temp config lists the lanes; a temp lead.session names the lead by record.
 #   1. `fx-lane` (listed), a new conversation           → 1 stamp, on startup; 1 log line
 #   2. the same pane, `--continue` (a restart, resumed) → a stamp on resume, later than the first; a 2nd log line
-#   3. the same conversation after `/compact`           → a stamp on compact; a log line for compact
-#                                                         (if this CLI cannot compact a `-p` session, it says so)
+#   3. the same conversation after `/compact`           → a stamp on compact AND a log line for compact; if either
+#                                                         is missing the case FAILS and the probe is not OK
 #   4. `spire` although the config lists it as a lane   → no stamp, no log line
 #   5. `fx-rec` (listed) in the pane lead.session names → no stamp, no log line (the lead by its record)
 #   6. `fx-jp` (not listed: a session someone types in) → no stamp, no log line
@@ -60,12 +60,15 @@ else say FAIL "2 resume: stamps=[$(stamps "$T/2.out" | tr '\n' ' ')] log=$(tr '\
 
 printf '/compact' > "$T/qc"
 ask fx-lane "$T/d-lane" "$T/3a.out" "$T/qc" --continue || echo "(case 3 compact timed out)"
+# BOTH witnesses or the case fails: a real SessionStart event with source compact in the hook's log, AND a stamp
+# "on compact" in what the session itself lists afterwards. A CLI that does not compact here makes the probe
+# INCOMPLETE; it is never reported as OK.
 if [ "$(logn compact fx-lane)" -ge 1 ]; then
   ask fx-lane "$T/d-lane" "$T/3.out" "$T/q" --continue || echo "(case 3 timed out)"
-  if stamps "$T/3.out" | grep -q ' on compact to fx-lane\]'; then say ok "3 after a COMPACTION: the hook's log has a compact line, and the session shows a stamp on compact  ($(stamps "$T/3.out" | grep ' on compact ' | tail -1))"
-  else say ok "3 after a COMPACTION: the hook ran for it (log line: $(grep ' compact fx-lane ' "$LOGF" | tail -1)); the session's own listing shows [$(stamps "$T/3.out" | tr '\n' ' ')]"; fi
+  if stamps "$T/3.out" | grep -q ' on compact to fx-lane\]'; then say ok "3 after a COMPACTION: the hook's log has a compact line, AND the session shows a stamp on compact  ($(stamps "$T/3.out" | grep ' on compact ' | tail -1))"
+  else say FAIL "3 after a COMPACTION: the hook logged the event (log line: $(grep ' compact fx-lane ' "$LOGF" | tail -1)) but the session shows NO stamp on compact: [$(stamps "$T/3.out" | tr '\n' ' ')]"; fi
 else
-  echo "note  3 this CLI did not compact a -p session on '/compact' (no SessionStart event with source compact reached the hook): NOT MEASURED here. Output: $(head -c 160 "$T/3a.out" | tr '\n' ' ')"
+  say FAIL "3 compaction NOT MEASURED: no SessionStart event with source compact reached the hook after '/compact' (output: $(head -c 160 "$T/3a.out" | tr '\n' ' ')). The probe is INCOMPLETE."
 fi
 
 n0=$(wc -l < "$LOGF")

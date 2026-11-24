@@ -170,6 +170,27 @@ hk nebula startup "$SIDA"; ok "…a lane in another pane is still a lane" 'style
 rm -f "$T/state/lead.session"; printf 'session=%s\npane=zz:9.9\n' "$SIDL" > "$T/real.session"; ln -s "$T/real.session" "$T/state/lead.session"
 hk fx-luna; ok "a lead.session that is a symlink: who the lead is cannot be trusted, so NOBODY is styled (one line on stderr)" 'silent && grep -q "is a symlink" "$T/err"'
 rm -f "$T/state/lead.session"
+# RULING item 2: a record that EXISTS but is unreadable or malformed fails CLOSED: nobody is styled on that run
+badrec() {  # badrec <name> <what the stderr line must say> ; the record is already in place
+  hk fx-luna; local rc=$?
+  if [ "$rc" -eq 0 ] && silent && [ "$(wc -l < "$T/err")" -eq 1 ] && grep -q "$2" "$T/err"; then pass "lead record $1: NOBODY is styled, exit 0, one line on stderr"; else fail "lead record $1: rc $rc out=$(head -c 60 "$T/out") err=$(cat "$T/err")"; fi
+  rm -rf "$T/state/lead.session"
+}
+: > "$T/state/lead.session"; badrec "empty" "does not hold exactly one valid session= and one valid pane= line"
+echo "garbage, not a record" > "$T/state/lead.session"; badrec "garbage" "does not hold exactly one valid"
+printf 'session=%s\n' "$SIDL" > "$T/state/lead.session"; badrec "with a session line and NO pane line" "does not hold exactly one valid"
+printf 'pane=zz:9.9\n' > "$T/state/lead.session"; badrec "with a pane line and NO session line" "does not hold exactly one valid"
+printf 'session=not-an-id\npane=zz:9.9\n' > "$T/state/lead.session"; badrec "whose session id is not an id" "does not hold exactly one valid"
+printf 'session=%s\npane=zz\n' "$SIDL" > "$T/state/lead.session"; badrec "whose pane is not a pane" "does not hold exactly one valid"
+printf 'session=%s\nsession=%s\npane=zz:9.9\n' "$SIDL" "$SIDA" > "$T/state/lead.session"; badrec "with TWO session lines" "does not hold exactly one valid"
+printf 'session=%s\npane=zz:9.9\npane=fx-luna:0.0\n' "$SIDL" > "$T/state/lead.session"; badrec "with TWO pane lines" "does not hold exactly one valid"
+mkdir "$T/state/lead.session"; badrec "that is a DIRECTORY" "not a plain file, or unreadable"
+if [ "$(id -u)" -ne 0 ]; then
+  printf 'session=%s\npane=zz:9.9\n' "$SIDL" > "$T/state/lead.session"; chmod 000 "$T/state/lead.session"; badrec "that cannot be READ (mode 000)" "not a plain file, or unreadable"
+fi
+printf 'session=%s\npane=zz:9.9\ncwd=/x\nlaunch=bash /y\n' "$SIDL" > "$T/state/lead.session"; hk fx-luna
+ok "(control: a WELL-FORMED record for another session and pane leaves a listed lane styled)" 'styled'
+rm -f "$T/state/lead.session"
 
 echo "── there is no variable that makes a session a lane ─────────────"
 cfg "$LANES"

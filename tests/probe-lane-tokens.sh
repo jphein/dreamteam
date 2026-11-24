@@ -86,7 +86,7 @@ run() {  # run <condition> <prompt name> <n>
   [ "$pn" = explain ] || { grep -q 'Not verified' <<<"$res" && keep="$keep not-verified:yes" || keep="$keep not-verified:no"; }
   [ "$pn" = fail ] && { grep -q "frobnicate" <<<"$res" && grep -q "b.c:41" <<<"$res" && keep="$keep failure-whole:yes" || keep="$keep failure-whole:NO"; }
   [ "$pn" = fix ] && { (cd "$d" && python3 test_calc.py > /dev/null 2>&1) && keep="$keep test-passes:yes" || keep="$keep test-passes:NO"; }
-  printf '%-7s %-8s run %s  output_tokens %6s  lines %3s  chars %5s  model %s  injected %s  %s %s\n' "$cond" "$pn" "$n" "$tok" "$lines" "$chars" "$model" "$inj" "$keep" "$([ "$valid" = yes ] || echo "$valid")"
+  printf '%-7s %-8s run %s  output_tokens %6s  lines %3s  chars %5s  model %s  injected %s  session %s  %s %s\n' "$cond" "$pn" "$n" "$tok" "$lines" "$chars" "$model" "$inj" "${sid:-?}" "$keep" "$([ "$valid" = yes ] || echo "$valid")"
   [ "$valid" = yes ] && echo "$cond $pn $tok" >> "$T/numbers"
 }
 echo "probe: $RUNS run(s) per prompt and condition; model pinned to $MODEL; plugin tree $ROOT ($(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null)); $(claude --version 2>/dev/null | head -1); $(hostname -s) $(date '+%F %T')"

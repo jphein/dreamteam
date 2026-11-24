@@ -16,6 +16,8 @@
 #   3. THE LEAD, by its role and not only by a name:
 #        a. the session is the one recorded in lead.session (written by the lead's own SessionStart hook,
 #           scripts/lead-session-write.sh): same session id, or same pane                         → nothing
+#           A record that exists but cannot be trusted (a symlink, not a plain readable file, or without
+#           exactly one valid session= and pane= line) → NOBODY is styled: the lead cannot be told apart.
 #        b. its tmux session is named `spire`, or $DREAMTEAM_LEAD_SESSION, or is in `.laneStyle.lead`: `spire`
 #           is refused in the code itself, a config can only ADD names                            → nothing
 #   4. its tmux session name is EXACTLY one of `.laneStyle.lanes`              → a lane: the style is given.
@@ -95,11 +97,21 @@ WHO=$(timeout --kill-after=1 2 tmux display-message -p -t "$TMUX_PANE" '#{sessio
 NAME=${WHO%% *}; PANE=${WHO#* }
 [ -n "$NAME" ] && [ "$PANE" != "$WHO" ] || exit 0
 # rule 3a: the recorded lead, by session id or by pane, whatever its tmux session is called
-if [ -L "$LEADREC" ]; then echo "lane-style: $LEADREC is a symlink, so who the lead is cannot be trusted: no style given" >&2; exit 0; fi
-if [ -f "$LEADREC" ]; then
-  lsid=$(sed -n 's/^session=//p' "$LEADREC" 2>/dev/null | head -1); lpane=$(sed -n 's/^pane=//p' "$LEADREC" 2>/dev/null | head -1)
+# A record that EXISTS must be one this hook can trust and read in full: a plain readable file with exactly one valid
+# session= line and one valid pane= line. Anything else at that path (a symlink, a directory, an unreadable or
+# empty or malformed file) means the hook cannot tell who the lead is, and then NOBODY is styled.
+if [ -e "$LEADREC" ] || [ -L "$LEADREC" ]; then
+  if [ -L "$LEADREC" ] || [ ! -f "$LEADREC" ] || [ ! -r "$LEADREC" ]; then
+    echo "lane-style: $LEADREC is a symlink, not a plain file, or unreadable, so who the lead is cannot be trusted: no style given" >&2; exit 0
+  fi
+  lsid=$(grep -c '^session=' "$LEADREC" 2>/dev/null):$(sed -n 's/^session=//p' "$LEADREC" 2>/dev/null | head -1)
+  lpane=$(grep -c '^pane=' "$LEADREC" 2>/dev/null):$(sed -n 's/^pane=//p' "$LEADREC" 2>/dev/null | head -1)
+  if ! [[ "$lsid" =~ ^1:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || ! [[ "$lpane" =~ ^1:[A-Za-z0-9_.-]+:[0-9]+\.[0-9]+$ ]]; then
+    echo "lane-style: $LEADREC does not hold exactly one valid session= and one valid pane= line, so who the lead is cannot be trusted: no style given" >&2; exit 0
+  fi
+  lsid=${lsid#1:}; lpane=${lpane#1:}
   { [ -n "$SID" ] && [ "$SID" = "$lsid" ]; } && exit 0
-  [ -n "$lpane" ] && [ "$PANE" = "$lpane" ] && exit 0
+  [ "$PANE" = "$lpane" ] && exit 0
 fi
 D=$(by_name "$NAME")
 if [ "${D%%|*}" != lane ]; then
