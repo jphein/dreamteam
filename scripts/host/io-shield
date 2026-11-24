@@ -1,65 +1,79 @@
 #!/usr/bin/env bash
-# dreamteam — io-shield: make I/O weights real on this host, and give the known hogs a low one.
+# dreamteam — io-shield: make I/O weights real on this host, give the known hogs a low one, and give the fleet
+# lead's own scope the kernel OOM score a user cannot give itself.
 # A SYSTEM tool (root). The copy of record is here; the installed copy is /usr/local/sbin/dreamteam-io-shield
 # (systemd/system/README.md). Nothing in this repo installs it.
 #
-# WHY (Flow row 7e039111, measured 2026-11-21). An interactive session froze while "idle class, nice 15" jobs
-# ran. Two reasons niceness cannot fix:
-#   1. The reader was not the job. A palace test asks Postgres, and Postgres (docker container mempalace-db, its
-#      own cgroup, normal class) did the reading: 60 MB/s for one SELECT. A client's nice level stops at the socket.
-#   2. No weight was in force anywhere. With the mq-deadline or none scheduler a cgroup's IOWeight= does nothing
-#      until io.cost is enabled for the device, and the default io.cost settings barely help.
-# The same test on serialhub's NVMe, a victim doing what an interactive session does (4 KiB direct reads, a
-# 4 KiB append + fdatasync) against 4 sequential readers and 1 writer:
-#       alone                                   fsync p99   4.5 ms
-#       hogs, no control                        fsync p99 453   ms   (a typing freeze)
-#       io.cost defaults, weights 10 : 100      fsync p99  19.9 ms
-#       io.cost with latency targets, 10 : 100  fsync p99   7.7 ms   (hogs still 267 MB/s read)
-#       the same io.cost, EQUAL weights         fsync p99  92   ms   (so the weight is what does it)
+# WHY (Flow rows 7e039111, f72945bc; measured 2026-11-21/23).
+#   1. An interactive session froze while "idle class, nice 15" jobs ran. The reader was not the job: a palace
+#      test asks Postgres, and Postgres (container mempalace-db, its own cgroup, normal class) read 60 MB/s for
+#      one SELECT. A client's nice level stops at the socket.
+#   2. No weight was in force anywhere: with the mq-deadline or none scheduler a cgroup's IOWeight= does nothing
+#      until io.cost is enabled for the device, and the default io.cost settings barely help. On an NVMe, a
+#      victim doing what an interactive session does, against 4 readers and 1 writer:
+#          alone                                   fsync p99   4.5 ms
+#          hogs, no control                        fsync p99 453   ms
+#          io.cost defaults, weights 10 : 100      fsync p99  19.9 ms
+#          io.cost with latency targets, 10 : 100  fsync p99   7.7 ms   (hogs still 267 MB/s read)
+#          the same io.cost, EQUAL weights         fsync p99  92   ms
+#   3. 2026-11-22 the kernel-side question: a user process cannot lower its own oom_score_adj (a scope refuses
+#      the property, a user service is clamped to the manager's value, the /proc write is denied). Root can.
 #
-# WHAT IT DOES, from one config file (default /etc/dreamteam/io-shield.conf; host data, never in this repo):
+# CONFIG, one file (default /etc/dreamteam/io-shield.conf; host data, never in this repo):
 #   device <name> [rlat=<µs>] [wlat=<µs>] [min=<pct>] [max=<pct>]
-#       enable io.cost on /sys/block/<name> with latency targets: 95 % of reads under rlat, of writes under wlat;
-#       the controller slows everyone's budget down to min % of the device model when a target is missed, and it
-#       is that budget which the weights divide. Defaults rlat=2000 wlat=5000 min=25 max=100.
-#   unit <unit> <weight>
-#       systemctl set-property --runtime <unit> IOWeight=<weight>   (1-10000, default weight is 100)
-#   docker <container name> <weight>
-#       the same for that container's scope, docker-<full id>.scope (the id changes when it is recreated, so
-#       the timer re-applies every few minutes).
-#   oomprotect <uid> <score>
-#       every process in a cgroup below that user's manager that carries the mark user.oomd_avoid=1 (the lead's
-#       scope: scripts/lane-slice.sh writes it) gets /proc/<pid>/oom_score_adj = <score>, -1000..0. That is the
-#       KERNEL's out-of-memory order, which only root can lower; children started later inherit it. The user
-#       decides WHICH cgroup by marking it; root decides, here, how much the mark is worth.
+#       enable io.cost on /sys/block/<name> with latency targets (95 % of reads under rlat, of writes under wlat;
+#       the controller slows everyone's budget to min % of the device model when a target is missed, and the
+#       weights divide that budget). Defaults rlat=2000 wlat=5000 min=25 max=100.
+#   unit <unit> <weight>           systemctl set-property --runtime <unit> IOWeight=<weight>   (1-10000; 100 = default)
+#   docker <container> <weight>    the same for that container's scope, docker-<full id>.scope
+#   oomprotect <uid> <unit> <score>
+#       <unit> must be `lead-<name>.scope`: the unit scripts/lead-watchdog.sh creates when it launches the fleet
+#       lead. Every process of <uid> in EXACTLY this cgroup,
+#           <cgroup root>/user.slice/user-<uid>.slice/user@<uid>.service/app.slice/<unit>
+#       (and below it) gets /proc/<pid>/oom_score_adj = <score>, -1000..0. NOTHING else earns it: no mark, no
+#       attribute, no other unit name, no parent slice. And every OTHER process in that user's own slice
+#       (/user.slice/user-<uid>.slice/…: the user manager's tree and the login sessions) that holds a negative
+#       score is put back to 0 on each run: a process that left the unit, or inherited the score and then left,
+#       does not keep it past the next run (the timer runs every 5 minutes). System services that run as the
+#       user keep the score their own unit gives them: they live under system.slice and are never touched.
+#       THE LIMIT, stated plainly: the lead and the lanes are the same uid. A same-uid process can move itself
+#       into that cgroup, or be started in a unit of that name while the lead is down, and will then be scored
+#       like the lead. Closing that needs lanes under their own uid, not a check here. What this rules out is
+#       the accidental and the cheap: a lane marking, naming or configuring its way to the score.
 #   Blank lines and lines starting with # are skipped. ANY other line, or a bad value, stops the run before
 #   anything is written (exit 22): a half-read config never applies half a policy.
 #
-#   io-shield apply      write the device lines to io.cost.qos, then set the weights. A unit or container that
-#                        is not there is a note, not an error (it may not be running yet); the next run sets it.
-#   io-shield off        disable io.cost on the configured devices (weights then do nothing again).
-#   io-shield status     print io.cost.qos and each configured unit's IOWeight. Read-only.
+#   io-shield apply      device lines to io.cost.qos, the weights, the scores. A unit or container that is not
+#                        there is a note (the next run sets it). Does NOTHING while the off stamp exists.
+#   io-shield off        the rollback: io.cost disabled on the configured devices, IOWeight reset on the
+#                        configured units and containers, every negative oom_score_adj of the configured uids
+#                        back to 0, and a stamp (/run/dreamteam-io-shield.off) that keeps the timer's `apply`
+#                        from undoing this. The stamp is gone after a reboot, or after `io-shield on`.
+#   io-shield on         remove the stamp (the next `apply` applies again).
+#   io-shield status     print io.cost.qos, the stamp, each unit's IOWeight, the protected unit's processes
+#                        and scores, and any negative score outside it. Read-only.
 #
-# Everything is runtime state: a reboot, or `off`, returns the host to what it was. Exit: 0 done · 1 a write
-# or a set-property failed · 2 not root (apply, off) or no config · 22 bad argument or bad config line.
+# Exit: 0 done · 1 a write or a set-property failed · 2 not root (apply, off, on) or no config · 22 bad argument
+# or bad config line.
 set -uo pipefail
 CONF="${IO_SHIELD_CONF:-/etc/dreamteam/io-shield.conf}"
 QOS="${IO_SHIELD_QOS_FILE:-/sys/fs/cgroup/io.cost.qos}"
 SYSBLOCK="${IO_SHIELD_SYSBLOCK:-/sys/block}"
 CGROOT="${IO_SHIELD_CGROUP_ROOT:-/sys/fs/cgroup}"
 PROCROOT="${IO_SHIELD_PROC:-/proc}"
+STAMP="${IO_SHIELD_RUN_DIR:-/run}/dreamteam-io-shield.off"
 
-usage() { echo "usage: io-shield apply|off|status" >&2; exit 22; }
+usage() { echo "usage: io-shield apply|off|on|status" >&2; exit 22; }
 [ "$#" -eq 1 ] || usage
 MODE=$1
-case "$MODE" in apply|off|status) ;; *) usage ;; esac
+case "$MODE" in apply|off|on|status) ;; *) usage ;; esac
 [ -r "$CONF" ] && [ -f "$CONF" ] || { echo "io-shield: no readable config at $CONF" >&2; exit 2; }
 if [ "$MODE" != status ] && [ "${IO_SHIELD_ASSUME_ROOT:-}" != 1 ] && [ "$(id -u)" -ne 0 ]; then
   echo "io-shield: $MODE needs root" >&2; exit 2
 fi
 
 num() { [[ "$1" =~ ^[0-9]{1,7}$ ]]; }
-DEVS=(); DEVQ=(); UNITS=(); UNITW=(); DOCK=(); DOCKW=(); OOMU=(); OOMS=()
+DEVS=(); DEVQ=(); UNITS=(); UNITW=(); DOCK=(); DOCKW=(); OOMU=(); OOMN=(); OOMS=()
 n=0
 while IFS= read -r line || [ -n "$line" ]; do
   n=$((n + 1))
@@ -85,9 +99,10 @@ while IFS= read -r line || [ -n "$line" ]; do
       [[ "${w[1]}" =~ ^[A-Za-z0-9][A-Za-z0-9@_.:\\-]{0,200}$ ]] || { echo "io-shield: $CONF line $n: '${w[1]}' is not a plain name" >&2; exit 22; }
       if [ "${w[0]}" = unit ]; then UNITS+=("${w[1]}"); UNITW+=("${w[2]}"); else DOCK+=("${w[1]}"); DOCKW+=("${w[2]}"); fi ;;
     oomprotect)
-      [ "${#w[@]}" -eq 3 ] && [[ "${w[1]}" =~ ^[0-9]{1,9}$ ]] && [[ "${w[2]}" =~ ^(0|-[0-9]{1,4})$ ]] && [ "${w[2]}" -ge -1000 ] \
-        || { echo "io-shield: $CONF line $n: oomprotect needs <uid> <score -1000..0>" >&2; exit 22; }
-      OOMU+=("${w[1]}"); OOMS+=("${w[2]}") ;;
+      [ "${#w[@]}" -eq 4 ] && [[ "${w[1]}" =~ ^[0-9]{1,9}$ ]] && [[ "${w[2]}" =~ ^lead-[A-Za-z0-9_-]{1,80}\.scope$ ]] \
+        && [[ "${w[3]}" =~ ^(0|-[0-9]{1,4})$ ]] && [ "${w[3]}" -ge -1000 ] \
+        || { echo "io-shield: $CONF line $n: oomprotect needs <uid> <lead-NAME.scope> <score -1000..0>" >&2; exit 22; }
+      OOMU+=("${w[1]}"); OOMN+=("${w[2]}"); OOMS+=("${w[3]}") ;;
     *) echo "io-shield: $CONF line $n: unknown word '${w[0]}' (device, unit, docker, oomprotect)" >&2; exit 22 ;;
   esac
 done < "$CONF"
@@ -101,100 +116,112 @@ docker_unit() {   # container name → docker-<id>.scope, or nothing
   id=$(docker inspect -f '{{.Id}}' "$1" 2>/dev/null) && [[ "$id" =~ ^[0-9a-f]{64}$ ]] && printf 'docker-%s.scope' "$id"
 }
 
-# oom_scores list|apply <uid> <score>: the processes in a marked cgroup below that user's manager.
-#   list   prints "pid=score" for each;  apply  writes <score> and prints how many it changed (exit 1 if a write
-#   to a live process failed).
-# A pid is only a number: between reading it from cgroup.procs and writing its score the process can exit and the
-# number be given to another one, of any user. So each process is taken hold of ONCE, as a directory descriptor
-# on /proc/<pid>, and everything is done through that descriptor: its owner must be <uid>, its `cgroup` must
-# still be the marked cgroup it was listed in, and the score is written to `oom_score_adj` inside the same
-# descriptor. A descriptor on a process that has exited answers "no such process"; it never reaches a successor.
+# oom_scores <list|apply|reset> <uid> <unit> <score>
+#   list    "in:<pid>=<score> …; out:<pid>=<score> …"  (out = negative scores of that uid outside the unit)
+#   apply   processes in the unit get <score>; negative scores outside it go back to 0; prints "<set> <undone>"
+#   reset   every negative score of that uid, inside the unit or not, goes back to 0; prints "<undone>"
+# A pid is only a number: the process can exit and the number be given to another one of any user. So each
+# process is taken hold of ONCE, as a directory descriptor on /proc/<pid>, and its owner, its cgroup and the
+# write all go through that descriptor. A descriptor on a process that has exited answers "no such process"; it
+# never reaches a successor. The cgroup is read through it immediately before the write: a process that is not
+# (or no longer) in the unit is not scored. One that leaves AFTER the write keeps the score until the next run,
+# which undoes it; that window is the timer period.
 oom_scores() {
   python3 -I -c 'import os, sys
-mode, cgroot, procroot, uid, score = sys.argv[1:6]
-base = os.path.join(cgroot, "user.slice", "user-%s.slice" % uid, "user@%s.service" % uid)
+mode, cgroot, procroot, uid, unit, score = sys.argv[1:7]
+rel = "/user.slice/user-%s.slice/user@%s.service/app.slice/%s" % (uid, uid, unit)
 def rd(fd, name):
     f = os.open(name, os.O_RDONLY, dir_fd=fd)
     try: return os.read(f, 65536).decode("utf-8", "replace")
     finally: os.close(f)
-changed = failed = 0
-out = []
-for d, dirs, files in os.walk(base):
+def wr(fd, value):
+    f = os.open("oom_score_adj", os.O_WRONLY | os.O_TRUNC, dir_fd=fd)     # what a shell `>` does; /proc ignores it
+    try: os.write(f, (value + "\n").encode())
+    finally: os.close(f)
+mine = "/user.slice/user-%s.slice/" % uid
+unit_dir = cgroot + rel
+real = os.path.isdir(unit_dir) and not os.path.islink(unit_dir)
+ins, outs, done, undone, failed = [], [], 0, 0, 0
+for pid in sorted((p for p in os.listdir(procroot) if p.isdigit()), key=int):
     try:
-        if os.getxattr(d, "user.oomd_avoid") != b"1":
-            continue
+        fd = os.open(os.path.join(procroot, pid), os.O_RDONLY | os.O_DIRECTORY)
     except OSError:
         continue
-    for sub, _, _ in os.walk(d):                      # the marked cgroup and everything below it
-        rel = "/" + os.path.relpath(sub, cgroot)
-        try:
-            pids = open(os.path.join(sub, "cgroup.procs")).read().split()
-        except OSError:
+    try:
+        if os.fstat(fd).st_uid != int(uid):
             continue
-        for pid in pids:
-            if not pid.isdigit():
-                continue
-            try:
-                fd = os.open(os.path.join(procroot, pid), os.O_RDONLY | os.O_DIRECTORY)
-            except OSError:
-                continue                              # gone already
-            try:
-                if os.fstat(fd).st_uid != int(uid):
-                    continue                          # not that user: the mark is theirs to give, for their own
-                if rd(fd, "cgroup").strip().split("\n")[-1].split("::", 1)[-1] != rel:
-                    continue                          # not (or no longer) a process of this marked cgroup
-                cur = rd(fd, "oom_score_adj").strip()
-                if mode == "list":
-                    out.append("%s=%s" % (pid, cur))
-                elif cur != score:
-                    f = os.open("oom_score_adj", os.O_WRONLY, dir_fd=fd)
-                    try: os.write(f, (score + "\n").encode())
-                    finally: os.close(f)
-                    changed += 1
-            except (ProcessLookupError, FileNotFoundError):
-                pass                                  # it exited while we held it: nothing written to anyone
-            except OSError as e:
-                failed += 1
-                sys.stderr.write("io-shield: oom_score_adj for %s: %s\n" % (pid, e))
-            finally:
-                os.close(fd)
-    dirs[:] = []
-print(" ".join(out) if mode == "list" else changed)
-sys.exit(1 if failed else 0)' "$1" "$CGROOT" "$PROCROOT" "$2" "$3"
+        cg = rd(fd, "cgroup").strip().split("\n")[-1].split("::", 1)[-1]
+        inside = real and (cg == rel or cg.startswith(rel + "/"))
+        cur = rd(fd, "oom_score_adj").strip()
+        # (no apostrophes in this block: it sits inside a single-quoted shell string)
+        # A score is UNDONE only for a process in the slice of this user (the user manager tree and the login
+        # sessions), where nothing but root, i.e. this tool, can have set a negative one. A SYSTEM service
+        # that runs as the user and carries the OOMScoreAdjust of its unit (on familiar: palace-daemon -500,
+        # loadguard -800) lives under system.slice and is never touched. Measured the hard way 2026-11-23: the
+        # first version reset three such services on serialhub; they were put back by hand.
+        ours = cg.startswith(mine)
+        if mode == "list":
+            if inside: ins.append("%s=%s" % (pid, cur))
+            elif cur.startswith("-") and ours: outs.append("%s=%s" % (pid, cur))
+        elif mode == "apply" and inside:
+            if cur != score:
+                wr(fd, score); done += 1
+        elif cur.startswith("-") and ours:          # apply: outside the unit; reset: anywhere in that slice
+            wr(fd, "0"); undone += 1
+    except (ProcessLookupError, FileNotFoundError):
+        pass                                        # it exited while we held it: nothing written to anyone
+    except (OSError, ValueError) as e:
+        failed += 1
+        sys.stderr.write("io-shield: oom_score_adj for %s: %s\n" % (pid, e))
+    finally:
+        os.close(fd)
+print("in:%s; out:%s" % (" ".join(ins) or "none", " ".join(outs) or "none") if mode == "list" else ("%d %d" % (done, undone) if mode == "apply" else undone))
+sys.exit(1 if failed else 0)' "$1" "$CGROOT" "$PROCROOT" "$2" "$3" "$4"
 }
 
 rc=0
+setw() {   # unit weight-or-empty label
+  if [ "$(systemctl show "$1" -p LoadState --value 2>/dev/null)" != loaded ]; then echo "note: $3 is not loaded now; the next run sets it"; return 0; fi
+  if systemctl set-property --runtime "$1" "IOWeight=$2"; then echo "IOWeight=${2:-<default>} on $3"; else echo "io-shield: set-property failed for $3" >&2; rc=1; fi
+}
 case "$MODE" in
   status)
-    for i in "${!OOMU[@]}"; do echo "oomprotect uid ${OOMU[$i]}: want ${OOMS[$i]}; marked processes now: $(oom_scores list "${OOMU[$i]}" "${OOMS[$i]}" 2>/dev/null)"; done
     echo "io.cost.qos: $(tr '\n' ';' < "$QOS" 2>/dev/null)"
+    if [ -e "$STAMP" ]; then echo "OFF: $STAMP exists, apply does nothing until 'io-shield on' or a reboot"; fi
     for i in "${!UNITS[@]}"; do echo "unit ${UNITS[$i]}: want ${UNITW[$i]}, IOWeight=$(systemctl show "${UNITS[$i]}" -p IOWeight --value 2>/dev/null)"; done
-    for i in "${!DOCK[@]}"; do u=$(docker_unit "${DOCK[$i]}"); echo "docker ${DOCK[$i]}: want ${DOCKW[$i]}, ${u:-not running}${u:+ IOWeight=$(systemctl show "$u" -p IOWeight --value 2>/dev/null)}"; done ;;
+    for i in "${!DOCK[@]}"; do u=$(docker_unit "${DOCK[$i]}"); echo "docker ${DOCK[$i]}: want ${DOCKW[$i]}, ${u:-not running}${u:+ IOWeight=$(systemctl show "$u" -p IOWeight --value 2>/dev/null)}"; done
+    for i in "${!OOMU[@]}"; do echo "oomprotect uid ${OOMU[$i]} unit ${OOMN[$i]}: want ${OOMS[$i]}; $(oom_scores list "${OOMU[$i]}" "${OOMN[$i]}" "${OOMS[$i]}" 2>/dev/null)"; done ;;
+  on)
+    rm -f -- "$STAMP" && echo "on: the stamp is gone; the next apply applies" || rc=1 ;;
   off)
+    : > "$STAMP" 2>/dev/null && echo "stamp written: $STAMP (apply does nothing until 'io-shield on' or a reboot)" || { echo "io-shield: could not write $STAMP" >&2; rc=1; }
     for d in "${DEVS[@]}"; do
       mm=$(devno "$d") || true
       [ -n "${mm:-}" ] || { echo "io-shield: no device $d here" >&2; rc=1; continue; }
       if printf '%s enable=0\n' "$mm" > "$QOS"; then echo "io.cost off on $d ($mm)"; else echo "io-shield: could not write $QOS for $d" >&2; rc=1; fi
+    done
+    for i in "${!UNITS[@]}"; do setw "${UNITS[$i]}" "" "${UNITS[$i]}"; done
+    for i in "${!DOCK[@]}"; do u=$(docker_unit "${DOCK[$i]}") || true; [ -n "${u:-}" ] && setw "$u" "" "container ${DOCK[$i]}"; done
+    for i in "${!OOMU[@]}"; do
+      c=$(oom_scores reset "${OOMU[$i]}" "${OOMN[$i]}" "${OOMS[$i]}") || rc=1
+      echo "oom scores of uid ${OOMU[$i]}: ${c:-0} process(es) put back to 0"
     done ;;
   apply)
+    if [ -e "$STAMP" ]; then echo "off ($STAMP exists): nothing applied"; exit 0; fi
     for i in "${!DEVS[@]}"; do
       d=${DEVS[$i]}; mm=$(devno "$d") || true
       [ -n "${mm:-}" ] || { echo "io-shield: no device $d here" >&2; rc=1; continue; }
       if printf '%s enable=1 %s\n' "$mm" "${DEVQ[$i]}" > "$QOS"; then echo "io.cost on $d ($mm): ${DEVQ[$i]}"
       else echo "io-shield: could not write $QOS for $d" >&2; rc=1; fi
     done
-    setw() {   # unit weight label
-      if [ "$(systemctl show "$1" -p LoadState --value 2>/dev/null)" != loaded ]; then echo "note: $3 is not loaded now; the next run sets it"; return 0; fi
-      if systemctl set-property --runtime "$1" "IOWeight=$2"; then echo "IOWeight=$2 on $3"; else echo "io-shield: set-property failed for $3" >&2; rc=1; fi
-    }
     for i in "${!UNITS[@]}"; do setw "${UNITS[$i]}" "${UNITW[$i]}" "${UNITS[$i]}"; done
     for i in "${!DOCK[@]}"; do
       u=$(docker_unit "${DOCK[$i]}") || true
       if [ -n "${u:-}" ]; then setw "$u" "${DOCKW[$i]}" "container ${DOCK[$i]}"; else echo "note: container ${DOCK[$i]} is not there now; the next run sets it"; fi
     done
     for i in "${!OOMU[@]}"; do
-      c=$(oom_scores apply "${OOMU[$i]}" "${OOMS[$i]}") || rc=1
-      echo "oomprotect uid ${OOMU[$i]}: ${c:-0} process(es) set to ${OOMS[$i]}"
+      c=$(oom_scores apply "${OOMU[$i]}" "${OOMN[$i]}" "${OOMS[$i]}") || rc=1
+      echo "oomprotect uid ${OOMU[$i]} unit ${OOMN[$i]}: ${c%% *} process(es) set to ${OOMS[$i]}, ${c##* } outside it put back to 0"
     done ;;
 esac
 exit "$rc"

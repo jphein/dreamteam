@@ -29,11 +29,14 @@ case "$*" in
   *"set-property --runtime broken.service"*) exit 1 ;;
   *"-p IOWeight"*) echo 20 ;;
   *"--user is-active --quiet"*) [ -e "'"$T"'/scope-up" ] ;;
-  *"--user list-units"*) cat "'"$T"'/lane-units" 2>/dev/null ;;
+  *"--user list-units lane-"*) cat "'"$T"'/lane-units" 2>/dev/null ;;
+  *"--user list-units dreamteam-"*) cat "'"$T"'/fleet-units" 2>/dev/null ;;
+  *"-p ControlGroup"*) cat "'"$T"'/controlgroup" 2>/dev/null ;;
   *"-p TasksCurrent"*) cat "'"$T"'/tasks" 2>/dev/null || echo 1 ;;
   *"--user daemon-reload"*) [ ! -e "'"$T"'/reload-fails" ] ;;
 esac'
-run_sh() { IO_SHIELD_CONF="$T/conf" IO_SHIELD_QOS_FILE="$T/qos" IO_SHIELD_SYSBLOCK="$T/sys" IO_SHIELD_ASSUME_ROOT=1 PATH="$B:$PATH" bash "$SH" "$@" > "$T/out" 2> "$T/err"; }
+mkdir -p "$T/run0"
+run_sh() { rm -f "$T/run0/dreamteam-io-shield.off"; IO_SHIELD_CONF="$T/conf" IO_SHIELD_QOS_FILE="$T/qos" IO_SHIELD_SYSBLOCK="$T/sys" IO_SHIELD_RUN_DIR="$T/run0" IO_SHIELD_ASSUME_ROOT=1 PATH="$B:$PATH" bash "$SH" "$@" > "$T/out" 2> "$T/err"; }
 
 echo "── io-shield ────────────────────────────────────────────────────"
 ok "passes bash -n" 'bash -n "$SH"'
@@ -146,71 +149,125 @@ echo "cpu io memory pids" > "$M/cgroup.controllers"; run_ls status
 ok "status: delegated but not yet used by the running manager is said so" 'grep -q "delegated, NOT yet used" "$T/out"'
 echo "cpu io memory pids" > "$M/cgroup.subtree_control"; echo "259:0 enable=1 ctrl=user" > "$T/cg/io.cost.qos"; run_ls status
 ok "status: both in place" 'grep -q "in use by the user manager" "$T/out" && grep -q "io.cost: on (1 device" "$T/out"'
-ok "status: counts each session's processes in the slice, and names the excluded one" 'grep -qx "session alpha: 0 of 4 processes in lanes.slice" "$T/out" && grep -qx "session beta: 1 of 1 processes in lanes.slice" "$T/out" && grep -qx "session lead: excluded (not a lane)" "$T/out"'
+ok "status: counts each session's processes in the slice, and names the excluded one" 'grep -qx "session alpha: 0 of 4 processes in lanes.slice" "$T/out" && grep -qx "session beta: 1 of 1 processes in lanes.slice" "$T/out" && grep -qx "session lead: not a lane, outside the slice (2 processes)" "$T/out"'
 run_ls bogus; ok "an unknown verb is exit 22" '[ "$?" -eq 22 ]'
 
-echo "── the lead (row f72945bc) ──────────────────────────────────────"
-# The lead's pane (pid 900) lives in a scope of its own; the mark is the extended attribute systemd-oomd reads.
-xget() { python3 -I -c 'import os, sys
-try: print(os.getxattr(sys.argv[1], "user.oomd_avoid").decode())
-except OSError: print("none")' "$1"; }
+echo "── never a lane · budgets · fleet scopes · the hook · reconcile · rollback (xreview #282 r1) ─"
 UM="user.slice/user-$(id -u).slice/user@$(id -u).service"
-LD="$T/cg/$UM/app.slice/tmux-spawn-lead.scope"; AD="$T/cg/$UM/app.slice/tmux-spawn-x.scope"; mkdir -p "$LD" "$AD" "$T/cg/$UM/app.slice/shared.service"
-echo "0::/$UM/app.slice/tmux-spawn-lead.scope" > "$P/900/cgroup"; echo "0::/$UM/app.slice/tmux-spawn-lead.scope" > "$P/901/cgroup"
-for p in 100 101 102 110 555; do echo "0::/$UM/app.slice/tmux-spawn-x.scope" > "$P/$p/cgroup"; done
-if ! python3 -I -c 'import os, sys; os.setxattr(sys.argv[1], "user.probe", b"1")' "$T/cg" 2>/dev/null; then
-  echo "SKIP: this filesystem takes no user extended attributes; the lead-mark cases need one"
-else
-  cfg '{"lanes":{"enabled":true,"exclude":[],"lead":["lead"]}}'; : > "$LOG"; rm -f "$T/scope-up"; run_ls attach; rc=$?
-  ok "attach marks the lead's scope user.oomd_avoid=1" '[ "$rc" -eq 0 ] && [ "$(xget "$LD")" = 1 ] && grep -q "lead lead: marked tmux-spawn-lead.scope" "$T/out"'
-  ok "a lane's scope gets no mark" '[ "$(xget "$AD")" = none ]'
-  ok "a session named in .lanes.lead is never moved into the lanes slice, though exclude is empty" '! grep "AttachProcessesToUnit" "$LOG" | grep -qE "lane-lead| 900| 901"'
-  ok "…and the lanes still are" 'grep -q "AttachProcessesToUnit ssau lane-alpha.scope / 4 100 101 102 110$" "$LOG"'
-  run_ls attach; ok "a second run marks nothing again" '! grep -q "marked" "$T/out"'
-  run_ls status; ok "status names the mark" 'grep -q "lead lead: tmux-spawn-lead.scope carries the oomd avoid mark" "$T/out"'
-  python3 -I -c 'import os, sys; os.removexattr(sys.argv[1], "user.oomd_avoid")' "$LD"
-  run_ls status; ok "status says when the lead's scope is NOT marked, and marks nothing itself" 'grep -q "tmux-spawn-lead.scope is NOT marked" "$T/out" && [ "$(xget "$LD")" = none ]'
-  PATH="$T/nobus:$PATH"; mkdir -p "$T/nobus"
-  touch "$T/busctl-fails"; run_ls attach; rc=$?; rm -f "$T/busctl-fails"
-  ok "the lead is marked even when moving a lane fails (it comes first)" '[ "$rc" -eq 1 ] && [ "$(xget "$LD")" = 1 ]'
-  python3 -I -c 'import os, sys; os.removexattr(sys.argv[1], "user.oomd_avoid")' "$LD"
-  echo "0::/$UM/app.slice/shared.service" > "$P/900/cgroup"; run_ls attach
-  ok "a lead pane that is NOT in a scope of its own is not marked (the unit is shared with others)" '[ "$(xget "$T/cg/$UM/app.slice/shared.service")" = none ] && [ "$(xget "$T/cg/$UM/app.slice")" = none ]'
-  echo "0::/$UM/app.slice/tmux-spawn-lead.scope" > "$P/900/cgroup"
-  cfg '{"lanes":{"enabled":true,"exclude":[],"lead":"lead"}}'; run_ls attach
-  ok "lead that is not a list is refused" '[ "$?" -eq 2 ]'
-  cfg '{"lanes":{"enabled":true,"exclude":["lead"]}}'; run_ls attach
-  ok "no .lanes.lead: nobody is marked" '[ "$(xget "$LD")" = none ]'
+# a session that is NOT a lane but has processes inside the slice (it was attached once) is moved OUT
+pcg 900 "lanes.slice/lane-lead.scope"; pcg 901 "lanes.slice/lane-lead.scope"
+cfg '{"lanes":{"enabled":true,"exclude":[],"lead":["lead"]}}'; : > "$LOG"; rm -f "$T/scope-up"; run_ls status
+ok "status: a lead session found inside the slice is said so" 'grep -qx "session lead: NOT a lane, but 2 of 2 processes are in lanes.slice (the next attach moves them out)" "$T/out"'
+run_ls attach; rc=$?
+ok "attach: a .lanes.lead session's processes inside the slice are moved OUT, into a scope outside it" '[ "$rc" -eq 0 ] && grep -q "AttachProcessesToUnit ssau out-lead.scope / 2 900 901$" "$LOG" && grep -q "systemd-run --user --quiet --scope --unit=out-lead -p Delegate=yes" "$LOG" && ! grep -q -- "--unit=out-lead --slice" "$LOG"'
+ok "…and it is never placed in a lane scope" '! grep -q "lane-lead.scope / " "$LOG"'
+cfg '{"lanes":{"enabled":true,"exclude":["lead"]}}'; : > "$LOG"; run_ls attach
+ok "the same for a session named only in .lanes.exclude" 'grep -q "AttachProcessesToUnit ssau out-lead.scope / 2 900 901$" "$LOG"'
+touch "$T/busctl-fails"; run_ls attach; rc=$?; rm -f "$T/busctl-fails"
+ok "a move OUT that fails is exit 1 and names the session" '[ "$rc" -eq 1 ] && grep -q "session lead is not a lane but its processes could not be moved out" "$T/err"'
+pcg 900 "app.slice/tmux-spawn-lead.scope"; pcg 901 "app.slice/tmux-spawn-lead.scope"; : > "$LOG"; run_ls attach; run_ls status
+ok "a lead that is outside the slice is left exactly where it is" '! grep -q "out-lead\| 900\| 901" "$LOG" && grep -qx "session lead: not a lane, outside the slice (2 processes)" "$T/out"'
+ok "lane-slice marks and protects nothing (that is the watchdog's scope and the root helper)" '! grep -q "oomd_avoid\|setxattr\|oom_score" "$LS"'
 
-  # io-shield oomprotect: root gives the marked cgroup's processes the kernel OOM score
-  python3 -I -c 'import os, sys; os.setxattr(sys.argv[1], "user.oomd_avoid", b"1")' "$LD"
-  mkdir -p "$LD/sub"; printf '900\n901\n' > "$LD/cgroup.procs"; echo 902 > "$LD/sub/cgroup.procs"; printf '100\n101\n' > "$AD/cgroup.procs"
-  PR="$T/fproc"; for p in 900 901 902 100 101; do mkdir -p "$PR/$p"; echo 0 > "$PR/$p/oom_score_adj"; done
-  for p in 900 901; do echo "0::/$UM/app.slice/tmux-spawn-lead.scope" > "$PR/$p/cgroup"; done
-  echo "0::/$UM/app.slice/tmux-spawn-lead.scope/sub" > "$PR/902/cgroup"; for p in 100 101; do echo "0::/$UM/app.slice/tmux-spawn-x.scope" > "$PR/$p/cgroup"; done
-  run_op() { IO_SHIELD_CONF="$T/conf" IO_SHIELD_QOS_FILE="$T/qos" IO_SHIELD_SYSBLOCK="$T/sys" IO_SHIELD_CGROUP_ROOT="$T/cg" IO_SHIELD_PROC="$PR" IO_SHIELD_ASSUME_ROOT=1 PATH="$B:$PATH" bash "$SH" "$@" > "$T/out" 2> "$T/err"; }
-  printf 'oomprotect %s -500\n' "$(id -u)" > "$T/conf"; run_op apply; rc=$?
-  ok "oomprotect: every process in the marked cgroup, sub-cgroups included, gets the score" '[ "$rc" -eq 0 ] && [ "$(cat "$PR/900/oom_score_adj" "$PR/901/oom_score_adj" "$PR/902/oom_score_adj" | tr "\n" " ")" = "-500 -500 -500 " ] && grep -q "3 process(es) set to -500" "$T/out"'
-  ok "oomprotect: a process in an UNMARKED cgroup keeps its score" '[ "$(cat "$PR/100/oom_score_adj" "$PR/101/oom_score_adj" | tr "\n" " ")" = "0 0 " ]'
-  run_op apply; ok "oomprotect: a second run changes nothing" 'grep -q "0 process(es) set to -500" "$T/out"'
-  # pid reuse (security review of 4c1df55): the number 901 is still listed in the marked cgroup, but the process
-  # behind /proc/901 now says it lives in ANOTHER cgroup (a successor that got the number): it is not written.
-  echo 0 > "$PR/901/oom_score_adj"; echo "0::/$UM/app.slice/tmux-spawn-x.scope" > "$PR/901/cgroup"; run_op apply
-  ok "oomprotect: a pid whose process is no longer in the marked cgroup (a reused number) is NOT written" '[ "$(cat "$PR/901/oom_score_adj")" = 0 ] && grep -q "0 process(es) set" "$T/out"'
-  echo "0::/$UM/app.slice/tmux-spawn-lead.scope" > "$PR/901/cgroup"
-  echo 999999 >> "$LD/cgroup.procs"; run_op apply; rc=$?
-  ok "oomprotect: a listed pid that has exited is skipped quietly (exit 0)" '[ "$rc" -eq 0 ] && [ "$(cat "$PR/901/oom_score_adj")" = -500 ]'
-  printf '900\n901\n' > "$LD/cgroup.procs"
-  grep -q 'os.O_DIRECTORY' "$SH" && grep -q 'dir_fd=fd' "$SH" && ! grep -q 'stat -c %u' "$SH"; ok "oomprotect: owner, cgroup and the write all go through one /proc/<pid> directory descriptor (no check by path)" '[ "$?" -eq 0 ]'
-  printf 'oomprotect %s -500\n' "$(( $(id -u) + 1 ))" > "$T/conf"; echo 0 > "$PR/900/oom_score_adj"; run_op apply
-  ok "oomprotect: another uid's line does not reach this user's cgroups" '[ "$(cat "$PR/900/oom_score_adj")" = 0 ]'
-  printf 'oomprotect %s -500\n' "$(id -u)" > "$T/conf"; run_op status
-  ok "status prints the marked processes with their scores and writes nothing" '[ "$(cat "$PR/900/oom_score_adj")" = 0 ] && grep -q "900=0" "$T/out"'
-  for bad in "oomprotect $(id -u)" "oomprotect $(id -u) 100" "oomprotect $(id -u) -2000" "oomprotect jp -500" "oomprotect $(id -u) -500 extra"; do
-    printf '%s\n' "$bad" > "$T/conf"; run_op apply; rc=$?
-    if [ "$rc" -eq 22 ] && [ "$(cat "$PR/900/oom_score_adj")" = 0 ]; then pass "bad oomprotect line refused: $bad"; else fail "bad oomprotect '$bad': rc $rc"; fi
-  done
+# each lane's OWN budget, on its own scope, also for a lane that is already placed
+cfg '{"lanes":{"enabled":true,"exclude":["lead"],"perLane":{"memoryHigh":"5G","memorySwapMax":"1G"}}}'; : > "$LOG"; touch "$T/scope-up"; run_ls attach
+ok "per-lane budget: set on the lane's own scope" 'grep -qxF "systemctl --user set-property --runtime lane-alpha.scope MemoryHigh=5G MemorySwapMax=1G" "$LOG"'
+ok "…and on a lane that was placed earlier (a changed config reaches a running lane)" 'grep -qxF "systemctl --user set-property --runtime lane-beta.scope MemoryHigh=5G MemorySwapMax=1G" "$LOG"'
+cfg '{"lanes":{"enabled":true,"exclude":["lead"]}}'; : > "$LOG"; run_ls attach
+ok "no perLane: no budget is set" '! grep -q "set-property --runtime lane-" "$LOG"'
+cfg '{"lanes":{"enabled":true,"exclude":["lead"],"perLane":{"memoryHigh":"5G; rm"}}}'; run_ls attach
+ok "a bad per-lane value is refused" '[ "$?" -eq 2 ]'
+rm -f "$T/scope-up"
+
+# a fleet scope holding a lane's processes is not moved; it gets the lanes' weights
+cfg '{"lanes":{"enabled":true,"exclude":["lead"],"cpuWeight":40,"ioWeight":20}}'; : > "$LOG"; run_ls attach
+ok "a dreamteam-*.scope with a lane's processes gets the slice's CPUWeight and IOWeight" 'grep -qxF "systemctl --user set-property --runtime dreamteam-proj.scope CPUWeight=40 IOWeight=20" "$LOG"'
+run_ls status
+ok "status counts a lane's processes that sit in a fleet scope" 'grep -q "^session gamma: 1 of 2 processes in lanes.slice, 1 in a fleet scope (weights only)$" "$T/out"'
+
+# the SessionStart form: silent, exit 0 whatever happens
+touch "$T/busctl-fails"; : > "$LOG"; out=$(DREAMTEAM_CONFIG="$T/config.json" DREAMTEAM_HOST=test-nooverlay XDG_CONFIG_HOME="$X" DREAMTEAM_PROC="$P" DREAMTEAM_CGROUP_ROOT="$T/cg" PATH="$B:$PATH" bash "$LS" attach --hook 2>&1); rc=$?; rm -f "$T/busctl-fails"
+ok "attach --hook: silent and exit 0 even when a move fails, and it did try" '[ "$rc" -eq 0 ] && [ -z "$out" ] && grep -q "AttachProcessesToUnit ssau lane-alpha.scope" "$LOG"'
+run_ls attach --bogus; ok "attach with another word is exit 22" '[ "$?" -eq 22 ]'
+ok "hooks.json runs it at SessionStart under a timeout, in seconds" 'jq -e ".hooks.SessionStart[].hooks[] | select((.command | contains(\"lane-slice.sh\")) and (.command | contains(\"attach --hook\")) and .timeout <= 10)" "$ROOT/hooks/hooks.json" > /dev/null'
+
+# install reconciles: a unit dropped from the list loses the drop-in this tool wrote
+cfg '{"lanes":{"enabled":true,"exclude":[],"units":["a-gate.service","b-gate.service"]}}'; rm -rf "$U"; run_ls install
+cfg '{"lanes":{"enabled":true,"exclude":[],"units":["a-gate.service"]}}'; mkdir -p "$U/c-gate.service.d"; echo "[Service]" > "$U/c-gate.service.d/20-lanes-slice.conf"; run_ls install; rc=$?
+ok "install again with a shorter list: the dropped unit's drop-in is removed, the kept one stays" '[ ! -e "$U/b-gate.service.d/20-lanes-slice.conf" ] && [ -e "$U/a-gate.service.d/20-lanes-slice.conf" ]'
+ok "…a drop-in of that name that is not ours is left, and said (exit 1)" '[ "$rc" -eq 1 ] && [ -e "$U/c-gate.service.d/20-lanes-slice.conf" ]'
+rm -rf "$U/c-gate.service.d"
+
+# uninstall is the rollback, and works with a config that cannot be read
+run_ls install
+LC="$T/cg/$UM/lanes.slice/lane-alpha.scope"; mkdir -p "$LC"; printf '100\n101\n777\n' > "$LC/cgroup.procs"; echo "/$UM/lanes.slice/lane-alpha.scope" > "$T/controlgroup"
+mkdir -p "$P/777"; echo sleep > "$P/777/comm"; printf 'sleep\0infinity\0' > "$P/777/cmdline"; for p in 100 101; do echo claude > "$P/$p/comm"; printf 'claude\0' > "$P/$p/cmdline"; done
+printf 'lane-alpha.scope loaded active running x\n' > "$T/lane-units"; printf 'dreamteam-proj.scope loaded active running x\n' > "$T/fleet-units"
+echo '{ this is not json' > "$T/config.json"; : > "$LOG"; rm -f "$T/scope-up"; run_ls uninstall; rc=$?
+ok "uninstall with an unreadable config still runs (exit 0)" '[ "$rc" -eq 0 ]'
+ok "uninstall: the attach timer is disabled" 'grep -qxF "systemctl --user disable --now dreamteam-lane-slice.timer" "$LOG"'
+ok "uninstall: each lane's processes are moved out of the slice (the anchor is not)" 'grep -q "AttachProcessesToUnit ssau out-alpha.scope / 2 100 101$" "$LOG" && ! grep "AttachProcessesToUnit" "$LOG" | grep -q " 777"'
+ok "uninstall: the lane scope is stopped, by name" 'grep -qxF "systemctl --user stop lane-alpha.scope" "$LOG"'
+ok "uninstall: the weights set on a fleet scope are reset" 'grep -qxF "systemctl --user set-property --runtime dreamteam-proj.scope CPUWeight= IOWeight=" "$LOG"'
+ok "uninstall: the slice file and drop-ins are gone" '[ ! -e "$U/lanes.slice" ] && [ ! -e "$U/a-gate.service.d/20-lanes-slice.conf" ]'
+touch "$T/busctl-fails"; cfg '{"lanes":{"enabled":true,"exclude":[]}}'; run_ls install; echo '{ broken' > "$T/config.json"; : > "$LOG"; run_ls uninstall; rc=$?; rm -f "$T/busctl-fails"
+ok "uninstall: a lane that cannot be moved out is NOT stopped (its processes would be ended), exit 1" '[ "$rc" -eq 1 ] && ! grep -q "stop lane-alpha.scope" "$LOG"'
+rm -f "$T/lane-units" "$T/fleet-units" "$T/controlgroup"; rm -rf "$T/cg/$UM/lanes.slice"
+
+echo "── io-shield oomprotect: only the watchdog's named unit (xreview #282 r1) ───────"
+LD="$T/cg/$UM/app.slice/lead-spire.scope"; mkdir -p "$LD/sub" "$T/cg/$UM/app.slice/tmux-spawn-x.scope" "$T/cg/$UM/app.slice/lead-spire.scope-x" "$T/cg/$UM/lanes.slice/lead-spire.scope" "$T/run"
+PR="$T/fproc"; rm -rf "$PR"
+fp() { mkdir -p "$PR/$1"; echo "${3:-0}" > "$PR/$1/oom_score_adj"; echo "0::/$UM/$2" > "$PR/$1/cgroup"; }
+scores() { local p o=""; for p in "$@"; do o="$o$(cat "$PR/$p/oom_score_adj") "; done; printf '%s' "$o"; }
+fixture() { rm -rf "$PR"; fp 900 app.slice/lead-spire.scope; fp 901 app.slice/lead-spire.scope; fp 902 app.slice/lead-spire.scope/sub; fp 100 app.slice/tmux-spawn-x.scope; fp 101 app.slice/tmux-spawn-x.scope
+            fp 200 app.slice/lead-spire.scope-x; fp 201 lanes.slice/lead-spire.scope; fp 202 app.slice; rm -f "$T/run/dreamteam-io-shield.off"
+            # a SYSTEM service that runs as this user with its unit's own negative score, and a login-session process
+            mkdir -p "$PR/300" "$PR/301"; echo -500 > "$PR/300/oom_score_adj"; echo "0::/system.slice/palace-daemon.service" > "$PR/300/cgroup"
+            echo -700 > "$PR/301/oom_score_adj"; echo "0::/user.slice/user-$(id -u).slice/session-4.scope" > "$PR/301/cgroup"; }
+run_op() { IO_SHIELD_CONF="$T/conf" IO_SHIELD_QOS_FILE="$T/qos" IO_SHIELD_SYSBLOCK="$T/sys" IO_SHIELD_CGROUP_ROOT="$T/cg" IO_SHIELD_PROC="$PR" IO_SHIELD_RUN_DIR="$T/run" IO_SHIELD_ASSUME_ROOT=1 PATH="$B:$PATH" bash "$SH" "$@" > "$T/out" 2> "$T/err"; }
+printf 'oomprotect %s lead-spire.scope -500\n' "$(id -u)" > "$T/conf"
+fixture; run_op apply; rc=$?
+ok "every process in the named unit, sub-cgroups included, gets the score" '[ "$rc" -eq 0 ] && [ "$(scores 900 901 902)" = "-500 -500 -500 " ] && grep -q "3 process(es) set to -500, 1 outside it put back to 0" "$T/out"'
+ok "a lane's scope, a unit whose name only STARTS like it, the same name under another slice, and the parent slice earn nothing" '[ "$(scores 100 101 200 201 202)" = "0 0 0 0 0 " ]'
+ok "a SYSTEM service running as the user keeps its unit's own negative score (serialhub 11-23: the first version reset three)" '[ "$(scores 300)" = "-500 " ]'
+ok "a negative score in the user's own login session is undone (only root's hand puts one there)" '[ "$(scores 301)" = "0 " ]'
+run_op apply; ok "a second run changes nothing" 'grep -q "0 process(es) set to -500, 0 outside" "$T/out"'
+if python3 -I -c 'import os, sys; os.setxattr(sys.argv[1], "user.oomd_avoid", b"1")' "$T/cg/$UM/app.slice/tmux-spawn-x.scope" 2>/dev/null; then
+  run_op apply; ok "a lane that MARKS its own scope (user.oomd_avoid) earns nothing: no mark is read" '[ "$(scores 100 101)" = "0 0 " ]'
 fi
+ok "no attribute is read anywhere in the tool" '! grep -q "getxattr\|oomd_avoid" "$SH"'
+echo -500 > "$PR/100/oom_score_adj"; run_op apply
+ok "a process OUTSIDE the unit that holds a negative score is put back to 0" '[ "$(scores 100)" = "0 " ] && grep -q ", 1 outside it put back to 0" "$T/out"'
+echo "0::/$UM/app.slice/tmux-spawn-x.scope" > "$PR/901/cgroup"; run_op apply
+ok "a process that LEFT the unit loses the score at the next run (migration is undone)" '[ "$(scores 901)" = "0 " ] && [ "$(scores 900)" = "-500 " ]'
+fixture; echo "0::/$UM/app.slice/tmux-spawn-x.scope" > "$PR/901/cgroup"; run_op apply
+ok "a pid listed nowhere but whose process is not in the unit is not scored (the cgroup is read through the held descriptor)" '[ "$(scores 901)" = "0 " ]'
+fixture; mv "$LD" "$LD.away"; ln -s "$T/cg/$UM/app.slice/tmux-spawn-x.scope" "$LD"; run_op apply; rm -f "$LD"; mv "$LD.away" "$LD"
+ok "the unit path being a symlink: nobody is scored" '[ "$(scores 900 901 902 100 101)" = "0 0 0 0 0 " ]'
+fixture; mv "$LD" "$LD.away"; echo -500 > "$PR/900/oom_score_adj"; run_op apply; mv "$LD.away" "$LD"
+ok "the unit not existing (the lead is down): nobody is scored, and a leftover score is undone" '[ "$(scores 900 901)" = "0 0 " ]'
+fixture; rm -rf "$PR/901"; run_op apply; rc=$?
+ok "a process that has exited is skipped quietly" '[ "$rc" -eq 0 ] && [ "$(scores 900 902)" = "-500 -500 " ]'
+fixture; printf 'oomprotect %s lead-spire.scope -500\n' "$(( $(id -u) + 1 ))" > "$T/conf"; echo -300 > "$PR/100/oom_score_adj"; run_op apply
+ok "a line for another uid neither scores nor resets this user's processes" '[ "$(scores 900 100)" = "0 -300 " ]'
+printf 'oomprotect %s lead-spire.scope -500\n' "$(id -u)" > "$T/conf"; fixture; run_op apply; echo -500 > "$PR/100/oom_score_adj"; cp -r "$PR" "$T/before"; run_op status
+ok "status lists who is in the unit and any negative score outside it in the user's slice (not the system service's), and writes nothing" 'grep -q "in:900=-500 901=-500 902=-500; out:100=-500$" "$T/out" && diff -r "$PR" "$T/before" > /dev/null'
+rm -rf "$T/before"
+ok "owner, cgroup and the write all go through one /proc/<pid> directory descriptor" 'grep -q "os.O_DIRECTORY" "$SH" && grep -q "dir_fd=fd" "$SH" && ! grep -q "stat -c %u" "$SH"'
+# the rollback
+printf 'device nvme0n1\nunit syncthing@jp.service 20\ndocker mempalace-db 20\noomprotect %s lead-spire.scope -500\n' "$(id -u)" > "$T/conf"
+fixture; run_op apply; : > "$LOG"; run_op off; rc=$?
+ok "off: io.cost disabled, the unit and container weights reset, every score back to 0, a stamp written" '[ "$rc" -eq 0 ] && grep -qxF "259:0 enable=0" "$T/qos" && grep -qxF "systemctl set-property --runtime syncthing@jp.service IOWeight=" "$LOG" && grep -qxF "systemctl set-property --runtime docker-'"$ID"'.scope IOWeight=" "$LOG" && [ "$(scores 900 901 902)" = "0 0 0 " ] && [ -e "$T/run/dreamteam-io-shield.off" ] && [ "$(scores 300)" = "-500 " ]'
+: > "$LOG"; run_op apply; rc=$?
+ok "after off, the timer's apply does NOTHING (the rollback is not undone 5 minutes later)" '[ "$rc" -eq 0 ] && grep -q "nothing applied" "$T/out" && grep -qxF "259:0 enable=0" "$T/qos" && [ "$(scores 900)" = "0 " ] && [ ! -s "$LOG" ]'
+run_op status; ok "status says it is off" 'grep -q "^OFF: " "$T/out"'
+run_op on; run_op apply
+ok "on, then apply: applied again" '[ ! -e "$T/run/dreamteam-io-shield.off" ] && grep -q "^259:0 enable=1" "$T/qos" && [ "$(scores 900)" = "-500 " ]'
+for bad in "oomprotect $(id -u) -500" "oomprotect $(id -u) tmux-spawn-x.scope -500" "oomprotect $(id -u) app.slice -500" "oomprotect $(id -u) lead-spire.service -500" \
+           "oomprotect $(id -u) ../lead-spire.scope -500" "oomprotect $(id -u) lead-spire.scope 100" "oomprotect $(id -u) lead-spire.scope -2000" "oomprotect jp lead-spire.scope -500" "oomprotect $(id -u) lead-spire.scope -500 extra"; do
+  fixture; printf '%s\n' "$bad" > "$T/conf"; run_op apply; rc=$?
+  if [ "$rc" -eq 22 ] && [ "$(scores 900 100)" = "0 0 " ]; then pass "bad oomprotect line refused: $bad"; else fail "bad oomprotect '$bad': rc $rc"; fi
+done
 
 echo "── host-io-check.sh ─────────────────────────────────────────────"
 ok "passes bash -n" 'bash -n "$HC"'
