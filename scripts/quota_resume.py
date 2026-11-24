@@ -49,11 +49,18 @@ ROUND 2 of that review (7125633596):
   everything BELOW the box, where Claude Code draws "esc to interrupt" and the spinner's footer) a marker means the
   agent works: the pane is not walled. ABOVE the stall it is history, and this script cannot tell a quoted marker
   from a real one, so it does not type: the pane is named "(a working marker is on screen above the stall…)".
-- A TURN'S IDENTITY IS NOT ITS TEXT. The key is the pane plus a hash of everything from the PREVIOUS output block
-  down to the input box, and the message this script types carries the time ("… [14:03:07]"). After a resume the
-  screen reads: old stall, our stamped message, new stall. So a second failover turn with the very same answer is
-  a new turn (it waits its 120 s and comes under the hourly allowance), where it used to be "resumed once
-  already" for ever. A pane still showing the SAME turn stays "resumed once already".
+- A TURN'S IDENTITY IS NOT ITS TEXT, AND NOT WHAT THE SCREEN SHOWS (ruling after round 3). The key is the pane,
+  the stall block, and a DURABLE element read from the session's own transcript: the id of its last assistant
+  record at the time of the sighting. Every turn the model (or the proxy's failover model) answers appends one
+  such record with a new id, so a second failover turn with the very same answer is another turn whatever is or
+  is not still on the screen (the earlier design hashed the visible lines around the stall, and a short pane that
+  had scrolled our stamped message away read as the same turn for ever). The transcript is found from the pane:
+  its shell's descendant named claude, that process's working directory and its `--resume`/`--session-id`
+  argument → ~/.claude/projects/<directory, non-alphanumerics as dashes>/<session id>.jsonl.
+  WHEN NO TRANSCRIPT CAN BE READ (a session started without an id on its command line, an unreadable file), the
+  script says so in the line and falls back to time: a failover turn it resumed that is still stalled, not
+  working, after another full wait counts as a new turn, under the same hourly allowance. It never holds a pane
+  for ever on what a screen shows. The typed message still carries the time, for a person reading the pane.
 - THE TMUX SOCKET IS EXPLICIT. Every tmux call is `tmux -S <socket>`: $QUOTA_RESUME_TMUX_SOCKET, else the default
   socket of this user (/tmp/tmux-<uid>/default). Nothing is left to what the calling environment happens to hold
   (TMUX, TMUX_TMPDIR): a user service and a login shell then reach the same server or the run says which socket
@@ -138,6 +145,8 @@ import os as _os
 PARKED=set(_os.environ.get("PARKED_PANES","").split())
 NAMES = {}          # pane id → tmux session name (a fixture: its file name)
 NO_SERVER = False   # tmux answered "no server running": this user has no tmux server
+PANE_PID = {}       # pane id → the pid of the pane's shell (from tmux)
+PROJECTS = os.environ.get("QUOTA_RESUME_PROJECTS_DIR") or os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"), "projects")
 PROCROOT = os.environ.get("QUOTA_RESUME_PROC") or "/proc"
 
 
@@ -158,6 +167,79 @@ def claude_running():
 
 
 
+def session_of(pane_pid):
+    """(cwd, session id) of the claude process under a pane's shell, or None. Walks the process table once."""
+    try:
+        kids = {}
+        for n in os.listdir(PROCROOT):
+            if n.isdigit():
+                try:
+                    st = open(f"{PROCROOT}/{n}/stat").read()
+                    kids.setdefault(st[st.rindex(")") + 2:].split()[1], []).append(n)
+                except (OSError, ValueError, IndexError):
+                    pass
+        todo, seen = [str(pane_pid)], set()
+        while todo:
+            q = todo.pop(0)
+            if q in seen:
+                continue
+            seen.add(q)
+            try:
+                if q != str(pane_pid) and open(f"{PROCROOT}/{q}/comm").read().strip() == "claude":
+                    argv = open(f"{PROCROOT}/{q}/cmdline", "rb").read().decode("utf-8", "replace").split("\0")
+                    sid = None
+                    for i, a in enumerate(argv):
+                        if a in ("--resume", "-r", "--session-id") and i + 1 < len(argv):
+                            sid = argv[i + 1]
+                        elif a.startswith("--resume=") or a.startswith("--session-id="):
+                            sid = a.split("=", 1)[1]
+                    if sid and re.fullmatch(r"[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}", sid):
+                        return os.readlink(f"{PROCROOT}/{q}/cwd"), sid
+                    return None
+            except OSError:
+                pass
+            todo.extend(kids.get(q, []))
+    except OSError:
+        pass
+    return None
+
+
+def turn_mark(pid):
+    """The DURABLE identity of the pane's current turn: the uuid of the last assistant record in the session's
+    transcript ('' when it cannot be read). A fixture's mark is the content of '<fixture>.turn' beside it."""
+    if FIXTURES:
+        f = next((x for x in FIXTURES if os.path.basename(x) == pid), None)
+        try:
+            return open(f + ".turn", encoding="utf-8").read().strip() if f else ""
+        except OSError:
+            return ""
+    who = session_of(PANE_PID.get(pid, "")) if PANE_PID.get(pid) else None
+    if not who:
+        return ""
+    cwd, sid = who
+    path = os.path.join(PROJECTS, re.sub(r"[^A-Za-z0-9]", "-", cwd), sid + ".jsonl")
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - 4_000_000))
+            lines = f.read().split(b"\n")
+        if size > 4_000_000:
+            lines = lines[1:]                               # the first piece may be half a record
+        for raw in reversed(lines):
+            if b'"assistant"' not in raw:
+                continue
+            try:
+                r = json.loads(raw)
+            except ValueError:
+                continue
+            if isinstance(r, dict) and r.get("type") == "assistant" and isinstance(r.get("uuid"), str) and r["uuid"]:
+                return r["uuid"]
+    except OSError:
+        pass
+    return ""
+
+
 def panes():
     global NO_SERVER
     if FIXTURES:
@@ -166,7 +248,7 @@ def panes():
             yield os.path.basename(f), "fixture", open(f, encoding="utf-8", errors="replace").read()
         return
     try:
-        r = subprocess.run([*TMUX, "list-panes", "-a", "-F", "#{pane_id} #{session_name} #{pane_current_command}"],
+        r = subprocess.run([*TMUX, "list-panes", "-a", "-F", "#{pane_id} #{pane_pid} #{session_name} #{pane_current_command}"],
                            capture_output=True, text=True, timeout=20)
     except (OSError, subprocess.SubprocessError) as e:
         raise RuntimeError(f"tmux: {type(e).__name__}")
@@ -177,9 +259,10 @@ def panes():
         raise RuntimeError(r.stderr.strip()[:80] or f"tmux exit {r.returncode}")
     for line in r.stdout.split("\n"):
         if line.split(" ",1)[0] in PARKED: continue
-        if line.count(" ") >= 2:
-            pid, sess, cmd = line.split(" ", 2)
+        if line.count(" ") >= 3:
+            pid, ppid, sess, cmd = line.split(" ", 3)
             NAMES[pid] = sess
+            PANE_PID[pid] = ppid
             yield pid, cmd, sh(*TMUX, "capture-pane", "-e", "-p", "-t", pid)
 
 
@@ -291,6 +374,7 @@ now = time.time()
 seen_now = set()
 read = 0
 walled = []          # (name, why it was or was not resumed), in pane order
+unmarked = set()     # failover panes whose transcript could not be read: their turns are told apart by time
 try:
     all_panes = list(panes())
 except RuntimeError as e:
@@ -329,12 +413,21 @@ for pid, cmd, raw in all_panes:
     wait = None if failover else reset_wait(collapsed)
     # a quota notice names its own reset, and gets 30 s of grace on top; a failover turn names none: 120 s, exactly
     due = (FAILOVER_WAIT if failover else (300 if wait is None else wait) + 30)
-    # THE TURN, not its text: the pane and everything from the previous output block to the box (see the docstring)
-    key = pid + ":" + hashlib.sha1(v["context"].encode()).hexdigest()[:12]
+    # THE TURN, not its text and not the screen: the pane, the stall block, and the id of the transcript's last
+    # assistant record. Without a transcript (mark ""), the block alone, and time decides below.
+    mark = turn_mark(pid)
+    key = pid + ":" + hashlib.sha1((collapsed + "\x00" + mark).encode()).hexdigest()[:12]
     seen_now.add(key)
     first = state.get(key, {}).get("first", now)
     done = state.get(key, {}).get("done", False)
-    state[key] = {"first": first, "done": done}
+    done_at = state.get(key, {}).get("done_at")
+    if done and failover and not mark and isinstance(done_at, (int, float)) and now >= done_at + due:
+        # no transcript to tell turns apart: a failover turn we resumed, still stalled a full wait later, is
+        # treated as a new one (the hourly allowance below still applies). Never held for ever on a screen.
+        done, first = False, done_at
+    state[key] = {"first": first, "done": done, "done_at": done_at}
+    if failover and not mark:
+        unmarked.add(name)
     if DRY:
         print(f"match {pid} ({cmd}): wait={due - (0 if failover else 30)}s done={done} due_in={int(first + due - now)}s serves={proxy_serves()}")
         continue
@@ -360,7 +453,7 @@ for pid, cmd, raw in all_panes:
     #    shows the SAME stall, an empty box, no dialog and no work gets a key.
     again = look(capture(pid))
     if (again is None or again["kind"] != v["kind"] or again["collapsed"] != collapsed or again["context"] != v["context"]
-            or again["working"] or again["above"] or again["dialog"] or again["typed"]):
+            or again["working"] or again["above"] or again["dialog"] or again["typed"] or turn_mark(pid) != mark):
         log(f"skip {pid}: the pane changed between the first look and the send; no key sent")
         walled.append((name, kind + "changed while being looked at: left alone, looked at again next run"))
         continue
@@ -383,6 +476,7 @@ for pid, cmd, raw in all_panes:
     if FIXTURES:
         log(f"would resume {pid} (a fixture is never typed into)")
     state[key]["done"] = True
+    state[key]["done_at"] = now
     if failover:
         state[fo_key] = recent + [now]
     walled.append((name, kind + "resumed"))
@@ -394,7 +488,8 @@ if not DRY:
     json.dump(state, open(STATE, "w"))
     if walled:
         # EVERY walled pane is named, with its reason: the line exists so that none of them sits unseen
-        check_line("warn", f"{read} panes read, {len(walled)} walled: " + ", ".join(f"{n} ({why})" for n, why in walled))
+        note = f"; no transcript found for {', '.join(sorted(unmarked))}: turns told apart by time" if unmarked else ""
+        check_line("warn", f"{read} panes read, {len(walled)} walled: " + ", ".join(f"{n} ({why})" for n, why in walled) + note)
     elif read == 0 and NO_SERVER and claude_running():
         check_line("warn", f"no tmux server for this user at {TMUX_SOCKET}, yet claude processes run here: this timer runs as the wrong user or on the wrong socket, and sees no lane (quota-resume-ctl.sh install sets the socket)")
     else:
