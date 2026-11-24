@@ -582,7 +582,10 @@ CI AND MERGE — you push, the lead gates. Four rules, all measured 2026-09-11:
   the victims saw only "Terminated"; setsid/nohup does not protect a run). Capture
   the pid at launch (`make test > log 2>&1 & echo $! > run.pid`) and `kill` that, or
   `"$CLAUDE_PLUGIN_ROOT"/scripts/kill-mine.py 'make test|python.* -m pytest'`, which
-  takes only processes inside your worktree. (wide-kill-guard.sh is the backstop.)
+  takes only processes inside your worktree. Launch a suite as
+  `DREAMTEAM_WORKTREE="$PWD" make test`: kill-mine reads that marker from the
+  process's environment, so a runner that chdir's away is still yours.
+  (wide-kill-guard.sh is the backstop.)
 - `gh api rate_limit` CANNOT warn you. It read 5000 remaining throughout that
   outage; it does not see GraphQL secondary limits.
 - REST, not GraphQL, for every read: `gh api repos/O/R/...`. `gh issue view`
