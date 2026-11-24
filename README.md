@@ -77,7 +77,7 @@ the empty/exit-code guarantees — locked against drift by `tests/test-json-cont
 
 The plugin enforces memory safety. The skill also carries the operating rules the fleet
 learned the hard way. [`skills/dreamteam/SKILL.md` § Fleet lessons](skills/dreamteam/SKILL.md)
-has all 14 with the incident behind each one (2026-09-29/30). The short list:
+has all 19 with the incident behind each one (2026-09-29/30, and 2026-11-17 to 11-24). The short list:
 
 | Rule | Why |
 |---|---|
@@ -89,6 +89,10 @@ has all 14 with the incident behind each one (2026-09-29/30). The short list:
 | Heavy builds on familiar; competition data as aggregates only | One 7.3 GB build reaped the lead's jobs; printed dev-set data forced a disclosure |
 | Resume a quota-stalled pane, don't respawn it; read a peer's full command before approving it | Warm context is the cheapest agent; the peer must know what was approved |
 | Red before green, coverage stated, three strikes then investigate | Adopted from gstack v1.91 `/qa`, `/cso`, `/investigate` |
+| A "usage limit" notice is one seat: read the proxy's `live_seats` before stopping | "continue" was typed 146 times into two real walls, and five lanes sat 3.5 h after a reset |
+| A `⚠ FAILOVER` turn is not a restart; a faint line in the input box is not typed text | Every "hung" or "restarted" report of one week was a failover turn; a suggestion was read as an unsent message |
+| A review has a last round; after it the lead rules (merge on the lane's gate with named fixes, or closed) | Review loops ran 42 and 16 rounds against a cap of 12 |
+| A lane stops only with every open row spoken on, nothing running unwatched, and what it waits on named | A lane went quiet on an approved task twice in one day |
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the merge gate.
 

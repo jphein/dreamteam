@@ -3,8 +3,8 @@
 #
 # Every lesson check runs against the Fleet lessons SECTION only (from its
 # heading to the next level-two heading), so a phrase that also appears in the
-# spawn template cannot keep a deleted lesson green. Also asserts: all 14
-# numbered lessons, placement between REACHING JP and Org map, all four report
+# spawn template cannot keep a deleted lesson green. Also asserts: all 19
+# numbered lessons (15-19 added 2026-11-24), placement between REACHING JP and Org map, all four report
 # fields in the spawn template, the Oracle's coverage-before-verdict order, and
 # the README/CONTRIBUTING pointers.
 #
@@ -48,9 +48,20 @@ LESSONS=(
   'L12 (gstack /qa) red before green|fails on the unfixed code'
   'L13 (gstack /cso) coverage stated|`complete`, `partial` or `not assessed`'
   'L14 (gstack /investigate) three strikes|Three strikes, then investigate'
+  'L15 the pool instrument is live_seats|read `live_seats`'
+  'L15 the 5-hour aggregate is not the instrument|`aggregate.fiveHour.remaining` is NOT the instrument'
+  'L16 a failover turn is not a restart|served this turn; no tools ran; treat as unavailable'
+  'L16 check the start time before saying restarted|ps -o lstart= -p <pid>'
+  'L17 a faint line is a suggestion|scripts/lib/pane_plain.py'
+  'L17 never from a capture without -e|from a capture without `-e`'
+  'L18 after a final round the lead rules|If the final round is still DO-NOT-MERGE, the lead writes a **ruling**'
+  'L18 a repeated class in a final round closes the PR|a finding of the SAME CLASS as an earlier round'
+  'L18 a lane never opens the next round|A lane never opens the round after a final one'
+  'L19 stopping rules name the Stop hook|scripts/flow-callout.sh'
+  'L19 a usage limit is not a reason to stop|Not a "usage limit" (lesson 15)'
 )
 
-# lessons_ok FILE [quiet] — 0 iff the section holds every phrase and lessons 1..14
+# lessons_ok FILE [quiet] — 0 iff the section holds every phrase and lessons 1..19
 lessons_ok() {
   local f="$1" quiet="${2:-}" sec entry label phrase n miss=0
   sec="$(section "$f")"
@@ -61,11 +72,11 @@ lessons_ok() {
     if grep -qF -- "$phrase" <<<"$sec"; then [ -n "$quiet" ] || ok "$label"
     else miss=$((miss+1)); [ -n "$quiet" ] || bad "$label (missing from the section: '$phrase')"; fi
   done
-  for n in $(seq 1 14); do
+  for n in $(seq 1 19); do
     if grep -qE "^${n}\. \*\*" <<<"$sec"; then :; else
       miss=$((miss+1)); [ -n "$quiet" ] || bad "numbered lesson $n missing from the section"; fi
   done
-  [ -n "$quiet" ] || { [ "$miss" -eq 0 ] && ok "numbered lessons 1-14 all in the section"; }
+  [ -n "$quiet" ] || { [ "$miss" -eq 0 ] && ok "numbered lessons 1-19 all in the section"; }
   [ "$miss" -eq 0 ]
 }
 
@@ -137,6 +148,9 @@ expect_red() {
 f=$(mutate l14 "$SKILL" '/^14\. \*\*Three strikes/,/under patches/d'); expect_red "delete lesson 14" lessons_ok "$f"
 # Delete lesson 12 body: "Red before green" also lives in the template, so only a section-scoped check catches this.
 f=$(mutate l12 "$SKILL" '/^12\. \*\*Red before green/,/^13\. /{/^13\. /!d}'); expect_red "delete lesson 12 (phrase survives in template)" lessons_ok "$f"
+# Delete lesson 18 WHOLE (the ruling after a final round), and lesson 16's mark: each must be missed.
+f=$(mutate l18 "$SKILL" '/^18\. \*\*A review has a last round/,/not a reason for one more round/d'); expect_red "delete lesson 18" lessons_ok "$f"
+f=$(mutate l16 "$SKILL" '/treat as unavailable/d'); expect_red "lesson 16 loses the failover mark" lessons_ok "$f"
 # Move a lesson phrase out of the section (into the file's tail) — whole-file grep would stay green.
 f=$(mutate mv9 "$SKILL" '/quota-resume.timer/d;$a quota-resume.timer'); expect_red "lesson 9 moved outside the section" lessons_ok "$f"
 # Drop "Evidence:" from the spawn template only.

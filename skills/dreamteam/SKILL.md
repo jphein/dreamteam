@@ -492,6 +492,10 @@ tmux capture-pane -t :<window>.<pane> -p -S -50   # last 50 lines of the agent's
   positive (`pgrep -af`, `ps | grep`: they match their own `bash -c` cmdline)
   versus a false negative (this one) — lives in
   `~/.claude/skills/instruments-and-liveness/SKILL.md`.
+- **A pane at its prompt after a short answer may have been served a FAILOVER turn** (Fleet lesson 16):
+  look for `⚠ FAILOVER` at the start of its last output block before calling it hung or restarted.
+- **Text in the input box may be a faint suggestion, not typed input** (Fleet lesson 17): read the box with
+  `pane-peek.sh` or `scripts/lib/pane_plain.py` on a `capture-pane -p -e` capture, never a plain capture.
 - **Before reasoning about "unaccounted" processes, run `/dreamteam-fleet`**
   (`scripts/fleet.sh`, issue #18): it maps EVERY agent on the host — all projects, all
   scopes, all tmux sockets — and labels foreign fleets `NOT-YOURS`. Scope membership ≠
@@ -835,7 +839,7 @@ Each one is a rule plus the incident that produced it. `~/.claude/CLAUDE.md` "De
 
 ### Keeping lanes alive
 
-9. **A quota stall is transient: resume, don't respawn.** A teamclaude "all N accounts at quota" error clears at the reset. `quota-resume.timer` on katana resumes the stalled pane automatically every 2 min.
+9. **A quota stall is transient: resume, don't respawn.** A teamclaude "all N accounts at quota" error clears at the reset. `quota-resume.timer` (`scripts/quota_resume.py`, units in `systemd/`) resumes the stalled pane every 2 min on each host it is installed on; it holds while the proxy's `live_seats` is 0 and waits the reset the notice names (lesson 15).
    *Why:* a fresh spawn throws away the lane's warm context and costs RAM for nothing.
 10. **Approving a peer's permission prompt.** The lead reads the **full** command first and approves only routine or safe work. Then it SendMessages the peer the command and the time it approved.
     *Why:* the peer can then verify what was approved in its name.
@@ -862,6 +866,38 @@ These come from upstream garrytan/gstack (`/qa`, `/review`, `/test-audit`, `/cso
     *Why:* "no findings" from a partial pass reads as "clean", and that is the same false-zero trap as an unproven instrument.
 14. **Three strikes, then investigate.** After three failed fixes for the same failure, stop patching and report to the lead with what each attempt showed. The next step is root cause (a `lucid` investigation), not a fourth guess.
     *Why:* repeated guessing burns the lane's context and often buries the real cause under patches.
+
+### Stalls, stopping and the last review round (measured 2026-11-17 to 11-24)
+
+15. **A "usage limit" notice is about one seat. `live_seats` says whether the pool can serve.** Before honouring a notice, ask the proxy: `curl -s http://127.0.0.1:3456/teamclaude/quota` and read `live_seats`. Above 0, keep working. At 0 it is a wall until the `resetAt` the answer names: say "pool exhausted until <time>", never "my usage limit".
+    - `aggregate.fiveHour.remaining` is NOT the instrument: it counts the empty 5-hour windows of seats whose week is spent, and read 0.67 to 0.82 through two real walls on 2026-11-21.
+    - `scripts/quota_resume.py` uses the same number: no key is sent while `live_seats` is 0.
+
+    *Why:* the old test ("any seat with a sliver left") typed "continue" 146 times into two walls on 11-21 while the proxy refused every request.
+16. **A turn marked `⚠ FAILOVER` is not a restart, and the lane is not hung.** When no seat can serve, the proxy answers the turn itself with a small local model and marks it: `● ⚠ FAILOVER: local <model> served this turn; no tools ran; treat as unavailable`. That turn does nothing and ENDS, so the lane sits at its prompt with no error on screen.
+    - Before reporting "hung", "restarted" or "context emptied", look for the mark in the pane or the transcript, and read the process's start time (`ps -o lstart= -p <pid>`). A session that started days ago was not restarted.
+    - To continue such a lane, tell it to continue once a seat serves (lesson 15). It has its whole context.
+
+    *Why:* 19 such turns in six days on serialhub (11-17 to 11-23). Every "pane hung" and "context emptied by a restart" report of that week matched one to the minute, and no process had been restarted.
+17. **A faint line in the input box is a suggestion, not typed text.** Claude Code draws its placeholder and its suggestion in faint (SGR 2). A plain `tmux capture-pane -p` drops the colour, and the suggestion then reads exactly like something a person typed.
+    - Read a pane's input box through `scripts/lib/pane_plain.py` (it takes a `capture-pane -p -e` capture). `pane-peek.sh` and `poke.sh` do, and report the suggestion apart from typed text.
+    - Never decide "someone is typing" or "my message is still on the input line" from a capture without `-e`.
+
+    *Why:* `poke.sh` took a suggestion equal to its own message for an unsent message (fixed in dreamteam #278), and the quota resumer skipped panes whose box showed only ghost text (2026-10-05).
+18. **A review has a last round. After it, the lead rules.** Rounds are counted per repo and PR (`xreview --pr <owner/repo#N>`; the cap is 12, and round 13 is refused without `--over-cap "<reason>" --row <flow id>`). The lead may declare a round FINAL earlier. A lane never opens the round after a final one.
+    - If the final round is still DO-NOT-MERGE, the lead writes a **ruling** as a PR comment, one of two:
+      - *merge on the lane's own gate* once the named fixes land, each with a red test (dreamteam #279, 2026-11-24: two fixes named, merged the same night; the merged-by comment cites the ruling and the head that merged);
+      - *closed*: a finding of the SAME CLASS as an earlier round, in a final round, means the change is too big or its spec is wrong. Split it or write the spec; do not patch a third time.
+    - A lane answers a final round finding by finding, with the red test for each, and says what it did NOT fix.
+
+    *Why:* review loops ran 42 and 16 rounds against the cap of 12 on 2026-11-17. A review that keeps finding things is information about the diff, not a reason for one more round.
+19. **Stopping rules.** A lane ends a turn only when all three hold:
+    - every open Flow row of its own carries a word (`checkpoint`, `block`, `done`) since its last order. The Stop hook `scripts/flow-callout.sh` blocks the stop otherwise and names the rows;
+    - nothing it started is running unwatched: the report says what is armed (timers, background runs) and what is not;
+    - what it waits on is NAMED: an outside party, a time window, or the lead's ruling. Not a "usage limit" (lesson 15), and not "later" without an owner, a time and a tracker.
+
+    And it stops TRYING at two points: three failed fixes for one failure (lesson 14), and a final review round (lesson 18).
+    *Why:* an idle lane went quiet twice on 2026-11-17 without saying what had happened to an approved task, and on 11-21 five lanes on serialhub sat on a quota notice for 3.5 h after the pool could serve again, because nothing there resumed them and no line said they were waiting.
 
 ## Org map — department, owner, escalation (optional)
 
@@ -971,7 +1007,10 @@ on another team's agents defeats the per-team scope. Pin `--team` on every read 
 - **Token cost is real:** managers wake hundreds of times over a night. Budget *tokens*
   alongside the +~300–600 MB RAM — this is why the cadence is event-driven with a long
   fallback, not a tight poll.
-- **Closed-loop ACK (D3):** every assignment ends `reply ACK <task>`. Escalate on a **missing
+- **A Flow-row order is read back, not ACKed:** the lane's first `flow checkpoint` on the row says the order
+  in its own words (docs/MANAGEMENT.md practice 3). An ACK proves delivery; a read-back proves understanding.
+  The Stop hook holds a lane that goes quiet on an open row (Fleet lesson 19).
+- **Closed-loop ACK (D3)**, for SendMessage assignments to teammates: every assignment ends `reply ACK <task>`. Escalate on a **missing
   ACK**, not on pane non-reaction — an idle agent may never process a queued SendMessage
   (SendMessage lands in the transcript but only processes on the target's next tool round;
   `project_sendmessage_unreliable.md`). The delivery fallback is **`poke.sh`** (types into the
@@ -1659,7 +1698,9 @@ progress** — that's what the voice line + tmux panes are for. Push message for
 
 ### Stop conditions
 
-- **Usage cap hit**: send `shutdown_request` to all agents, document cap reset in HANDOFF.md
+- **Pool exhausted** (`live_seats` 0 from the proxy, Fleet lesson 15; a "usage limit" notice alone is one seat
+  and is NOT a stop condition): hold, do not shut agents down. Write the `resetAt` the proxy names into
+  HANDOFF.md; `quota-resume.timer` resumes the panes after it.
 - **6h elapsed per agent**: hard timeout
 - **JP wakes / interrupts**: pause team, surface pending decisions
 - **Slack token expires**: skip Slack post, flag for `/mcp` re-auth
