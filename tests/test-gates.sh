@@ -378,7 +378,7 @@ fresh_resv; rm -rf "$sdir"; mkdir -p "$sdir/s-c/subagents"
 FAKE_AVAIL=60000 FAKE_SWAP_USED=0 FAKE_PGREP_COUNT=1 DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HL" \
   run_gate "$MEM_GATE" "$(printf '{"session_id":"s-c","transcript_path":"%s/s-c.jsonl","tool_name":"Agent","tool_input":{"prompt":"x","subagent_type":"morpheus"}}' "$sdir")"
 r2_2_setup
-{ head -c 70000 /dev/zero | tr '\0' 'x'; printf ' [dreamteam reservation %s]\n' "$rid"; } > "$sdir/s-c/subagents/agent-ag-c.jsonl"   # the marker past a 64 KiB line bound
+{ printf '{"type":"user","message":{"role":"user","content":"[dreamteam reservation %s]\\n' "$rid"; head -c 70000 /dev/zero | tr '\0' 'x'; printf '"}}\n'; } > "$sdir/s-c/subagents/agent-ag-c.jsonl"   # a VALID user line, the marker as its prefix, past the 64 KiB line bound
 printf '{"hook_event_name":"SubagentStop","session_id":"s-c","transcript_path":"%s/s-c.jsonl","agent_id":"ag-c","agent_type":"morpheus","agent_transcript_path":"%s/s-c/subagents/agent-ag-c.jsonl"}' "$sdir" "$sdir" | RC stop-hook >/dev/null 2>&1
 [ -e "$afile" ] && [ ! -e "$b" ] && pass "r2-2: the field is parsed from one bounded line: a marker past the 64 KiB line bound is not read (release by agent_id, b)" || fail "r2-2 bounded line: afile=$([ -e "$afile" ] && echo y || echo n) b=$([ -e "$b" ] && echo y || echo n)"
 fresh_resv; rm -rf "$sdir"; mkdir -p "$sdir/s-c/subagents"
@@ -398,6 +398,11 @@ fresh_resv
 PATH="$TMP/badod:$PATH" FAKE_AVAIL=60000 FAKE_SWAP_USED=0 FAKE_PGREP_COUNT=1 DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HL" \
   run_gate "$MEM_GATE" '{"session_id":"s-a","tool_name":"Agent","tool_input":{"prompt":"x","subagent_type":"morpheus"}}'
 [ "$GRC" -eq 2 ] && grep -qi "reservation id" "$TMP/err" && pass "r2-4: an od that fails behind a 32-char output is caught (pipefail): the gate blocks" || fail "r2-4 entropy: rc=$GRC $(head -1 "$TMP/err")"
+mkdir -p "$TMP/shortod"; printf '#!/usr/bin/env bash\nprintf " 00 11 22 33 44\\n"\n' > "$TMP/shortod/od"; chmod +x "$TMP/shortod/od"
+rm -rf "$RESV"
+PATH="$TMP/shortod:$PATH" FAKE_AVAIL=60000 FAKE_SWAP_USED=0 FAKE_PGREP_COUNT=1 DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HL" \
+  run_gate "$MEM_GATE" '{"session_id":"s-a","tool_name":"Agent","tool_input":{"prompt":"x","subagent_type":"morpheus"}}'
+[ "$GRC" -eq 2 ] && grep -qi "not 32 hex" "$TMP/err" && pass "r2-4: an od that succeeds with too few bytes is caught by the length check: the gate blocks" || fail "r2-4 short id: rc=$GRC $(head -1 "$TMP/err")"
 fresh_resv; mkdir -p "$TMP/roC"; chmod 555 "$TMP/roC"
 FAKE_AVAIL=60000 FAKE_SWAP_USED=0 FAKE_PGREP_COUNT=1 DREAMTEAM_RESERVATIONS="$TMP/roC/resv" DREAMTEAM_HOST_LOCK="$HL" \
   run_gate "$MEM_GATE" '{"session_id":"s-a","tool_name":"Agent","tool_input":{"prompt":"x","subagent_type":"morpheus"}}'

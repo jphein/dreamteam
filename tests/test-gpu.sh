@@ -233,6 +233,10 @@ rm -rf "$rl"; mkdir -p "$rl"; printf '300 %s s-a morpheus 0 - -\n' "$((nowr + 60
 p=$(python3 "$LIB" probe-script gpu1 | DREAMTEAM_RESERVATIONS="$rl" PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^RESV,')
 o=$(DREAMTEAM_RESERVATIONS="$rl" DREAMTEAM_HOST_LOCK="$TMP/rl.lock" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$R" outstanding 2>/dev/null); orc=$?
 [ "$p" = "RESV,ERR" ] && [ "$orc" -ne 0 ] && pass "r3-3: a symlink among the entries is an error for both parsers (probe RESV,ERR, helper exit $orc)" || fail "r3-3 symlink entry: probe=[$p] helper rc=$orc"
+rm -rf "$rl" "$TMP/rl-out"; mkdir -p "$rl" "$TMP/rl-out"; printf '300 %s s-a morpheus 0 - -\n' "$((nowr + 60))" > "$TMP/rl-out/real"; ln -s "$TMP/rl-out/real" "$rl/1-1-1"
+p=$(python3 "$LIB" probe-script gpu1 | DREAMTEAM_RESERVATIONS="$rl" PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^RESV,')
+o=$(DREAMTEAM_RESERVATIONS="$rl" DREAMTEAM_HOST_LOCK="$TMP/rl.lock" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$R" outstanding 2>/dev/null); orc=$?
+[ "$p" = "RESV,ERR" ] && [ "$orc" -ne 0 ] && pass "r3-3: a symlink to a VALID record elsewhere is still an error for both (the entry itself is the rule, not its target)" || fail "r3-3 symlink to a valid record: probe=[$p] helper rc=$orc"
 # #289 r3 ruling (5): ONE validity rule, one function both parsers read: the probe script carries the helper's record
 # rule block verbatim (the probe-script output contains the same text the helper defines)
 blk=$(sed -n '/^# --- record rule begin/,/^# --- record rule end/p' "$R" | sha256sum | cut -c1-16)

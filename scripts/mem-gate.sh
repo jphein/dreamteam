@@ -133,7 +133,7 @@ NAGENTS=$(( NAGENTS + RESV_N ))                                   # reserved age
 #     updatedInput, into the spawn itself: SubagentStart sees no env and no prompt, SubagentStop sees the subagent's
 #     transcript, which is where the id comes back for an exact release. No permissionDecision is returned: the gate
 #     admits on memory, it never approves the call for the user (security review on 10d4aa7a).
-RID=$(set -o pipefail; od -An -tx1 -N16 /dev/urandom | tr -d ' \n') || invalid "cannot mint a reservation id (od on /dev/urandom failed)"   # 128 random bits, od's own status (#289 r2)
+RID=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n') || invalid "cannot mint a reservation id (od on /dev/urandom failed)"   # 128 random bits; od's own status reaches us through this script's pipefail (#289 r2)
 { [ "${#RID}" -eq 32 ] && case "$RID" in *[!0-9a-f]*) false ;; *) true ;; esac; } || invalid "cannot mint a reservation id (not 32 hex)"
 # the session's transcript directory, recorded at spawn: the stop hook reads the subagent transcript ONLY under it
 TPATH="$(printf '%s' "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null || true)"
