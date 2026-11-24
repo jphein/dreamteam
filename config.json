@@ -91,6 +91,13 @@
     },
     "_notes": "scripts/lane-slice.sh: one user slice, lanes.slice, that every lane session and listed gate unit runs under (Flow row 7e039111). enabled=false here: a host opts in through its overlay config.<host>.json, which must also set memoryHigh from that host's own measured numbers. cpuWeight / ioWeight: the slice's share against everything else (100 is the default share). memoryHigh / memorySwapMax: the slice's limits; empty = not set. units: user units that are gates or batch timers, each given a Slice=lanes.slice drop-in. exclude: tmux sessions that are never lanes. lead: the lead's session names: never a lane, and moved OUT of the slice on every attach if found inside. perLane: each lane's OWN budget, set on its lane-<session>.scope (memoryHigh, memorySwapMax; empty = not set). What this delivers by itself: placement, CPUWeight and the memory limits. IOWeight is set too but is real only where io.cost is on for the device and the io controller is delegated to the user manager; both are root's and are not part of this change. Nothing here runs as root, and nothing here protects the lead."
   },
+  "laneStyle": {
+    "enabled": true,
+    "lanes": [],
+    "lead": [],
+    "neverHosts": ["katana"],
+    "_notes": "scripts/lane-style-hook.sh (SessionStart): a LANE session is given the token-saving output style output-styles/lane.md as context at every start, resume, clear and compact. It is context injection repeated per event, not an outputStyle setting. lanes: the EXACT tmux session names that are lanes, no patterns. It ships EMPTY: each lane host names its lanes in its own overlay config.<host>.json, so a session nobody listed (one the owner opens and types in) is never styled. lead: more lead names, never styled; spire, $DREAMTEAM_LEAD_SESSION and the session recorded in lead.session are refused by the code whatever this says. neverHosts: hosts where nobody is styled; katana is refused by the code as well. enabled=false switches it off. Flow row d1a1c56a."
+  },
   "org": {
     "agentsCatalog": "~/Projects/lexicon.realm.watch/catalog/agents.yaml",
     "threeChannelOwners": [

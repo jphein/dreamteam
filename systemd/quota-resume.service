@@ -2,6 +2,11 @@
 Description=dreamteam: resume Claude panes stalled on a pool-quota error once the reset time has passed
 Documentation=file://%h/Projects/dreamteam/docs/CHECKS.md
 
+# A USER unit, for the user whose tmux server holds the lanes. The script calls `tmux -S <socket>` every time:
+# the default socket of this user, or the one in $QUOTA_RESUME_TMUX_SOCKET. That variable is never set here: when
+# the lanes are on another socket, `scripts/quota-resume-ctl.sh install` writes it into
+# quota-resume.service.d/10-tmux-socket.conf, after proving that a process started by this manager lists the
+# same panes on that socket as the installing shell does.
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/python3 %h/Projects/dreamteam/scripts/quota_resume.py
