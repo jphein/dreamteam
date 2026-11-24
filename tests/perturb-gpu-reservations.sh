@@ -45,6 +45,12 @@ MUT=(
   'tombstone-dropped@scripts/reservation.sh@s/    if expired; then mv -f -- "\$f" "\$f.expired" || return 1; fi/    if expired; then rm -f -- "$f"; fi/@tests/test-gates.sh'
   'tombstone-deleted-before-append@scripts/reservation.sh@s/^        if printf '"'"'%s late start:/        rm -f -- "$f"; if printf '"'"'%s late start:/@tests/test-gates.sh'
   'leading-zero-accepted@scripts/reservation.sh@s/^valid() { case "\${1:-}" in '"'"''"'"'|\*\[!0-9\]\*|0\[0-9\]\*) return 1 ;; esac;/valid() { case "${1:-}" in '"'"''"'"'|*[!0-9]*) return 1 ;; esac;/@tests/test-gates.sh'
+  'stop-ignores-id@scripts/reservation.sh@s/^      \[ "\$id" != - \] \&\& \[ "\$7" = "\$id" \] \&\& byid="\$1"$/      true/@tests/test-gates.sh'
+  'tombstones-read-after-scan@scripts/reservation.sh@0,/^    late_start "\$ses" "\$typ" "\$ag"      # tombstones BEFORE/s//    true   # tombstones BEFORE/@tests/test-gates.sh'
+  'eacces-as-never-existed@scripts/reservation.sh@s/^  echo "reservation: cannot reach \$DIR: \$st" >\&2; return 1$/  return 2/@tests/test-gates.sh'
+  'probe-eacces-as-zero@scripts/lib/gpu_fleet.py@s/else case "\$dst" in \*"No such file or directory"\*) : ;; \*) ok=0 ;; esac; fi$/else :; fi/@tests/test-gpu.sh'
+  'id-not-stamped@scripts/mem-gate.sh@s/\.prompt = ("\[dreamteam reservation " + \$id + "\]\\n" + (\.prompt \/\/ ""))/.prompt = (.prompt \/\/ "")/@tests/test-gates.sh'
+  'permission-decision-added@scripts/mem-gate.sh@s/{hookSpecificOutput: {hookEventName: "PreToolUse",$/{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "allow",/@tests/test-gates.sh'
   'token-not-sanitised@scripts/reservation.sh@s/^san() { local s; s=\$(printf .*$/san() { printf "%s" "${1:--}"; }/@tests/test-gates.sh'
 )
 n=0; bad=0

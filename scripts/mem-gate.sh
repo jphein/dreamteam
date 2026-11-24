@@ -129,5 +129,13 @@ NAGENTS=$(( NAGENTS + RESV_N ))                                   # reserved age
 #     sees this lane's budget before its process exists. The lane's SubagentStart marks it started (hooks.json) and its
 #     SubagentStop releases it; unstarted, it expires in 90 s (scripts/reservation.sh LIFECYCLE). Cannot write it →
 #     BLOCK: an unreserved start is the race this closes.
-bash "$RSV" add "$PER_AGENT" 90 "$SESSION" "$ATYPE" --locked >/dev/null || invalid "cannot write the lane reservation (scripts/reservation.sh beside this gate)"
+#     The per-spawn id (PR B of #256) goes into the reservation and, as the first line of the Agent prompt through
+#     updatedInput, into the spawn itself: SubagentStart sees no env and no prompt, SubagentStop sees the subagent's
+#     transcript, which is where the id comes back for an exact release. No permissionDecision is returned: the gate
+#     admits on memory, it never approves the call for the user (security review on 10d4aa7a).
+RID="r-$$-$(date +%s%N)-$RANDOM"
+bash "$RSV" add "$PER_AGENT" 90 "$SESSION" "$ATYPE" --id "$RID" --locked >/dev/null || invalid "cannot write the lane reservation (scripts/reservation.sh beside this gate)"
+printf '%s' "$INPUT" | jq -c --arg id "$RID" '{hookSpecificOutput: {hookEventName: "PreToolUse",
+  updatedInput: (.tool_input | .prompt = ("[dreamteam reservation " + $id + "]\n" + (.prompt // "")))}}' 2>/dev/null \
+  || invalid "cannot stamp the reservation id into the spawn (jq on the hook input failed)"
 exit 0

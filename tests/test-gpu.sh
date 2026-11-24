@@ -211,6 +211,12 @@ both "garbage" ERR "garbage"
 both "700 $((nowr + 60)) s-a morpheus 0" 700 "a valid unstarted record"
 both "300 $((nowr - 5)) s-a morpheus $((nowr - 10))" 300 "a started record past its expiry (counts until SubagentStop)"
 both "300 $((nowr - 5)) s-a morpheus 0" 0 "an expired unstarted record (counts nothing in both)"
+# PR B item B3: a reservations directory behind an unreadable parent is EACCES, not ENOENT: RESV,ERR, never a zero
+mkdir -p "$h/noaccess/resv"; chmod 000 "$h/noaccess"
+resv=$(python3 "$LIB" probe-script gpu1 | DREAMTEAM_RESERVATIONS="$h/noaccess/resv" PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^RESV,')
+chmod 700 "$h/noaccess"
+check "$resv" "RESV,ERR" "sampler: a reservations directory behind an unreadable parent (EACCES) is RESV,ERR, not RESV,OK,0 (PR B)"
+both "300 $((nowr + 60)) s-a morpheus 0 r-1 ag-1" 300 "a seven-field record (id and agent, PR B) counts in both"
 printf '300 %s s-a morpheus %s\n' "$((nowe - 5))" "$((nowe - 10))" > "$rd/16-7"       # started, past its expiry: still counted
 resv=$(python3 "$LIB" probe-script gpu1 | HOME="$h" DREAMTEAM_RESERVATIONS= PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^RESV,')
 check "$resv" "RESV,OK,1300" "sampler: a STARTED reservation past its expiry still counts (1000 + 300): released by SubagentStop, not by time (r4 item 2)"
