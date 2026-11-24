@@ -44,7 +44,25 @@ result is checked. A refused key stops the sequence and is reported in the line;
 The line names EVERY walled pane. With no tmux server it is ok (a host without lanes) unless claude processes of
 this user run here: then it warns that the timer is looking at the wrong user or socket.
 
-Seams: QUOTA_RESUME_STATE_DIR (state and log; default beside this file), DREAMTEAM_CHECKS_DIR, DREAMTEAM_CHECK_HOST.
+ROUND 2 of that review (7125633596):
+- WORKING IS LOOKED FOR OVER THE WHOLE CAPTURE. In the live area (after the stall's first line, the input box, and
+  everything BELOW the box, where Claude Code draws "esc to interrupt" and the spinner's footer) a marker means the
+  agent works: the pane is not walled. ABOVE the stall it is history, and this script cannot tell a quoted marker
+  from a real one, so it does not type: the pane is named "(a working marker is on screen above the stall…)".
+- A TURN'S IDENTITY IS NOT ITS TEXT. The key is the pane plus a hash of everything from the PREVIOUS output block
+  down to the input box, and the message this script types carries the time ("… [14:03:07]"). After a resume the
+  screen reads: old stall, our stamped message, new stall. So a second failover turn with the very same answer is
+  a new turn (it waits its 120 s and comes under the hourly allowance), where it used to be "resumed once
+  already" for ever. A pane still showing the SAME turn stays "resumed once already".
+- THE TMUX SOCKET IS EXPLICIT. Every tmux call is `tmux -S <socket>`: $QUOTA_RESUME_TMUX_SOCKET, else the default
+  socket of this user (/tmp/tmux-<uid>/default). Nothing is left to what the calling environment happens to hold
+  (TMUX, TMUX_TMPDIR): a user service and a login shell then reach the same server or the run says which socket
+  had none. `quota-resume-ctl.sh install` finds the lanes' socket, writes it into a drop-in when it is not the
+  default, and refuses to enable the timer unless a process started BY THE USER MANAGER lists the same panes.
+  One timer watches one socket; lanes on a second server need a second instance.
+
+Seams: QUOTA_RESUME_STATE_DIR (state and log; default beside this file), DREAMTEAM_CHECKS_DIR, DREAMTEAM_CHECK_HOST,
+QUOTA_RESUME_TMUX_SOCKET.
 A fixture pane is never typed into: the run goes through every decision and logs what it would have typed.
 """
 import hashlib, json, os, re, socket, subprocess, sys, time
@@ -65,6 +83,9 @@ RESET = re.compile(r"resets in (?=\d)(?:(\d+)h\s*)?(?:(\d+)m\s*)?(?:(\d+)s)?")
 WORKING = re.compile(r"esc to interrupt|↓ [\d.]+k? tokens|^[✢✻✶✳✽]\s\S+…\s*\(")
 SGR = re.compile(r"\x1b\[[0-9;]*m")
 BLANKISH = re.compile(r"^[\s│─┃┆┊╎┊]*$")   # whitespace or leftover split borders only
+
+TMUX_SOCKET = os.environ.get("QUOTA_RESUME_TMUX_SOCKET") or f"/tmp/tmux-{os.getuid()}/default"
+TMUX = ["tmux", "-S", TMUX_SOCKET]        # the ONE way tmux is called here: always this socket, never a guess
 
 DRY = "--dry-run" in sys.argv
 FIXTURES = sys.argv[sys.argv.index("--fixture") + 1:] if "--fixture" in sys.argv else []
@@ -145,7 +166,7 @@ def panes():
             yield os.path.basename(f), "fixture", open(f, encoding="utf-8", errors="replace").read()
         return
     try:
-        r = subprocess.run(["tmux", "list-panes", "-a", "-F", "#{pane_id} #{session_name} #{pane_current_command}"],
+        r = subprocess.run([*TMUX, "list-panes", "-a", "-F", "#{pane_id} #{session_name} #{pane_current_command}"],
                            capture_output=True, text=True, timeout=20)
     except (OSError, subprocess.SubprocessError) as e:
         raise RuntimeError(f"tmux: {type(e).__name__}")
@@ -159,7 +180,7 @@ def panes():
         if line.count(" ") >= 2:
             pid, sess, cmd = line.split(" ", 2)
             NAMES[pid] = sess
-            yield pid, cmd, sh("tmux", "capture-pane", "-e", "-p", "-t", pid)
+            yield pid, cmd, sh(*TMUX, "capture-pane", "-e", "-p", "-t", pid)
 
 
 
@@ -213,8 +234,10 @@ def reset_wait(text):
 
 def look(raw):
     """What one capture of a pane shows. None when it is not a Claude Code pane at a prompt; else a dict:
-    kind 'wall' | 'failover' | None (no stall) · working · dialog · typed (text in the box) · collapsed (the
-    latest output block as one line)."""
+    kind 'wall' | 'failover' | None (no stall) · working (a marker in the live area: the stall block after its
+    first line, the box, and everything BELOW the box) · above (a marker anywhere above the stall: history, or a
+    quote; not judged, so not typed into) · dialog · typed (text in the box) · collapsed (the latest output block
+    as one line) · context (from the PREVIOUS output block down to the box, as one line: the turn's identity)."""
     raw_lines = raw.split("\n")
     plain_lines = [SGR.sub("", l) for l in raw_lines]
     keep = [i for i, l in enumerate(plain_lines) if not BLANKISH.match(l)]
@@ -228,13 +251,16 @@ def look(raw):
     bullets = [i for i in range(box) if lines[i].lstrip().startswith("●")]
     block = lines[bullets[-1]:box] if bullets else []
     collapsed = " ".join(" ".join(block).split())
+    start = bullets[-1] if bullets else box
+    context = " ".join(" ".join(lines[(bullets[-2] if len(bullets) > 1 else 0):box]).split())
     kind = None
     if block and FAILOVER.search(collapsed):
         kind = "failover"
     elif block and ERR.search(collapsed):
         kind = "wall"
-    return {"kind": kind, "collapsed": collapsed,
-            "working": any(WORKING.search(l) for l in block[1:]),
+    return {"kind": kind, "collapsed": collapsed, "context": context,
+            "working": any(WORKING.search(l) for l in lines[start + 1:]),
+            "above": any(WORKING.search(l) for l in lines[:start]),
             "dialog": "Do you want" in text or "Enter to select" in text or "Enter to confirm" in text,
             "typed": typed_text(raw_lines[keep[box]])}
 
@@ -244,7 +270,7 @@ def capture(pid):
     if FIXTURES:
         f = next((x for x in FIXTURES if os.path.basename(x) == pid), None)
         return open(f, encoding="utf-8", errors="replace").read() if f else ""
-    return sh("tmux", "capture-pane", "-e", "-p", "-t", pid)
+    return sh(*TMUX, "capture-pane", "-e", "-p", "-t", pid)
 
 
 def keys(pid, *args):
@@ -252,7 +278,7 @@ def keys(pid, *args):
     if FIXTURES:
         return True
     try:
-        return subprocess.run(["tmux", "send-keys", "-t", pid, *args], capture_output=True, timeout=20).returncode == 0
+        return subprocess.run([*TMUX, "send-keys", "-t", pid, *args], capture_output=True, timeout=20).returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
 
@@ -286,6 +312,10 @@ for pid, cmd, raw in all_panes:
     if v["working"]:
         if DRY: print(f"skip {pid}: working again")
         continue   # the agent is already working again
+    if v["above"]:
+        if DRY: print(f"skip {pid}: a working marker above the stall")
+        walled.append((name, kind + "a working marker is on screen above the stall: not typed into"))
+        continue
     if v["dialog"]:
         if DRY: print(f"skip {pid}: dialog on screen")
         walled.append((name, kind + "a dialog is open"))
@@ -299,7 +329,8 @@ for pid, cmd, raw in all_panes:
     wait = None if failover else reset_wait(collapsed)
     # a quota notice names its own reset, and gets 30 s of grace on top; a failover turn names none: 120 s, exactly
     due = (FAILOVER_WAIT if failover else (300 if wait is None else wait) + 30)
-    key = pid + ":" + hashlib.sha1(collapsed.encode()).hexdigest()[:12]
+    # THE TURN, not its text: the pane and everything from the previous output block to the box (see the docstring)
+    key = pid + ":" + hashlib.sha1(v["context"].encode()).hexdigest()[:12]
     seen_now.add(key)
     first = state.get(key, {}).get("first", now)
     done = state.get(key, {}).get("done", False)
@@ -308,7 +339,7 @@ for pid, cmd, raw in all_panes:
         print(f"match {pid} ({cmd}): wait={due - (0 if failover else 30)}s done={done} due_in={int(first + due - now)}s serves={proxy_serves()}")
         continue
     if done:
-        walled.append((name, kind + "resumed once already, still on the notice"))
+        walled.append((name, kind + "resumed once already, still on the same turn"))
         continue
     if now < first + due:
         walled.append((name, kind + f"waits {int(first + due - now)} s" + ("" if failover else " for the reset")))
@@ -328,14 +359,16 @@ for pid, cmd, raw in all_panes:
     #    call: someone may have typed, a dialog may have opened, the agent may be working. Only a pane that still
     #    shows the SAME stall, an empty box, no dialog and no work gets a key.
     again = look(capture(pid))
-    if again is None or again["kind"] != v["kind"] or again["collapsed"] != collapsed or again["working"] or again["dialog"] or again["typed"]:
+    if (again is None or again["kind"] != v["kind"] or again["collapsed"] != collapsed or again["context"] != v["context"]
+            or again["working"] or again["above"] or again["dialog"] or again["typed"]):
         log(f"skip {pid}: the pane changed between the first look and the send; no key sent")
         walled.append((name, kind + "changed while being looked at: left alone, looked at again next run"))
         continue
     # 3. The keys, each one checked. Ctrl-U (a prompt that looked empty), the text, Enter. A key tmux refused
     #    stops the sequence, is reported, and is NOT recorded as a resume.
+    #    The message ends with the time: it is what makes the NEXT turn's context differ from this one's.
     message = ("continue (auto-resume: your last turn was served by the local failover model and did nothing; a seat serves again)"
-               if failover else "continue (jp-ab auto-resume after quota reset)")
+               if failover else "continue (jp-ab auto-resume after quota reset)") + time.strftime(" [%H:%M:%S]", time.localtime(now))
     failed = None
     if not keys(pid, "C-u"):
         failed = "the clearing key was refused: nothing typed"
@@ -354,6 +387,8 @@ for pid, cmd, raw in all_panes:
         state[fo_key] = recent + [now]
     walled.append((name, kind + "resumed"))
     log(f"resumed {pid} ({cmd}) after {'a failover turn' if failover else 'quota error'}, waited {int(now-first)}s")
+if DRY:
+    print(f"dry-run: {read} panes read via {TMUX_SOCKET}" + (" (no server on that socket)" if NO_SERVER else ""))
 if not DRY:
     state = {k: v for k, v in state.items() if k in seen_now or (k.startswith("_failover:") and any(t > now - 3600 for t in v))}
     json.dump(state, open(STATE, "w"))
@@ -361,6 +396,6 @@ if not DRY:
         # EVERY walled pane is named, with its reason: the line exists so that none of them sits unseen
         check_line("warn", f"{read} panes read, {len(walled)} walled: " + ", ".join(f"{n} ({why})" for n, why in walled))
     elif read == 0 and NO_SERVER and claude_running():
-        check_line("warn", "no tmux server for this user, yet claude processes run here: this timer runs as the wrong user or on the wrong socket, and sees no lane")
+        check_line("warn", f"no tmux server for this user at {TMUX_SOCKET}, yet claude processes run here: this timer runs as the wrong user or on the wrong socket, and sees no lane (quota-resume-ctl.sh install sets the socket)")
     else:
         check_line("ok", f"{read} panes read, 0 walled")
