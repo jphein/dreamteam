@@ -43,7 +43,8 @@ dreamteam/
 │   ├── cleanup-marker.sh          SessionEnd — clears the active marker (clean exit)
 │   ├── mem-budget.sh              shared budget calculator (also /dreamteam-status)
 │   ├── launch-dreamteam.sh        systemd-scope + tmux -L isolated launcher
-│   └── tmux-layout.sh             move agent panes into their own window
+│   ├── tmux-layout.sh             move agent panes into their own window
+│   └── lane-style.sh              wire the lane output style for the sessions started in one directory, and undo it
 ├── commands/
 │   ├── dreamteam.md               /dreamteam — guarded launch
 │   ├── dreamteam-status.md        /dreamteam-status — budget + footprint snapshot
@@ -51,6 +52,8 @@ dreamteam/
 ├── agents/                        named dream-agent types (luna, morpheus, lucid, nebula)
 ├── workflows/                     saved Workflow scripts (merge-cascade, overnight, review-sweep)
 ├── templates/                     Artifact dashboard HTML template
+├── output-styles/lane.md          the token-saving output style for lanes (selected as dreamteam:lane)
+├── config/lane.settings.json      the two settings that wire it for one session (claude --settings <file>)
 ├── skills/dreamteam/SKILL.md      the existing skill (moved here verbatim + §3 prose adds)
 └── state/                         runtime: active marker, HANDOFF.md, dreamteam.log
 ```
@@ -72,6 +75,24 @@ external tools (guildmaster, dashboards) shell out to them and parse the result.
 JSON shape is a **frozen, versioned contract**, not an internal detail free to drift:
 see [`docs/json-contract.md`](docs/json-contract.md) for every field, type, enum, and
 the empty/exit-code guarantees — locked against drift by `tests/test-json-contract.sh`.
+
+## Output for lanes
+
+A lane's reader is the lead, reading many lanes at once. `output-styles/lane.md` is an output style for that
+reader: the first line is the bottom line, then **Changed / Checked / Evidence / Not verified** (only the parts
+that have content), twelve lines at most, no restating and no closing offers. A failure, anything needed to act
+safely, and anything asked for in full keep their length.
+
+It is opt-in per lane and never forced on the lead's or the owner's sessions:
+
+    claude --settings "$CLAUDE_PLUGIN_ROOT/config/lane.settings.json" …      # one session, at launch
+    scripts/lane-style.sh on  <the lane's directory>                          # every session started there
+    scripts/lane-style.sh off <the lane's directory>                          # back to what it was
+    scripts/lane-style.sh status <dir>
+
+Both set `outputStyle` to `dreamteam:lane` and switch the `explanatory-output-style` plugin off for that session
+(where it is enabled, that plugin is what tells a session to write Insight blocks). They take effect at the next
+session start; in a running session, `/output-style dreamteam:lane` switches the style from the next message.
 
 ## Fleet lessons
 
