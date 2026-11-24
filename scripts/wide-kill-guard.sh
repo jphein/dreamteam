@@ -27,7 +27,8 @@
 #
 # A SPEED BUMP, NOT A BOUNDARY: it matches command text, so a kill hidden in a script file passes and a
 # command that only prints such a line is blocked (except a heredoc body that ends as data, #191's reader).
-# FAIL OPEN: a malformed payload, no jq, no python3, or the judge erroring all allow.
+# FAIL OPEN only where nothing can be read at all: a malformed payload, no jq. FAIL CLOSED once the text is
+# known to name a killer or a listing: no python3, or a detector that errors, is a block with one line.
 # `timeout` in hooks.json is SECONDS.
 set -uo pipefail
 ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -47,9 +48,19 @@ printf '%s' "$CMD" | grep -Eq '(pkill|killall|pgrep|pidof|(^|[^[:alnum:]_.-])ps[
 ENFORCE=$(jq -r 'if .widekill.enforce == false then "false" else "true" end' "$CFG" 2>/dev/null || echo true)
 [ "$ENFORCE" = "false" ] && exit 0
 
-command -v python3 >/dev/null 2>&1 || exit 0
+# FAIL CLOSED from here (Sen, xreview #279 r1; as no-poll-guard does): this text names a killer or a listing, and
+# if it cannot be judged it is not run. The kill switch above is the only bypass.
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "🛑 DREAMTEAM WIDE-KILL GUARD — python3 is missing, so this kill or listing command cannot be judged: blocked (kill switch: config widekill.enforce=false)" >&2
+  exit 2
+fi
 printf '%s' "$CMD" | python3 -I "$ROOT/scripts/lib/widekill_text.py" 2>/dev/null
-[ "$?" -eq 0 ] || exit 0                               # 1 = not a wide kill; anything else = the judge failed
+JRC=$?
+[ "$JRC" -eq 1 ] && exit 0                             # 1 = judged: not a wide kill
+if [ "$JRC" -ne 0 ]; then
+  echo "🛑 DREAMTEAM WIDE-KILL GUARD — the detector failed (exit $JRC), so this kill or listing command cannot be judged: blocked (kill switch: config widekill.enforce=false)" >&2
+  exit 2
+fi
 
 {
   echo "🛑 DREAMTEAM WIDE-KILL GUARD — a host-wide kill of a test runner, blocked"

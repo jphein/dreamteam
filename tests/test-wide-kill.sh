@@ -106,6 +106,19 @@ deny "a listing piped to while read, the variable then killed" 'pgrep -f pytest 
 deny "a variable bound to the listing, killed two statements later" 'P=$(pgrep -f "make test" | head -1); sleep 1; echo x; kill -TERM ${P}'
 # xreview #279 r3
 deny "pkill behind sudo" 'sudo pkill -f pytest'
+# Sen, xreview #279 r1 (2): a wrapper's own options and values are skipped, as gpu_detect skips a runner's
+deny "sudo -n pkill" 'sudo -n pkill -f pytest'
+deny "sudo -u <user> pkill" 'sudo -u jp pkill -f pytest'
+deny "env -i pkill" 'env -i pkill -f pytest'
+deny "env -i with assignments, then pkill" 'env -i PATH=/usr/bin LC_ALL=C pkill -f pytest'
+deny "nice -n 10 pkill" 'nice -n 10 pkill -f "make test"'
+deny "ionice -c3 pkill" 'ionice -c3 pkill -f pytest'
+deny "ionice -c 3 -n 7 killall" 'ionice -c 3 -n 7 killall pytest'
+deny "timeout 5 pkill" 'timeout 5 pkill -f pytest'
+deny "timeout -k 1 5s pkill" 'timeout -k 1 5s pkill -f pytest'
+deny "wrappers stacked: sudo -n nice -n 5 timeout 10 pkill" 'sudo -n nice -n 5 timeout 10 pkill -f pytest'
+deny "a listing behind a wrapper feeds kill" 'sudo -n pgrep -f pytest | xargs -r sudo kill'
+deny "kill of a substitution whose listing is behind a wrapper" 'kill $(sudo -n pgrep -f pytest)'
 deny "pkill behind an assignment" 'LC_ALL=C pkill -f pytest'
 deny "pkill after then" 'if true; then pkill -f pytest; fi'
 deny "a variable bound to the listing, killed after &&" 'P=$(pgrep -f pytest) && kill $P'
@@ -152,6 +165,9 @@ allow "an attached narrowing operand" 'pkill -P$$ -f pytest'
 allow "a listing && a kill of the captured pid: sequencing is not a feed" 'ps -eo pid,args | grep pytest && kill "$PID"'
 allow "a listing || a kill of the captured pid" 'pgrep -f pytest > /dev/null || kill "$PID"'
 allow "killer and runner both as FILE arguments" 'ls -l /usr/bin/pkill /usr/bin/pytest'
+allow "the same behind a wrapper: sudo runs ls, pkill is ls's argument" 'sudo -n ls -l /usr/bin/pkill /usr/bin/pytest'
+allow "timeout runs a suite; a killer's name is only its argument" 'timeout 600 make test ARGS=pkill'
+allow "a wrapper with options, then a server pkill" 'sudo -n pkill -f map_server.py; make test'
 allow "a runner named only in a trailing comment (pkill)" 'pkill -f server.py # restart before pytest'
 allow "a runner named only in a trailing comment (kill of a listing)" 'kill $(pgrep -f server.py) # restart before pytest'
 allow "a runner after the substitution's closing ), not in its body" 'kill $(pgrep -f server.py) && make test'
@@ -184,17 +200,40 @@ run Bash 'pkill -f pytest' "$TMP/absent.json"
 if blocked; then pass "a MISSING config still enforces"; else fail "missing config disabled the guard — exit $GRC"; fi
 run Monitor 'pkill -f pytest'
 if [ "$GRC" -eq 0 ]; then pass "only Bash is judged (Monitor passes)"; else fail "Monitor blocked — exit $GRC"; fi
+# WHO: every Bash session, the lead's too (Sen, xreview #279 r1 note 4). There is no "non-lane → allowed" control in
+# this suite on purpose: unlike the no-poll guard, no role exists for which ending another lane's suite is the job.
+# Every run above is made with NO identity in the environment, which is the lead's own case, and it is blocked.
+GRC=0; jq -nc '{tool_name:"Bash",tool_input:{command:"pkill -f pytest"}}' | env -u DREAMTEAM_AGENT_ID -u ASK_WHO -u TMUX DREAMTEAM_CONFIG="$TMP/on.json" bash "$GUARD" 2>/dev/null || GRC=$?
+if [ "$GRC" -eq 2 ]; then pass "a session with no lane identity (the lead) is blocked like any other"; else fail "no-identity session → exit $GRC"; fi
+GRC=0; jq -nc '{tool_name:"Bash",tool_input:{command:"pkill -f pytest"}}' | DREAMTEAM_AGENT_ID="morpheus-lane@team" DREAMTEAM_CONFIG="$TMP/on.json" bash "$GUARD" 2>/dev/null || GRC=$?
+if [ "$GRC" -eq 2 ]; then pass "…and so is a teammate"; else fail "teammate → exit $GRC"; fi
+
+# TIMING (note 5; the other gates hold the same line): under 200 ms on the fixture, median of 7, for the call that
+# leaves at the first test, for one that reaches the detector and passes, and for one that is blocked.
+med() { local i t0 t1 a=(); for i in 1 2 3 4 5 6 7; do t0=$(date +%s%N); jq -nc --arg c "$1" '{tool_name:"Bash",tool_input:{command:$c}}' | DREAMTEAM_CONFIG="$TMP/on.json" bash "$GUARD" > /dev/null 2>&1; t1=$(date +%s%N); a+=($(( (t1 - t0) / 1000000 ))); done; printf '%s\n' "${a[@]}" | sort -n | sed -n 4p; }
+for c in 'git status --short' 'pkill -f map_server.py; make test' 'for p in $(ps -eo pid,args | grep -E "make test|pytest" | awk "{print \$1}"); do kill $p; done'; do
+  m=$(med "$c"); if [ "$m" -lt 200 ]; then pass "timing: ${m} ms median (< 200) for: ${c:0:38}"; else fail "timing: ${m} ms for: ${c:0:38}"; fi
+done
 GRC=0; printf 'not json but kill' | DREAMTEAM_CONFIG="$TMP/on.json" bash "$GUARD" 2>/dev/null || GRC=$?
 if [ "$GRC" -eq 0 ]; then pass "malformed stdin fails open"; else fail "malformed stdin → exit $GRC"; fi
-# the judge failing, or no python3 at all, allows (a speed bump must never brick an agent)
+# FAIL CLOSED (Sen, xreview #279 r1): a text that names a killer and cannot be judged is blocked, with ONE line;
+# the kill switch is the only bypass. A command with no killer or listing in it never reaches the judge.
 mkdir -p "$TMP/badpy" "$TMP/nopy"
 printf '#!/bin/sh\nexit 3\n' > "$TMP/badpy/python3"; chmod +x "$TMP/badpy/python3"
 GRC=0; jq -nc '{tool_name:"Bash",tool_input:{command:"pkill -f pytest"}}' | PATH="$TMP/badpy:$PATH" DREAMTEAM_CONFIG="$TMP/on.json" bash "$GUARD" 2>/dev/null || GRC=$?
-if [ "$GRC" -eq 0 ]; then pass "a judge that errors (python3 exit 3) fails open"; else fail "erroring judge → exit $GRC"; fi
+GRC=0; jq -nc '{tool_name:"Bash",tool_input:{command:"pkill -f pytest"}}' | PATH="$TMP/badpy:$PATH" DREAMTEAM_CONFIG="$TMP/on.json" bash "$GUARD" 2>"$TMP/err" || GRC=$?
+if [ "$GRC" -eq 2 ] && [ "$(wc -l < "$TMP/err")" -eq 1 ] && grep -q 'detector failed (exit 3)' "$TMP/err"; then pass "a detector that errors (exit 3) is a BLOCK, with one line"; else fail "erroring judge → exit $GRC: $(cat "$TMP/err")"; fi
+GRC=0; jq -nc '{tool_name:"Bash",tool_input:{command:"pkill -f server.py"}}' | PATH="$TMP/badpy:$PATH" DREAMTEAM_CONFIG="$TMP/on.json" bash "$GUARD" 2>/dev/null || GRC=$?
+if [ "$GRC" -eq 2 ]; then pass "…also for a harmless pkill: unjudged is not run"; else fail "erroring judge, harmless pkill → exit $GRC"; fi
+GRC=0; jq -nc '{tool_name:"Bash",tool_input:{command:"pkill -f pytest"}}' | PATH="$TMP/badpy:$PATH" DREAMTEAM_CONFIG="$TMP/off.json" bash "$GUARD" 2>/dev/null || GRC=$?
+if [ "$GRC" -eq 0 ]; then pass "the kill switch is the bypass for a failing detector"; else fail "kill switch with a failing detector → exit $GRC"; fi
+GRC=0; jq -nc '{tool_name:"Bash",tool_input:{command:"ls -la; echo skill"}}' | PATH="$TMP/badpy:$PATH" DREAMTEAM_CONFIG="$TMP/on.json" bash "$GUARD" 2>/dev/null || GRC=$?
+if [ "$GRC" -eq 0 ]; then pass "a command with no killer or listing never reaches the detector, failing or not"; else fail "ordinary command with a failing detector → exit $GRC"; fi
 for t in jq grep cat bash dirname; do ln -s "$(command -v "$t")" "$TMP/nopy/$t" 2>/dev/null; done
 GRC=0; jq -nc '{tool_name:"Bash",tool_input:{command:"pkill -f pytest"}}' | PATH="$TMP/nopy" DREAMTEAM_CONFIG="$TMP/on.json" "$(command -v bash)" "$GUARD" 2>/dev/null || GRC=$?
-if [ "$GRC" -eq 0 ]; then pass "no python3 on PATH fails open"; else fail "no python3 → exit $GRC"; fi
-# the judge's own exit codes, so "fails open" above is not hiding a judge that never says yes
+GRC=0; jq -nc '{tool_name:"Bash",tool_input:{command:"pkill -f pytest"}}' | PATH="$TMP/nopy" DREAMTEAM_CONFIG="$TMP/on.json" "$(command -v bash)" "$GUARD" 2>"$TMP/err" || GRC=$?
+if [ "$GRC" -eq 2 ] && [ "$(wc -l < "$TMP/err")" -eq 1 ] && grep -q 'python3 is missing' "$TMP/err"; then pass "no python3 on PATH is a BLOCK, with one line"; else fail "no python3 → exit $GRC: $(cat "$TMP/err")"; fi
+# the judge's own exit codes: 0 and 1 are verdicts, anything else is the failure blocked above
 printf '%s' 'pkill -f pytest' | python3 -I "$ROOT/scripts/lib/widekill_text.py"; rc=$?
 printf '%s' 'pkill -f server.py' | python3 -I "$ROOT/scripts/lib/widekill_text.py"; rc2=$?
 if [ "$rc" -eq 0 ] && [ "$rc2" -eq 1 ]; then pass "the judge: exit 0 = wide, 1 = not"; else fail "judge exits $rc / $rc2"; fi
@@ -277,9 +316,10 @@ else fail "the sibling worktree's stand-in was killed (prefix match)"; fi
 out="$(python3 -I - "$KM" <<'PY' 2>&1
 import importlib.util, sys
 spec = importlib.util.spec_from_file_location("kill_mine", sys.argv[1]); km = importlib.util.module_from_spec(spec); spec.loader.exec_module(km)
-sel = (10, "python3 -m pytest -q", "/wt/mine", 5000)          # ppid, command line, directory, start time
-cases = {"same": sel, "reparented (ppid only)": (1,) + sel[1:], "later start": sel[:3] + (5001,),
-         "other directory": sel[:2] + ("/wt/other", 5000), "other command": (10, "python3 -m pytest -x", "/wt/mine", 5000), "gone": None}
+sel = (10, "python3 -m pytest -q", "/wt/mine", 5000, "")      # ppid, command line, directory, start time, marker
+cases = {"same": sel, "reparented (ppid only)": (1,) + sel[1:], "later start": sel[:3] + (5001, ""),
+         "other directory": sel[:2] + ("/wt/other", 5000, ""), "other command": (10, "python3 -m pytest -x", "/wt/mine", 5000, ""),
+         "another marker (a different process)": sel[:4] + ("/wt/other",), "gone": None}
 bad = []
 for name, now in cases.items():
     sent, closed = [], []
@@ -293,12 +333,12 @@ if km.signal_one(4242, sel, km.signal.SIGTERM, read=lambda pid: sel, opener=no_s
     bad.append("no pidfd: returned True")
 # the real reader's start time is the kernel's: field 22 of /proc/self/stat
 me = km.read_proc(km.os.getpid()); raw = open("/proc/self/stat").read(); f22 = int(raw[raw.rindex(")") + 2:].split()[19])
-if me is None or me[3] != f22 or me[0] != km.os.getppid():
+if me is None or me[3] != f22 or me[0] != km.os.getppid() or me[4] != km.os.path.realpath(km.os.environ.get("DREAMTEAM_WORKTREE", "")) * bool(km.os.environ.get("DREAMTEAM_WORKTREE")):
     bad.append(f"read_proc: {me} vs start {f22} ppid {km.os.getppid()}")
 # the family of a descendant standing elsewhere (xreview #279 r3): pid 20 stands in the directory, 30 is its
 # child elsewhere, 40 a grandchild elsewhere through a non-matching 35; 50 is elsewhere with no such ancestor.
-procs = {20: (1, "make test", "/wt/mine", 100), 30: (20, "pytest", "/tmp/x", 110), 35: (20, "sh -c", "/tmp/x", 111),
-         40: (35, "pytest", "/tmp/y", 112), 50: (1, "pytest", "/wt/other", 113), 60: (50, "pytest", "/tmp/z", 114)}
+procs = {20: (1, "make test", "/wt/mine", 100, ""), 30: (20, "pytest", "/tmp/x", 110, ""), 35: (20, "sh -c", "/tmp/x", 111, ""),
+         40: (35, "pytest", "/tmp/y", 112, ""), 50: (1, "pytest", "/wt/other", 113, ""), 60: (50, "pytest", "/tmp/z", 114, "")}
 ch = km.descendants(procs, {30, 40, 50, 60}, {20})
 if ch != {30: [20], 40: [35, 20]}:
     bad.append(f"descendants: {ch}")
@@ -306,9 +346,9 @@ def reader(changed):
     return lambda pid: changed.get(pid, procs.get(pid))
 if not km.family_intact(40, ch[40], procs, read=reader({})):
     bad.append("an unchanged family is refused")
-for what, changed in {"the in-directory ancestor's pid was recycled (later start, another directory)": {20: (1, "make test", "/wt/other", 999)},
-                      "a middle link was recycled": {35: (7, "sh -c", "/tmp/x", 998)},
-                      "the candidate was reparented": {40: (1, "pytest", "/tmp/y", 112)},
+for what, changed in {"the in-directory ancestor's pid was recycled (later start, another directory)": {20: (1, "make test", "/wt/other", 999, "")},
+                      "a middle link was recycled": {35: (7, "sh -c", "/tmp/x", 998, "")},
+                      "the candidate was reparented": {40: (1, "pytest", "/tmp/y", 112, "")},
                       "an ancestor is gone": {20: None}}.items():
     if km.family_intact(40, ch[40], procs, read=reader(changed)):
         bad.append(f"family admitted although {what}")
@@ -319,9 +359,16 @@ rx = km.re.compile("pytest|make test")
 t, e = km.select(procs, rx, "/wt/mine", set(), read=reader({}))
 if (t, e) != ({20, 30, 40}, {50, 60}):
     bad.append(f"select, intact: {t} {e}")
-t, e = km.select(procs, rx, "/wt/mine", set(), read=reader({35: (7, "sh -c", "/tmp/x", 998)}))
+t, e = km.select(procs, rx, "/wt/mine", set(), read=reader({35: (7, "sh -c", "/tmp/x", 998, "")}))
 if (t, e) != ({20, 30}, {40, 50, 60}):
     bad.append(f"select, a recycled middle link: {t} {e}")
+# the second ownership signal: started with DREAMTEAM_WORKTREE under the directory, standing elsewhere, no ancestor
+# of ours: taken. The same with another worktree's marker, or a path that merely starts like ours: not.
+p2 = dict(procs); p2.update({70: (1, "pytest", "/tmp/q", 120, "/wt/mine"), 71: (1, "pytest", "/tmp/q", 121, "/wt/mine/sub"),
+                             72: (1, "pytest", "/tmp/q", 122, "/wt/other"), 73: (1, "pytest", "/tmp/q", 123, "/wt/mine-2"), 74: (1, "sleep", "/tmp/q", 124, "/wt/mine")})
+t, e = km.select(p2, rx, "/wt/mine", set(), read=lambda pid: p2.get(pid))
+if not ({70, 71} <= t) or t & {72, 73, 74} or not ({72, 73} <= e):
+    bad.append(f"select, markers: taken {sorted(t)} elsewhere {sorted(e)}")
 t, e = km.select(procs, rx, "/wt/mine", {30}, read=reader({}))
 if 30 in t or 30 in e:
     bad.append(f"select took or counted a spared pid: {t} {e}")
@@ -330,6 +377,24 @@ PY
 )"
 if [ "$out" = "ok" ]; then pass "a pid whose start time, directory or command changed after selection is not signalled (pid reuse); the pidfd is always closed"
 else fail "pid-reuse cases: $out"; fi
+
+# the marker on REAL processes: started with DREAMTEAM_WORKTREE=<mine>, standing in another directory, no parent of
+# ours → taken; the same started with the OTHER worktree's marker → left alone
+( cd "$ELSE" || exit 1; DREAMTEAM_WORKTREE="$MINE" setsid python3 -c 'import time; time.sleep(120)' -m "$M" marked > /dev/null 2>&1 < /dev/null & echo $! > "$TMP/marked.pid" )
+( cd "$ELSE" || exit 1; DREAMTEAM_WORKTREE="$OTHER" setsid python3 -c 'import time; time.sleep(120)' -m "$M" markedother > /dev/null 2>&1 < /dev/null & echo $! > "$TMP/markedother.pid" )
+wait_up marked; wait_up markedother
+out="$(python3 "$KM" --under "$MINE" -- "-m $M" 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && gone marked; then pass "a runner started with DREAMTEAM_WORKTREE=<this worktree> is ours although it stands elsewhere (read from /proc/<pid>/environ)"
+else fail "marked runner not taken: rc $rc, out: $out"; fi
+if alive markedother && alive other1; then pass "…and one started with another worktree's marker is not"; else fail "another worktree's marked runner was killed"; fi
+out="$(DREAMTEAM_WORKTREE="$MINE" python3 -I - "$KM" <<'PY' 2>&1
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("kill_mine", sys.argv[1]); km = importlib.util.module_from_spec(spec); spec.loader.exec_module(km)
+me = km.read_proc(os.getpid()); print("ok" if me and me[4] == os.path.realpath(os.environ["DREAMTEAM_WORKTREE"]) else f"bad {me}")
+PY
+)"
+if [ "$out" = ok ]; then pass "read_proc reports the marker a process was started with"; else fail "read_proc marker: $out"; fi
+if grep -q 'is MISSED' "$KM" && grep -q 'not a credential' "$KM"; then pass "the header states what the two signals do not prove"; else fail "kill-mine's header does not state the remaining limit"; fi
 
 # refusals and arguments
 out="$(python3 "$KM" --under "$HOME" -- "-m $M" 2>&1)"; rc=$?

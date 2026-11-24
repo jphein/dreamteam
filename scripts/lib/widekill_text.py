@@ -1,13 +1,14 @@
 """dreamteam wide-kill guard: does this command text kill a test runner BY NAME, host-wide?
 
 wide-kill-guard.sh hands the raw command on stdin. Exit 0 = yes (the guard blocks), 1 = no. Any other exit is
-an error and the guard allows: it is a speed bump against the natural one-liner, not a boundary.
+an error, and the guard blocks then too: a command it cannot judge is not run.
 
 HOW THE TEXT IS READ. Comments are dropped. Quotes are tracked. The text is cut into PIPELINES at an unquoted
 `;`, newline, `&&`, `||` or `&`: inside one pipeline data flows from left to right, between two it does not. A program is recognised only in COMMAND POSITION
 (first word, or after `|`, `(`, `{`, a backtick, an assignment, or a wrapper such as sudo, command, exec, env,
-nohup, time, xargs, do, then, else), with or without a path (`/usr/bin/pkill`). `ls -l /usr/bin/pkill` names a
-file, not a command.
+nohup, time, timeout, nice, ionice, xargs, do, then, else, whose own options and values are skipped:
+`sudo -n pkill`, `env -i pkill`, `timeout -k 1 5 pkill`), with or without a path (`/usr/bin/pkill`).
+`ls -l /usr/bin/pkill` names a file, not a command.
 
 THREE FORMS (Flow row 62d79dae; each is a command an agent wrote on serialhub or a reviewer's natural variant):
   (A) pkill / killall whose OWN arguments name a test runner. The arguments end at the first shell operator
@@ -51,8 +52,29 @@ NARROW = re.compile(r"(?:^|\s)(?:(?:-P|-g|-s|-t|-F)\s*[^\s-]"
 SELF_MATCH = re.compile(r"\[(\w)\]")
 BOUND_BEFORE = re.compile(r"(?:\bfor\s+(\w+)\s+in\s|(?:^|[\s;(])(\w+)=[\"']?(?:\$\(|`))")
 BOUND_AFTER = re.compile(r"\|\s*while\s+(?:IFS=\S*\s+)?read\s+(?:-\w+\s+)*(\w+)")
-WRAPPERS = {"sudo", "command", "exec", "env", "nohup", "time", "xargs", "builtin", "setsid", "nice", "ionice",
-            "do", "then", "else", "elif", "if", "while", "until", "!"}
+# wrapper → (its options that take a SEPARATE value, how many positional words come before its command).
+# An option not listed is a flag (`sudo -n`, `env -i`, `xargs -r`); an attached value (`-c3`, `-n10`, `-I{}`,
+# `--user=jp`) is one word and needs no entry. Shell keywords are wrappers with nothing of their own.
+WRAPPERS = {
+    "sudo": ({"-u", "-g", "-h", "-p", "-C", "-D", "-R", "-T", "-U", "-r", "-t", "--user", "--group", "--host", "--chdir"}, 0),
+    "doas": ({"-u", "-C"}, 0),
+    "env": ({"-u", "-C", "-S", "--unset", "--chdir", "--split-string"}, 0),
+    "nice": ({"-n", "--adjustment"}, 0),
+    "ionice": ({"-c", "-n", "-p", "--class", "--classdata"}, 0),
+    "timeout": ({"-k", "-s", "--kill-after", "--signal"}, 1),                  # then DURATION
+    "chrt": (set(), 1),                                                           # then PRIORITY
+    "taskset": (set(), 1),                                                        # then MASK (or -c LIST: one word still)
+    "flock": ({"-w", "--timeout", "-E", "--conflict-exit-code"}, 1),              # then the lock file
+    "stdbuf": ({"-i", "-o", "-e"}, 0),
+    "xargs": ({"-I", "-n", "-P", "-d", "-a", "-E", "-L", "-s", "--max-args", "--max-procs", "--delimiter", "--arg-file"}, 0),
+    "exec": ({"-a"}, 0),
+    "time": ({"-f", "-o", "--format", "--output"}, 0),
+    "strace": ({"-o", "-e", "-p", "-s"}, 0),
+    "watch": ({"-n", "--interval"}, 0),
+}
+for _w in ("command", "nohup", "builtin", "setsid", "do", "then", "else", "elif", "if", "while", "until", "!"):
+    WRAPPERS[_w] = (set(), 0)
+ASSIGN = re.compile(r"\w+=\S*")
 
 
 def spans(s):
@@ -135,17 +157,33 @@ def cut(s, pipelines=False):
 
 
 def command_position(s, i):
-    """Is the word starting at s[i] a command, not an argument?"""
-    j = i - 1
-    while j >= 0 and s[j] in " \t":
+    """Is the word starting at s[i] a command, not an argument?
+
+    Yes when it is the first word of its simple command, or when everything before it in that simple command is
+    assignments and WRAPPERS with their own options and values (`sudo -n`, `sudo -u jp`, `env -i A=1`,
+    `nice -n 10`, `ionice -c3`, `timeout -k 1 5`, `xargs -r`). The WRAPPERS table says which options of a wrapper
+    take a separate value and how many positional words it has before its command; any other option is a flag.
+    The first plain word that is none of these IS the command (`sudo -n ls -l /usr/bin/pkill` runs ls), and
+    anything after it is an argument. Same idea as gpu_detect's runner options."""
+    j = i
+    while j > 0 and s[j - 1] not in ";|&({\n`":
         j -= 1
-    if j < 0 or s[j] in ";|&({\n`":
-        return True
-    k = j
-    while k >= 0 and not s[k].isspace():
-        k -= 1
-    word = s[k + 1:j + 1]
-    return word in WRAPPERS or re.fullmatch(r"\w+=\S*", word) is not None
+    words = s[j:i].split()
+    takes, positional, want_value = None, 0, False       # the wrapper in force: its value options, positionals left
+    for w in words:
+        if want_value:
+            want_value = False                             # the value of the option before it
+        elif takes is not None and w.startswith("-"):
+            want_value = w in takes
+        elif takes is not None and positional > 0:
+            positional -= 1                                # timeout's DURATION, flock's file
+        elif w in WRAPPERS:
+            takes, positional = WRAPPERS[w]
+        elif ASSIGN.fullmatch(w):
+            pass                                           # FOO=1 cmd, env A=1 cmd
+        else:
+            return False                                   # a plain word: THAT is the command; ours is its argument
+    return not want_value and positional == 0
 
 
 def own_args(s, start):

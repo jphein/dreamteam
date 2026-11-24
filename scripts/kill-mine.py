@@ -12,7 +12,9 @@ WHAT IT DOES
     kill-mine.py [--under DIR] [--signal TERM|INT|HUP|KILL] [--dry-run] PATTERN
   - PATTERN is a Python regular expression searched in the process's command line (arguments joined by spaces).
   - DIR defaults to the git top level of the current directory, else the current directory.
-  - A process is taken when it is ours (same uid), matches PATTERN, and its working directory is DIR or below;
+  - A process is taken when it is ours (same uid), matches PATTERN, and EITHER its working directory is DIR or
+    below, OR it was started with DREAMTEAM_WORKTREE set to DIR or a path below it (read from
+    /proc/<pid>/environ: the environment it was STARTED with, which a later chdir does not change);
     also when it matches PATTERN and descends from a matching process standing in DIR (a test runner that
     chdir'ed into a temp dir under its `make`). That family is read a second time, link by link (parent,
     command line, directory, start time), before any signal is sent; a link that changed admits nothing.
@@ -22,6 +24,13 @@ WHAT IT DOES
   - Each signal goes through a pidfd. After the pidfd is open the process is read again, and it is signalled
     only if its START TIME, command line and directory are the ones selected: a pid reused between the look
     and the signal belongs to a process that started later, whatever its command line, and is never signalled.
+
+OWNERSHIP, and its limit. A command line carries no owner, so two signals stand in for one: where the process
+stands (cwd), and what its launcher declared (DREAMTEAM_WORKTREE; launch a suite as
+`DREAMTEAM_WORKTREE="$PWD" make test`, children inherit it). Neither is proof. A runner that chdir'ed out of
+the worktree, was started without the marker, and does not descend from a matching process still standing in
+DIR is MISSED (left running). The marker is a claim by the same user, not a credential: a process started with
+another worktree's path in it is taken as that worktree's. Both errors stay inside one user's own processes.
 
 REFUSED (exit 2): DIR that is `/`, the home directory, or any ancestor of it (that is the whole host again).
 EXIT: 0 at least one process signalled (or would be, with --dry-run) · 1 none matched under DIR · 2 refused ·
@@ -38,8 +47,8 @@ SIGNALS = {"TERM": signal.SIGTERM, "INT": signal.SIGINT, "HUP": signal.SIGHUP, "
 
 
 def read_proc(pid):
-    """(ppid, cmdline, cwd, start time in clock ticks since boot) of a live process of ours, or None.
-    A zombie has no cmdline and is skipped."""
+    """(ppid, cmdline, cwd, start time in clock ticks since boot, DREAMTEAM_WORKTREE or "") of a live process of
+    ours, or None. A zombie has no cmdline and is skipped."""
     base = f"/proc/{pid}"
     try:
         if os.stat(base).st_uid != os.getuid():
@@ -57,7 +66,15 @@ def read_proc(pid):
         return None
     if cwd.endswith(" (deleted)"):
         cwd = cwd[:-len(" (deleted)")]
-    return ppid, raw.rstrip(b"\0").replace(b"\0", b" ").decode("utf-8", "replace"), cwd, start
+    marker = ""
+    try:
+        with open(f"{base}/environ", "rb") as fh:
+            for kv in fh.read().split(b"\0"):
+                if kv.startswith(b"DREAMTEAM_WORKTREE="):
+                    marker = os.path.realpath(kv[19:].decode("utf-8", "replace")) if kv[19:] else ""
+    except OSError:
+        pass                                   # unreadable environment: no marker, the directory still counts
+    return ppid, raw.rstrip(b"\0").replace(b"\0", b" ").decode("utf-8", "replace"), cwd, start, marker
 
 
 def signal_one(pid, selected, sig, read=read_proc, opener=None, sender=None):
@@ -113,11 +130,12 @@ def family_intact(pid, chain, procs, read=read_proc):
 
 def select(procs, rx, root, spared, read=read_proc):
     """(taken, elsewhere): which of the scanned processes get the signal, and which match but are not ours.
-    Taken = matching and standing under `root`, plus matching descendants of those whose family, read again
+    Taken = matching and standing under `root` or started with DREAMTEAM_WORKTREE under it, plus matching
+    descendants of those whose family, read again
     link by link BEFORE any signal is sent (a signal changes the family, and the scan is not atomic), is
     still the one the scan saw. A chain that cannot be confirmed leaves the process alone."""
     matching = {pid for pid, info in procs.items() if pid not in spared and rx.search(info[1])}
-    direct = {pid for pid in matching if under(procs[pid][2], root)}
+    direct = {pid for pid in matching if under(procs[pid][2], root) or (procs[pid][4] and under(procs[pid][4], root))}
     chains = descendants(procs, matching - direct, direct)
     taken = direct | {pid for pid, chain in chains.items() if family_intact(pid, chain, procs, read)}
     return taken, matching - taken
