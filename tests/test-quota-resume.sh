@@ -43,4 +43,94 @@ t "the older 'resets in 42s' still reads 42 s" grep -q 'wait=42s' <<<"$(run)"
 pane 'Try again later.'
 t "a notice naming no reset waits the 300 s default" grep -q 'wait=300s' <<<"$(run)"
 
+# ── 2026-11-21 (Sen, row 55bd0a23): the CHECK line names the walled panes; a lane host runs this itself ─────────
+# Fixture names are fx-…, never a real tmux session's name: nothing here may ever reach a live lane's pane.
+# Real (not --dry-run) runs over FIXTURE panes: every decision is taken, the state and the line are written, and a
+# fixture is never typed into. State, log and line go to temp dirs through the script's seams.
+S="$T/state"; C="$T/checks"; mkdir -p "$S" "$C"
+WALL='● API Error: Server is temporarily limiting requests (not your usage limit) · No account can serve this request for claude-mythos-5-1: all 7 accounts are at their quota or rate limit.'
+mk() {  # mk <name> <reset text> <box line> [extra line before the box]
+  printf '%s\n' '● Working on it' '' "$WALL $2" '' ${4:+"$4"} '────────' "$3" '────────' > "$T/$1"
+}
+live() {  # live <fixture names…>   (env H = host name, default familiar)
+  local fx=(); for f in "$@"; do fx+=("$T/$f"); done
+  QUOTA_RESUME_QUOTA_FILE="$T/q.json" QUOTA_RESUME_STATE_DIR="$S" DREAMTEAM_CHECKS_DIR="$C" DREAMTEAM_CHECK_HOST="${H:-familiar}" \
+    python3 -I "$ROOT/scripts/quota_resume.py" --fixture "${fx[@]}" > "$T/out" 2>&1
+}
+line() { cat "$C/${1:-quota-resume}.line" 2>/dev/null; }
+seed() {  # make every wall in the state file 2 hours old, so its reset has passed
+  python3 -I -c 'import json, sys, time, glob
+for f in glob.glob(sys.argv[1] + "/quota_resume_state.*.json"):
+    d = json.load(open(f)); [v.__setitem__("first", time.time() - 7200) for v in d.values()]; json.dump(d, open(f, "w"))' "$S"
+}
+fresh_state() { rm -f "$S"/quota_resume_state.*.json "$S"/quota_resume.*.log "$C"/*.line; }
+quota '"live_seats":2,' "$(seat claude active 0.2 0.4)"
+
+printf '%s\n' '● All done.' '' '────────' '❯ ' '────────' > "$T/calm"
+fresh_state; live calm
+t "no walled pane: ok, the count of panes read, exactly three segments" bash -c '[ "$1" = "CHECK quota-resume ok · 1 panes read, 0 walled · every 2 min, owner Sen" ]' _ "$(line)"
+H=serialhub live calm
+t "off familiar the line carries the host (quota-resume-serialhub)" grep -q '^CHECK quota-resume-serialhub ok · 1 panes read, 0 walled' <<<"$(line quota-resume-serialhub)"
+
+mk fx-luna 'Quota resets in 5m.' '❯ '
+fresh_state; live calm fx-luna
+t "a wall still inside its reset: warn, the pane NAMED, and how long it waits" grep -qE '^CHECK quota-resume warn · 2 panes read, 1 walled: fx-luna \(waits [0-9]+ s for the reset\) · every 2 min, owner Sen$' <<<"$(line)"
+seed; live calm fx-luna
+t "reset passed and a seat serves: resumed, named in the line" grep -q '1 walled: fx-luna (resumed) · ' <<<"$(line)"
+t "…a fixture is never typed into: the log says what it would have done" grep -q 'would resume fx-luna (a fixture is never typed into)' "$S"/quota_resume.*.log
+live calm fx-luna
+t "the same notice a run later: said so, not resumed twice" bash -c 'grep -q "fx-luna (resumed once already, still on the notice)" <<<"$1" && [ "$(grep -c "would resume" "$2"/quota_resume.*.log)" = 1 ]' _ "$(line)" "$S"
+
+quota '"live_seats":0,' "$(seat claude active 0.99 1)"
+fresh_state; live fx-luna; seed; live fx-luna
+t "reset passed but NO seat can serve: held, named, not marked resumed" bash -c 'grep -q "fx-luna (no seat can serve)" <<<"$1" && ! grep -qs "would resume" "$2"/quota_resume.*.log' _ "$(line)" "$S"
+quota '"live_seats":2,' "$(seat claude active 0.2 0.4)"
+live fx-luna
+t "…and it is resumed on the run after a seat is back" grep -q 'fx-luna (resumed)' <<<"$(line)"
+
+mk fx-roam 'Quota resets in 5m.' '❯ half a sentence someone typed'
+fresh_state; live fx-roam; seed; live fx-roam
+t "typed text in the box: never resumed, and the line says why (the case that sat unseen)" bash -c 'grep -q "1 walled: fx-roam (typed text in its box)" <<<"$1" && ! grep -qs "would resume" "$2"/quota_resume.*.log' _ "$(line)" "$S"
+mk fx-ghost 'Quota resets in 5m.' "$(printf '❯ \033[2mResend your message to try again\033[0m')"
+fresh_state; live fx-ghost; seed; live fx-ghost
+t "a FAINT placeholder in the box is not typed text: the pane is resumed" grep -q 'fx-ghost (resumed)' <<<"$(line)"
+mk fx-dialog 'Quota resets in 5m.' '❯ ' 'Do you want to proceed?'
+fresh_state; live fx-dialog; seed; live fx-dialog
+t "a dialog on a walled pane: not touched, named with the reason" bash -c 'grep -q "fx-dialog (a dialog is open)" <<<"$1" && ! grep -qs "would resume" "$2"/quota_resume.*.log' _ "$(line)" "$S"
+printf '%s\n' '● Working on it' '' "$WALL Quota resets in 5m." '✢ Wibbling… (3m 49s · ↓ 17.0k tokens)' '────────' '❯ ' '────────' > "$T/busy"
+fresh_state; live busy
+t "a pane that is working again is not walled" grep -q '1 panes read, 0 walled' <<<"$(line)"
+printf '%s\n' '● Working on it' '' "$WALL Quota resets in 5m." '✢ Wibbling… (3m 49s · ↓ 17.0k tokens)' 'Do you want to proceed?' '────────' '❯ ' '────────' > "$T/busydialog"
+fresh_state; live busydialog
+t "…also when a dialog is open on it (working is not walled, dialog or not)" grep -q '1 panes read, 0 walled' <<<"$(line)"
+for i in 1 2 3 4 5 6 7 8 9 10; do mk "fx-lane$i" 'Quota resets in 5m.' '❯ '; done
+fresh_state; live fx-lane1 fx-lane2 fx-lane3 fx-lane4 fx-lane5 fx-lane6 fx-lane7 fx-lane8 fx-lane9 fx-lane10
+t "ten walled panes: eight named, the rest counted, still one line of three segments" bash -c 'grep -q "10 panes read, 10 walled: fx-lane1 (.*fx-lane8 (waits [0-9]* s for the reset) and 2 more · every 2 min" <<<"$1" && [ "$(grep -o " · " <<<"$1" | wc -l)" = 2 ]' _ "$(line)"
+t "nothing was written beside the script (state and log go to the state dir)" bash -c '[ -z "$(ls "$1"/scripts/quota_resume_state.* "$1"/scripts/quota_resume.*.log 2>/dev/null)" ] || git -C "$1" diff --quiet -- scripts' _ "$ROOT"
+
+# the REAL path, against a stub tmux: the line names the SESSION, the keys go to the PANE
+mkdir -p "$T/bin"; mk realpane 'Quota resets in 5m.' '❯ '
+cat > "$T/bin/tmux" <<EOF
+#!/usr/bin/env bash
+echo "tmux \$*" >> "$T/tmux.log"
+case "\$*" in
+  list-panes*) [ -e "$T/tmux-mode" ] && { cat "$T/tmux-mode" >&2; exit 1; }; printf '%%7 morpheus-topology claude\n%%9 scratch bash\n' ;;
+  "capture-pane -e -p -t %7") cat "$T/realpane" ;;
+  "capture-pane -e -p -t %9") printf 'jp@host:~\$ \n' ;;
+esac
+EOF
+chmod +x "$T/bin/tmux"
+real() { PATH="$T/bin:$PATH" QUOTA_RESUME_QUOTA_FILE="$T/q.json" QUOTA_RESUME_STATE_DIR="$S" DREAMTEAM_CHECKS_DIR="$C" DREAMTEAM_CHECK_HOST=serialhub python3 -I "$ROOT/scripts/quota_resume.py" > "$T/out" 2>&1; }
+fresh_state; : > "$T/tmux.log"; real
+t "real path, first sighting: nothing typed, the SESSION named" bash -c 'grep -q "2 panes read, 1 walled: morpheus-topology (waits" <<<"$1" && ! grep -q "send-keys" "$2"' _ "$(line quota-resume-serialhub)" "$T/tmux.log"
+seed; real
+t "real path, reset passed: 'continue' is typed into that pane and Enter pressed" bash -c 'grep -qF "tmux send-keys -t %7 -l continue (jp-ab auto-resume after quota reset)" "$1" && grep -qxF "tmux send-keys -t %7 Enter" "$1" && ! grep -q "send-keys -t %9" "$1"' _ "$T/tmux.log"
+t "…and the line says resumed" grep -q 'morpheus-topology (resumed)' <<<"$(line quota-resume-serialhub)"
+echo "protocol version mismatch (client 8, server 7)" > "$T/tmux-mode"; fresh_state; real
+t "tmux cannot be read: fail, with the reason, never an ok" grep -q '^CHECK quota-resume-serialhub fail · tmux cannot be read (protocol version mismatch' <<<"$(line quota-resume-serialhub)"
+echo "no server running on /tmp/tmux-1000/default" > "$T/tmux-mode"; fresh_state; real
+t "no tmux server on the host: 0 panes, ok (a host without lanes is not a failure)" grep -q '^CHECK quota-resume-serialhub ok · 0 panes read, 0 walled' <<<"$(line quota-resume-serialhub)"
+rm -f "$T/tmux-mode"
+t "the unit runs this script from the repo checkout" grep -qx 'ExecStart=/usr/bin/python3 %h/Projects/dreamteam/scripts/quota_resume.py' "$ROOT/systemd/quota-resume.service"
+
 exit $fail

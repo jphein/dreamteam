@@ -14,13 +14,28 @@ Everything is logged to quota_resume.log. It never touches a pane that has typed
 - stale "│" split-border residue counted as non-blank lines, pushing a wrapped error out of the 6-line window;
 - any pane that merely QUOTED the error text (a reviewer, a dry-run command) matched → anchored on the "●" bullet.
 Options: --dry-run (print decisions, type nothing); --fixture FILE... (treat saved `capture-pane -e -p` files as panes).
+
+2026-11-21 (Sen, row 55bd0a23): after the 10:10 wall this resumed familiar's panes, and five lanes on serialhub
+sat on the same notice for 3.5 h. Two reasons, both fixed by running THIS script on each lane host (the unit files
+are in systemd/; the proxy's quota endpoint is local on every host that runs lanes):
+- no timer ran on serialhub, so nothing looked at its panes;
+- the script wrote no line anywhere, so a walled fleet was visible only to whoever opened a pane.
+It now ends every run with one CHECK line (docs/CHECKS.md), named for the host, that NAMES the walled panes by
+tmux session and says why each one was not resumed (waiting for the reset, typed text in its box, a dialog, no
+seat can serve):
+    CHECK quota-resume[-<host>] ok   · 9 panes read, 0 walled · every 2 min, owner Sen
+    CHECK quota-resume[-<host>] warn · 9 panes read, 3 walled: luna-map (resumed), morpheus-roam (typed text in its box), nebula (waits 412 s) · every 2 min, owner Sen
+    CHECK quota-resume[-<host>] fail · tmux cannot be read (<reason>) · every 2 min, owner Sen
+Seams: QUOTA_RESUME_STATE_DIR (state and log; default beside this file), DREAMTEAM_CHECKS_DIR, DREAMTEAM_CHECK_HOST.
+A fixture pane is never typed into: the run goes through every decision and logs what it would have typed.
 """
 import hashlib, json, os, re, socket, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOST = socket.gethostname()
-STATE = os.path.join(HERE, f"quota_resume_state.{HOST}.json")   # host-suffixed: the dir may be mirrored
-LOG = os.path.join(HERE, f"quota_resume.{HOST}.log")
+SDIR = os.environ.get("QUOTA_RESUME_STATE_DIR") or HERE
+STATE = os.path.join(SDIR, f"quota_resume_state.{HOST}.json")   # host-suffixed: the dir may be mirrored
+LOG = os.path.join(SDIR, f"quota_resume.{HOST}.log")
 # The real error is one "●" output block; quoting it elsewhere never starts with the bullet.
 ERR = re.compile(r"● API Error: .*?(Server is temporarily limiting requests|all \d+ accounts are at their quota)")
 # "resets in 42s" (older notices) or "Quota resets in 1h 55m" / "in 7m" (teamclaude since 2026-11)
@@ -62,17 +77,44 @@ def typed_text(raw_line):
     return plain[1:].strip() if plain.startswith("❯") else plain.strip()
 
 
+def check_line(status, fact):
+    """Publish the one CHECK line through scripts/lib/check-line.sh (the single writer: three segments, a fact
+    that cannot hold a separator, an atomic replace). Never raises; a line that cannot be published is logged."""
+    lib = os.path.join(HERE, "lib", "check-line.sh")
+    try:
+        r = subprocess.run(["bash", "-c", '. "$1" && check_line "$(check_name quota-resume)" "$2" "$3" "$4"', "_", lib, status, fact,
+                            "every 2 min, owner Sen"], capture_output=True, text=True, timeout=20)
+        if r.returncode != 0:
+            log(f"check line not published: {r.stderr.strip()[:120]}")
+        return r.stdout.strip()
+    except Exception as e:
+        log(f"check line not published ({type(e).__name__})")
+        return ""
+
+
 import os as _os
 PARKED=set(_os.environ.get("PARKED_PANES","").split())
+NAMES = {}          # pane id → tmux session name (a fixture: its file name)
 def panes():
     if FIXTURES:
         for f in FIXTURES:
+            NAMES[os.path.basename(f)] = os.path.basename(f)
             yield os.path.basename(f), "fixture", open(f, encoding="utf-8", errors="replace").read()
         return
-    for line in sh("tmux", "list-panes", "-a", "-F", "#{pane_id} #{pane_current_command}").split("\n"):
+    try:
+        r = subprocess.run(["tmux", "list-panes", "-a", "-F", "#{pane_id} #{session_name} #{pane_current_command}"],
+                           capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise RuntimeError(f"tmux: {type(e).__name__}")
+    if r.returncode != 0:
+        if "no server running" in r.stderr or "No such file or directory" in r.stderr:
+            return                                         # no tmux server on this host: no panes, not an error
+        raise RuntimeError(r.stderr.strip()[:80] or f"tmux exit {r.returncode}")
+    for line in r.stdout.split("\n"):
         if line.split(" ",1)[0] in PARKED: continue
-        if line.strip():
-            pid, cmd = line.split(" ", 1)
+        if line.count(" ") >= 2:
+            pid, sess, cmd = line.split(" ", 2)
+            NAMES[pid] = sess
             yield pid, cmd, sh("tmux", "capture-pane", "-e", "-p", "-t", pid)
 
 
@@ -131,7 +173,20 @@ except Exception:
     state = {}
 now = time.time()
 seen_now = set()
-for pid, cmd, raw in panes():
+read = 0
+walled = []          # (name, why it was or was not resumed), in pane order
+try:
+    all_panes = list(panes())
+except RuntimeError as e:
+    if DRY:
+        print(f"tmux cannot be read ({e})")
+    else:
+        log(f"tmux cannot be read ({e})")
+        check_line("fail", f"tmux cannot be read ({e})")
+    sys.exit(0)
+for pid, cmd, raw in all_panes:
+    read += 1
+    name = NAMES.get(pid, pid)
     raw_lines = raw.split("\n")
     plain_lines = [SGR.sub("", l) for l in raw_lines]
     keep = [i for i, l in enumerate(plain_lines) if not BLANKISH.match(l)]
@@ -141,15 +196,18 @@ for pid, cmd, raw in panes():
     if box is None or box < 2:
         continue
     text = "\n".join(lines)
-    if "Do you want" in text or "Enter to select" in text or "Enter to confirm" in text:
-        if DRY: print(f"skip {pid}: dialog on screen")
-        continue
     # the error must be the LATEST output block: the last ● line before the box
     bullets = [i for i in range(box) if lines[i].lstrip().startswith("●")]
+    block = lines[bullets[-1]:box] if bullets else []
+    collapsed = " ".join(" ".join(block).split())
+    is_wall = bool(block) and bool(ERR.search(collapsed)) and not any(WORKING.search(l) for l in block[1:])
+    if "Do you want" in text or "Enter to select" in text or "Enter to confirm" in text:
+        if DRY: print(f"skip {pid}: dialog on screen")
+        if is_wall:
+            walled.append((name, "a dialog is open"))
+        continue
     if not bullets:
         continue
-    block = lines[bullets[-1]:box]
-    collapsed = " ".join(" ".join(block).split())
     if not ERR.search(collapsed):
         continue
     if any(WORKING.search(l) for l in block[1:]):
@@ -159,6 +217,7 @@ for pid, cmd, raw in panes():
     if typed:
         if DRY:
             print(f"skip {pid}: typed input {typed[:40]!r}")
+        walled.append((name, "typed text in its box"))
         continue
     wait = reset_wait(collapsed)
     wait = 300 if wait is None else wait
@@ -170,16 +229,31 @@ for pid, cmd, raw in panes():
     if DRY:
         print(f"match {pid} ({cmd}): wait={wait}s done={done} due_in={int(first + wait + 30 - now)}s serves={proxy_serves()}")
         continue
-    if done or now < first + wait + 30:
+    if done:
+        walled.append((name, "resumed once already, still on the notice"))
         continue
-    subprocess.run(["tmux", "send-keys", "-t", pid, "C-u"])
+    if now < first + wait + 30:
+        walled.append((name, f"waits {int(first + wait + 30 - now)} s for the reset"))
+        continue
+    if not FIXTURES:
+        subprocess.run(["tmux", "send-keys", "-t", pid, "C-u"])
     if not proxy_serves():
         log(f"hold {pid}: no seat can serve; not typing continue")
+        walled.append((name, "no seat can serve"))
         continue
-    subprocess.run(["tmux", "send-keys", "-t", pid, "-l", "continue (jp-ab auto-resume after quota reset)"])
-    subprocess.run(["tmux", "send-keys", "-t", pid, "Enter"])
+    if FIXTURES:
+        log(f"would resume {pid} (a fixture is never typed into)")
+    else:
+        subprocess.run(["tmux", "send-keys", "-t", pid, "-l", "continue (jp-ab auto-resume after quota reset)"])
+        subprocess.run(["tmux", "send-keys", "-t", pid, "Enter"])
     state[key]["done"] = True
+    walled.append((name, "resumed"))
     log(f"resumed {pid} ({cmd}) after quota error, waited {int(now-first)}s")
 if not DRY:
     state = {k: v for k, v in state.items() if k in seen_now}
     json.dump(state, open(STATE, "w"))
+    if walled:
+        shown = ", ".join(f"{n} ({why})" for n, why in walled[:8]) + (f" and {len(walled) - 8} more" if len(walled) > 8 else "")
+        check_line("warn", f"{read} panes read, {len(walled)} walled: {shown}")
+    else:
+        check_line("ok", f"{read} panes read, 0 walled")
