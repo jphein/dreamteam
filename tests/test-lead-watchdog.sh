@@ -118,7 +118,7 @@ sess_file() { printf 'session=%s\npane=%s\n' "$SID2" "${1:-lwtest:0.0}" > "$T/st
 reset() { rm -f "$T/claude.args" "$T/state/lead-watchdog.relaunches" "$T/state/lead-watchdog.off" "$T/scope-run.log"; }
 
 # 13. no tmux SERVER at all, lead.session has the id → the session is recreated in a scope of its own, the lead resumed
-tmux -L lwtest kill-server 2>/dev/null; sleep 0.5; reset; sess_file
+tmux -L lwtest kill-server 2>/dev/null; sleep 0.5; reset; sess_file lwtest:3.0   # the lead was in window 3; the new session has none
 out=$(env -u LEAD_PANE bash "$WD" 2>&1)
 if grep -q '^CHECK lead-liveness ok · relaunched 11111111 in lwtest:[0-9]*\.[0-9]* .* from lead.session, session recreated' <<<"$out" \
    && grep -q -- "--resume $SID2 --permission-mode bypassPermissions" "$T/claude.args" 2>/dev/null && tmux -L lwtest has-session -t =lwtest 2>/dev/null; then
@@ -157,6 +157,17 @@ tmux -L lwtest kill-pane -t lwtest:0.0; sleep 0.4; reset; sess_file lwtest:0.0
 out=$(env -u LEAD_PANE bash "$WD" 2>&1)
 if grep -q '^CHECK lead-liveness ok · relaunched 11111111 in lwtest:[0-9]*\.0 .* window recreated' <<<"$out" && grep -q -- "--resume $SID2" "$T/claude.args" 2>/dev/null; then
   ok "pane gone, session alive: a new window is made and the lead resumed in it"; else bad "window recreate: $out"; fi
+# 19b. pane gone, 3 relaunches in the last hour → fail, no window made
+fresh "no hint here"; tmux -L lwtest new-window -d -t lwtest "bash --norc --noprofile"; sleep 0.4; tmux -L lwtest kill-pane -t lwtest:0.0; sleep 0.4
+reset; sess_file lwtest:0.0; now=$(date +%s); printf '%s\n%s\n%s\n' "$((now-100))" "$((now-200))" "$((now-300))" > "$T/state/lead-watchdog.relaunches"
+nw=$(tmux -L lwtest list-windows -t =lwtest | wc -l); out=$(env -u LEAD_PANE bash "$WD" 2>&1)
+grep -q '^CHECK lead-liveness fail · pane lwtest:0.0 not found; 3 relaunches already' <<<"$out" && [ "$(tmux -L lwtest list-windows -t =lwtest | wc -l)" = "$nw" ] && [ ! -e "$T/claude.args" ] \
+  && ok "the loop guard holds for a new window too" || bad "loop, new window: $out"
+# 19c. pane gone and no id → fail, no window made
+reset; rm -f "$T/state/lead.session"; out=$(run)
+grep -q '^CHECK lead-liveness fail · pane lwtest:0.0 not found and no lead.session id' <<<"$out" && [ "$(tmux -L lwtest list-windows -t =lwtest | wc -l)" = "$nw" ] && [ ! -e "$T/claude.args" ] \
+  && ok "pane gone, no id: fail, no window made" || bad "no id, new window: $out"
+fresh "no hint here"; tmux -L lwtest new-window -d -t lwtest "bash --norc --noprofile"; sleep 0.4; tmux -L lwtest kill-pane -t lwtest:0.0; sleep 0.4; reset; sess_file lwtest:0.0; env -u LEAD_PANE bash "$WD" > /dev/null 2>&1
 tmux -L lwtest display -p -t lwtest:1.0 '#{pane_pid}' > /dev/null 2>&1 && [ -z "$(pgrep -P "$(tmux -L lwtest display -p -t lwtest:1.0 '#{pane_pid}')")" ] && ok "…and the session's other window was not typed into" || bad "the other window was touched"
 
 # 20. the pane's shell sits at a continuation prompt (an unfinished `if`): the first version warned forever. Now the
