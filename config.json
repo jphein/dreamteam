@@ -77,6 +77,13 @@
       "memoryAccounting": "RESOLVED in #37 via reserveMB above (was the #16-bullet-3 deferral). The chosen lever is a config reserve subtracted from the admission budget when armed — NOT attaching the ollama server to the dreamteam scope: ollama is a shared SYSTEM daemon (own systemd unit), so pulling it into dreamteam-<project>.scope would (a) make a scope OOM-kill take ollama down with the team, and (b) not change the free-based admission math anyway. The reserve throttles spawns to leave RAM for the model; the scope + earlyoom remain the containment backstops."
     }
   },
+  "laneStyle": {
+    "enabled": true,
+    "lead": ["spire"],
+    "exclude": [],
+    "lanes": ["*"],
+    "_notes": "scripts/lane-style-hook.sh (SessionStart): every LANE session gets the token-saving output style output-styles/lane.md at every start, resume, clear and compact. The role is the tmux session name. lead: names that are NEVER styled (checked first; $DREAMTEAM_LEAD_SESSION is one too). exclude: globs of sessions that are not lanes (the owner's own sessions, by name, in the host overlay). lanes: globs of lane names, default every other tmux session. A session outside tmux is not a lane. enabled=false switches it off. Flow row d1a1c56a."
+  },
   "org": {
     "agentsCatalog": "~/Projects/lexicon.realm.watch/catalog/agents.yaml",
     "threeChannelOwners": [

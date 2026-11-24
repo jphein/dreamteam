@@ -1,6 +1,0 @@
-{
-  "outputStyle": "dreamteam:lane",
-  "enabledPlugins": {
-    "explanatory-output-style@claude-code-plugins": false
-  }
-}

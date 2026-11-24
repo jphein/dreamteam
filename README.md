@@ -44,7 +44,7 @@ dreamteam/
 │   ├── mem-budget.sh              shared budget calculator (also /dreamteam-status)
 │   ├── launch-dreamteam.sh        systemd-scope + tmux -L isolated launcher
 │   ├── tmux-layout.sh             move agent panes into their own window
-│   └── lane-style.sh              wire the lane output style for the sessions started in one directory, and undo it
+│   └── lane-style-hook.sh         SessionStart — gives a LANE session the lane output style, by its role; never the lead
 ├── commands/
 │   ├── dreamteam.md               /dreamteam — guarded launch
 │   ├── dreamteam-status.md        /dreamteam-status — budget + footprint snapshot
@@ -52,8 +52,7 @@ dreamteam/
 ├── agents/                        named dream-agent types (luna, morpheus, lucid, nebula)
 ├── workflows/                     saved Workflow scripts (merge-cascade, overnight, review-sweep)
 ├── templates/                     Artifact dashboard HTML template
-├── output-styles/lane.md          the token-saving output style for lanes (selected as dreamteam:lane)
-├── config/lane.settings.json      the two settings that wire it for one session (claude --settings <file>)
+├── output-styles/lane.md          the token-saving output style every lane session is given at its start
 ├── skills/dreamteam/SKILL.md      the existing skill (moved here verbatim + §3 prose adds)
 └── state/                         runtime: active marker, HANDOFF.md, dreamteam.log
 ```
@@ -80,19 +79,23 @@ the empty/exit-code guarantees — locked against drift by `tests/test-json-cont
 
 A lane's reader is the lead, reading many lanes at once. `output-styles/lane.md` is an output style for that
 reader: the first line is the bottom line, then **Changed / Checked / Evidence / Not verified** (only the parts
-that have content), twelve lines at most, no restating and no closing offers. A failure, anything needed to act
-safely, and anything asked for in full keep their length.
+that have content), twelve lines at most, no restating and no closing offers. It limits what a lane writes,
+never what it checks. A failure, anything needed to act safely, every "Not verified" item and required
+disclosure, and anything asked for in full keep their length.
 
-It is opt-in per lane and never forced on the lead's or the owner's sessions:
+Nobody switches it on per lane. `scripts/lane-style-hook.sh` runs at every session start (startup, resume,
+clear, compact) and gives the style to a session by its ROLE, which is the tmux session name:
 
-    claude --settings "$CLAUDE_PLUGIN_ROOT/config/lane.settings.json" …      # one session, at launch
-    scripts/lane-style.sh on  <the lane's directory>                          # every session started there
-    scripts/lane-style.sh off <the lane's directory>                          # back to what it was
-    scripts/lane-style.sh status <dir>
+| The session | Gets the style |
+|---|---|
+| a lead: `.laneStyle.lead` in `config.json` (default `spire`) or `$DREAMTEAM_LEAD_SESSION` | never (checked first) |
+| a name matching `.laneStyle.exclude` (put the owner's own sessions here, in the host overlay) | no |
+| any other tmux session matching `.laneStyle.lanes` (default `*`) | yes, at every start |
+| a session outside tmux (a one-off `claude -p`, a nightly job) | no |
 
-Both set `outputStyle` to `dreamteam:lane` and switch the `explanatory-output-style` plugin off for that session
-(where it is enabled, that plugin is what tells a session to write Insight blocks). They take effect at the next
-session start; in a running session, `/output-style dreamteam:lane` switches the style from the next message.
+`scripts/lane-style-hook.sh --who <name>` says what a session of that name gets and why. `.laneStyle.enabled:
+false` switches it off. Measured on 2026-11-24 with three fixed prompts (`tests/probe-lane-tokens.sh`): median
+output tokens fell by 27 % (fix a failing test), 53 % (explain a script) and 15 % (report a failing build, whole).
 
 ## Fleet lessons
 
