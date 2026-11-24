@@ -133,7 +133,8 @@ NAGENTS=$(( NAGENTS + RESV_N ))                                   # reserved age
 #     updatedInput, into the spawn itself: SubagentStart sees no env and no prompt, SubagentStop sees the subagent's
 #     transcript, which is where the id comes back for an exact release. No permissionDecision is returned: the gate
 #     admits on memory, it never approves the call for the user (security review on 10d4aa7a).
-RID="r-$$-$(date +%s%N)-$RANDOM"
+RID=$(od -An -tx1 -N16 /dev/urandom 2>/dev/null | tr -d ' \n')   # a random 128-bit id: neither guessable nor replayable (#289 r1)
+[ "${#RID}" -eq 32 ] || invalid "cannot mint a reservation id (/dev/urandom)"
 bash "$RSV" add "$PER_AGENT" 90 "$SESSION" "$ATYPE" --id "$RID" --locked >/dev/null || invalid "cannot write the lane reservation (scripts/reservation.sh beside this gate)"
 printf '%s' "$INPUT" | jq -c --arg id "$RID" '{hookSpecificOutput: {hookEventName: "PreToolUse",
   updatedInput: (.tool_input | .prompt = ("[dreamteam reservation " + $id + "]\n" + (.prompt // "")))}}' 2>/dev/null \

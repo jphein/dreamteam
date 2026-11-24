@@ -51,6 +51,18 @@ MUT=(
   'probe-eacces-as-zero@scripts/lib/gpu_fleet.py@s/else case "\$dst" in \*"No such file or directory"\*) : ;; \*) ok=0 ;; esac; fi$/else :; fi/@tests/test-gpu.sh'
   'id-not-stamped@scripts/mem-gate.sh@s/\.prompt = ("\[dreamteam reservation " + \$id + "\]\\n" + (\.prompt \/\/ ""))/.prompt = (.prompt \/\/ "")/@tests/test-gates.sh'
   'permission-decision-added@scripts/mem-gate.sh@s/{hookSpecificOutput: {hookEventName: "PreToolUse",$/{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "allow",/@tests/test-gates.sh'
+  'id-not-random@scripts/mem-gate.sh@s/^RID=\$(od -An -tx1 -N16 \/dev\/urandom 2>\/dev\/null | tr -d '"'"' \\n'"'"')/RID="r-$$-$RANDOM"/@tests/test-gates.sh'
+  'id-length-unchecked@scripts/mem-gate.sh@s/^\[ "\${#RID}" -eq 32 \] || invalid/true || invalid/@tests/test-gates.sh'
+  'id-repeat-accepted@scripts/reservation.sh@s/^      \[ "\$seen" = 0 \] || { echo "reservation: id \$id is already on the ledger" >\&2; exit 2; }/      true/@tests/test-gates.sh'
+  'id-shape-unchecked-on-add@scripts/reservation.sh@0,/^    valid_id "\$id" || { echo "reservation: an id is 32 hex (or absent)" >\&2; exit 2; }/s//    true/@tests/test-gates.sh'
+  'transcript-symlink-followed@scripts/reservation.sh@s/os.O_RDONLY | os.O_NOFOLLOW | os.O_NOCTTY/os.O_RDONLY | os.O_NOCTTY/@tests/test-gates.sh'
+  'transcript-path-unchecked@scripts/reservation.sh@s/\&\& \[ "\$tp" = "\$(dirname -- "\$ptp")\/\$ses\/subagents\/agent-\$aid.jsonl" \]; then/; then/@tests/test-gates.sh'
+  'validation-skipped-in-live@scripts/reservation.sh@s/^    if \[ "\$st" = 0 \]; then validate_all; scan acc; prune$/    if [ "$st" = 0 ]; then scan acc; prune/@tests/test-gates.sh'
+  'stop-dir-error-ignored@scripts/reservation.sh@s/^    dir_ok; case \$? in 1) exit 1 ;; 2) echo "reservation: no reservations directory" >\&2; exit 3 ;; esac$/    dir_ok; case $? in 1) echo "reservation: no reservations directory" >\&2; exit 3 ;; 2) echo "reservation: no reservations directory" >\&2; exit 3 ;; esac/@tests/test-gates.sh'
+  'rm-unchecked-in-stop@scripts/reservation.sh@s/rm -f -- "\$f" || { echo "reservation: cannot release \$f" >\&2; exit 1; }; echo "\$f"; exit 0;/rm -f -- "$f"; echo "$f"; exit 0;/@tests/test-gates.sh'
+  'mkdir-unchecked@scripts/reservation.sh@s/2) mkdir -p "\$DIR" || { echo "reservation: cannot create \$DIR" >\&2; exit 1; } ;; esac; }/2) mkdir -p "$DIR" 2>\/dev\/null ;; esac; }/@tests/test-gates.sh'
+  'probe-id-shape-unchecked@scripts/lib/gpu_fleet.py@s/case "\$rid" in -) ;; \*) { \[ "\${#rid}" -eq 32 \] \&\& case "\$rid" in \*\[!0-9a-f\]\*) false ;; \*) true ;; esac; } || { ok=0; break; } ;; esac;/true;/@tests/test-gpu.sh'
+  'probe-eight-fields-accepted@scripts/lib/gpu_fleet.py@s/\[ -z "\${extra:-}" \] || { ok=0; break; };/true;/@tests/test-gpu.sh'
   'token-not-sanitised@scripts/reservation.sh@s/^san() { local s; s=\$(printf .*$/san() { printf "%s" "${1:--}"; }/@tests/test-gates.sh'
 )
 n=0; bad=0

@@ -1,50 +1,54 @@
 #!/usr/bin/env bash
-# dreamteam — lane-start RESERVATIONS (dreamteam #256 r2–r5, PR A #280 and PR B of the split, Sen 2026-11-21): the
-# memory a lane admitted by mem-gate will take before its process shows it. mem-gate's flock is released when the
-# gate exits, BEFORE the caller starts the lane, so a GPU claim could lock, sample the pre-start footprint and admit
-# in that gap. The gate, still holding the host lock, writes one reservation; a GPU claim's sampler
+# dreamteam — lane-start RESERVATIONS (dreamteam #256 r2–r5, PR A #280 and PR B #289, Sen 2026-11-21/24): the memory
+# a lane admitted by mem-gate will take before its process shows it. mem-gate's flock is released when the gate
+# exits, BEFORE the caller starts the lane, so a GPU claim could lock, sample the pre-start footprint and admit in
+# that gap. The gate, still holding the host lock, writes one reservation; a GPU claim's sampler
 # (scripts/lib/gpu_fleet.py PROBE, the same READ rules inline for the ssh round trip, run under the claim's lock) and
 # the gate itself (`outstanding`) count them.
 #
-# Files: <dir>/<gate pid>-<epoch>-<rand>, one line "<mb> <expires-epoch> <session> <type> <started-epoch|0> <id>
-# <agent>" (a record from PR A has five fields: id and agent read as -), written tmp + rename. Every read and write
-# runs under the HOST LOCK (DREAMTEAM_HOST_LOCK; --locked = the caller already holds it, as the gate does), so no
-# reader can see or delete a half-written file.
+# Files: <dir>/<gate pid>-<epoch>-<rand>, one line of EXACTLY seven fields "<mb> <expires-epoch> <session> <type>
+# <started-epoch|0> <id|-> <agent|->" (a record from PR A has five fields: id and agent read as -), written tmp +
+# rename. Every read and write runs under the HOST LOCK (DREAMTEAM_HOST_LOCK; --locked = the caller already holds
+# it, as the gate does), so no reader can see or delete a half-written file.
 #
-# IDENTITY (PR B). The gate mints a per-spawn id, writes it here (field 6) and prefixes the Agent prompt with
+# IDENTITY (#289). The gate mints a random 128-bit id (32 hex from /dev/urandom), writes it here (field 6; the
+# ledger refuses a repeat, so a replayed or forged marker cannot release twice) and prefixes the Agent prompt with
 # "[dreamteam reservation <id>]" through PreToolUse updatedInput, with no permissionDecision: the hooks reference
-# (read 2026-11-21) gives SubagentStart only session_id, agent_id and agent_type (no env, no prompt, no tool_use_id),
+# (read 2026-11-21) gives SubagentStart only session_id, agent_id and agent_type (no env, no prompt, no tool_use_id)
 # and SubagentStop agent_id plus agent_transcript_path, so the prompt is the one channel to the spawn and the
-# subagent's transcript the one place the id comes back. `start` matches the class (session + type: equal sizes per
-# class) and binds the file to agent_id (field 7); `stop` releases by the id from the transcript (exact), else by
-# agent_id (exact), else by class. Attribution is exact from stop on, by class at start.
+# subagent's transcript the one place the id comes back. The stop hook reads ONLY the session's own subagent
+# transcript: <dir of transcript_path>/<session_id>/subagents/agent-<agent_id>.jsonl, a regular file opened with
+# O_NOFOLLOW, at most 1 MiB, one bounded field ([0-9a-f]{32}); anything else releases by agent_id. `start` matches
+# the class (session + type: equal sizes per class) and binds the file to agent_id (field 7); `stop` releases by id
+# (exact), else by agent_id (exact), else by class.
 #
 # LIFECYCLE. Unstarted: counts until it expires (90 s: the spawn never happened); then it becomes a TOMBSTONE
 # (<file>.expired) that no scan counts and only `start` consumes, deleting it only after its late-start line appended
 # (<dir>/../late-starts.log); tombstones older than a day are pruned, but `start` reads its token's tombstones BEFORE
-# any scan or prune (PR B), so a start that is more than a day late is still a late start. Started: counts until the
+# any scan or prune, so a start that is more than a day late is still a late start. Started: counts until the
 # lane's SubagentStop releases it (`stop`), NEVER by time: SubagentStart is not proof the RSS is there yet.
 #
-# READS AND WRITES (#280 r2). `scan` is READ-ONLY: it parses every record (parse: a regular readable file, five or
-# seven fields, bounded decimals with no leading zero, arithmetic in base 10) and reports each with its state,
-# counting or expired; it never renames or deletes, and any bad record is exit 1 before anything else happens.
-# `prune` is the ONE housekeeping writer: it runs only after a scan returned clean, tombstones expired unstarted
-# records and removes day-old tombstones. The probe reads with the same rules and never writes. add, start and stop
-# write their own record only. A reservations path that does not exist (ENOENT) is "0 0" / RESV,OK,0; one that
-# cannot be reached for any other reason (EACCES on a parent, EIO, a file in its place) is exit 1 / RESV,ERR (PR B).
+# READS AND WRITES. Every verb first runs ONE validation pass over every entry, records and tombstones alike
+# (validate_all: a regular readable file, exactly seven fields, bounded decimals with no leading zero, an id that is
+# - or 32 hex, an agent in the token alphabet, arithmetic in base 10); any entry that fails, including one that
+# cannot be stat'ed or a stray .tmp, is exit 1 and nothing else happens. `scan` is READ-ONLY and reports each record
+# with its state, counting or expired. `prune` is the ONE housekeeping writer: it runs only after validation and
+# tombstones expired unstarted records and removes day-old tombstones. add, start and stop write their own record
+# only, and every write (mkdir, mv, rm, append) is checked: nothing fails open. The probe reads with the same rules
+# and never writes. A reservations path that does not exist (ENOENT) is "0 0" / RESV,OK,0; one that cannot be
+# reached for any other reason (EACCES on a parent, EIO, a file in its place) is exit 1 / RESV,ERR.
 # Seams: DREAMTEAM_RESERVATIONS (default ~/.local/state/dreamteam/reservations, local disk), DREAMTEAM_HOST_LOCK,
 # DREAMTEAM_HOST_LOCK_WAIT.
 #
 #   reservation.sh add <mb> [ttl-s] [session] [type] [--id ID] [--locked]   write one (default 90 s), print its path
-#   reservation.sh outstanding [--locked]      "<mb-sum> <count>" of the counting ones (exit 1 on a scan error)
-#   reservation.sh live [--locked]             the MB sum of the counting ones (exit 1 on a scan error)
+#   reservation.sh outstanding [--locked]      "<mb-sum> <count>" of the counting ones (exit 1 on any error)
+#   reservation.sh live [--locked]             the MB sum of the counting ones (exit 1 on any error)
 #   reservation.sh start <session> <type> [--agent AID]   tombstones first: a late start is logged, deleted, exit 5
 #                                              (log append failed: kept, exit 1); else mark one unstarted reservation
 #                                              of the class started and bound to AID; exit 0 · 3 none · 4 lock
 #   reservation.sh stop <session> <type> [--id ID | --agent AID]   release by id, else by agent, else one started of
-#                                              the class; exit 0 · 3 none · 4 lock
-#   reservation.sh start-hook | stop-hook      SubagentStart / SubagentStop from stdin JSON; stop-hook reads the id
-#                                              from agent_transcript_path; always exit 0, rc and missing ids logged
+#                                              the class; exit 0 · 3 none · 4 lock · 1 error
+#   reservation.sh start-hook | stop-hook      SubagentStart / SubagentStop from stdin JSON; always exit 0, rc logged
 set -u
 DIR="${DREAMTEAM_RESERVATIONS:-$HOME/.local/state/dreamteam/reservations}"
 LOCK="${DREAMTEAM_HOST_LOCK:-$HOME/.local/state/dreamteam/host.lock}"; WAIT="${DREAMTEAM_HOST_LOCK_WAIT:-5}"
@@ -60,9 +64,11 @@ while [ $# -gt 0 ]; do
   esac; shift
 done
 set -- "${args[@]}"
-# a bounded decimal: digits only, at most 12, and no leading zero (a leading zero is octal to the shell's arithmetic:
-# "0400" would count as 256); every arithmetic site still says 10#
+# a bounded decimal: digits only, at most 12, no leading zero (octal to the shell); every arithmetic site says 10#
 valid() { case "${1:-}" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac; [ "${#1}" -le 12 ]; }
+# an id: - or exactly 32 hex; a token (session, type, agent): the token alphabet, 1..128
+valid_id() { [ "${1:-}" = - ] || { [ "${#1}" -eq 32 ] && case "$1" in *[!0-9a-f]*) false ;; *) true ;; esac; }; }
+valid_tok() { [ -n "${1:-}" ] && [ "${#1}" -le 128 ] && case "$1" in *[!A-Za-z0-9._:-]*) false ;; *) true ;; esac; }
 # the token fields as written and as matched: [A-Za-z0-9._:-] only, at most 128, other bytes become _, empty becomes -
 san() { local s; s=$(printf '%s' "${1:-}" | tr -c 'A-Za-z0-9._:-' '_' | cut -c1-128); printf '%s' "${s:--}"; }
 take_lock() {   # the host lock, unless the caller holds it (--locked); exit 4 = not taken, nothing changed
@@ -80,88 +86,117 @@ dir_ok() {      # 0 = readable directory · 2 = does not exist (ENOENT) · 1 = c
   case "$st" in *"No such file or directory"*) return 2 ;; esac
   echo "reservation: cannot reach $DIR: $st" >&2; return 1
 }
+# entries: every entry of the directory, one per line, or exit 1 when any cannot be stat'ed (an unmatched glob is
+# the empty list; nothing a glob returned is ever skipped)
+entries() {
+  local f
+  for f in "$DIR"/*; do
+    [ "$f" = "$DIR/*" ] && return 0
+    stat -c %n -- "$f" >/dev/null 2>&1 || { echo "reservation: cannot stat $f" >&2; exit 1; }
+    printf '%s\n' "$f"
+  done
+}
 # parse <file>: sets fmb fexp fses ftyp fst fid fag from a regular, readable, well-formed record (live or tombstone);
 # else return 1 with the reason. The ONLY way a number leaves a file.
 parse() {
+  local extra
   [ -f "$1" ] && [ -r "$1" ] || { echo "reservation: $1 is not a readable file" >&2; return 1; }
-  read -r fmb fexp fses ftyp fst fid fag < "$1" 2>/dev/null || { echo "reservation: cannot read $1" >&2; return 1; }
+  read -r fmb fexp fses ftyp fst fid fag extra < "$1" 2>/dev/null || { echo "reservation: cannot read $1" >&2; return 1; }
   fid="${fid:--}"; fag="${fag:--}"
-  valid "$fmb" && valid "$fexp" && [ -n "${fses:-}" ] && [ -n "${ftyp:-}" ] && valid "${fst:-}" && [ "$((10#$fmb))" -le "$MAX_MB" ] \
+  valid "$fmb" && valid "$fexp" && valid_tok "${fses:-}" && valid_tok "${ftyp:-}" && valid "${fst:-}" && valid_id "$fid" \
+    && { [ "$fag" = - ] || valid_tok "$fag"; } && [ -z "${extra:-}" ] && [ "$((10#$fmb))" -le "$MAX_MB" ] \
     || { echo "reservation: malformed $1" >&2; return 1; }
 }
 expired() { [ "$fst" = 0 ] && [ "$((10#$fexp))" -le "$now" ]; }
-# scan <callback>: READ-ONLY. Every live record is parsed; any bad one is return 1 and nothing else happens. Each good
-# one is reported as "<callback> <file> <mb> <session> <type> <started> <counting|expired> <id> <agent>".
+# validate_all: ONE pass over every entry, records and tombstones alike, before any scan or prune; exit 1 on the
+# first failure, with nothing touched. A stray .tmp (a writer that died under the lock) is an error too.
+validate_all() {
+  local f fmb fexp fses ftyp fst fid fag
+  while IFS= read -r f; do
+    case "$f" in *.tmp) echo "reservation: stray $f: a write that did not finish" >&2; exit 1 ;; esac
+    parse "$f" || exit 1
+  done < <(entries)
+}
+# scan <callback>: READ-ONLY, after validate_all. Each live record is reported as
+# "<callback> <file> <mb> <session> <type> <started> <counting|expired> <id> <agent>".
 scan() {
   local f fmb fexp fses ftyp fst fid fag state
-  for f in "$DIR"/*; do
-    [ -e "$f" ] || continue
-    case "$f" in *.expired|*.tmp) continue ;; esac
-    parse "$f" || return 1
+  while IFS= read -r f; do
+    case "$f" in *.expired) continue ;; esac
+    parse "$f" || exit 1
     if expired; then state=expired; else state=counting; fi
-    "$1" "$f" "$fmb" "$fses" "$ftyp" "$fst" "$state" "$fid" "$fag" || return 1
-  done
+    "$1" "$f" "$fmb" "$fses" "$ftyp" "$fst" "$state" "$fid" "$fag" || exit 1
+  done < <(entries)
 }
-# prune: the ONE housekeeping writer, run only after a scan returned clean: expired unstarted records become
-# tombstones, tombstones older than a day go
+# prune: the ONE housekeeping writer, after validate_all: expired unstarted records become tombstones, day-old
+# tombstones go; every write checked
 prune() {
-  local f fmb fexp fses ftyp fst fid fag
-  for f in "$DIR"/*; do
-    [ -e "$f" ] || continue
+  local f fmb fexp fses ftyp fst fid fag age
+  while IFS= read -r f; do
     case "$f" in
-      *.expired) [ "$(( now - $(stat -c %Y -- "$f" 2>/dev/null || echo "$now") ))" -gt "$TOMB_TTL" ] && rm -f -- "$f"; continue ;;
-      *.tmp) continue ;;
+      *.expired) age=$(( now - $(stat -c %Y -- "$f" 2>/dev/null || { echo "reservation: cannot stat $f" >&2; exit 1; }) ))
+                 [ "$age" -gt "$TOMB_TTL" ] && { rm -f -- "$f" || exit 1; }; continue ;;
     esac
-    parse "$f" || return 1
-    if expired; then mv -f -- "$f" "$f.expired" || return 1; fi
-  done
+    parse "$f" || exit 1
+    if expired; then mv -f -- "$f" "$f.expired" || exit 1; fi
+  done < <(entries)
 }
-# late_start <session> <type> <agent>: the tombstones of the token, validated first; a match is logged and deleted
-# only after the append succeeded (exit 5), an unloggable one kept (exit 1); return 0 = none
+# late_start <session> <type> <agent>: the tombstones of the token (validated by validate_all already); a match is
+# logged and deleted only after the append succeeded (exit 5), an unloggable one kept (exit 1); return 0 = none
 late_start() {
   local f fmb fexp fses ftyp fst fid fag
-  for f in "$DIR"/*.expired; do [ -e "$f" ] || continue; parse "$f" || exit 1; done
-  for f in "$DIR"/*.expired; do
-    [ -e "$f" ] || continue
+  while IFS= read -r f; do
+    case "$f" in *.expired) ;; *) continue ;; esac
     parse "$f" || exit 1
     if [ "$fses" = "$1" ] && [ "$ftyp" = "$2" ]; then
       if printf '%s late start: %s %s id %s agent %s (its reservation expired %ss before SubagentStart; nothing covered the start)\n' "$(date -Is)" "$1" "$2" "$fid" "$3" "$(( now - 10#$fexp ))" >> "$DIR/../late-starts.log"; then
-        rm -f -- "$f"; echo "reservation: the token $1 $2 had expired: logged as a late start" >&2; exit 5
+        rm -f -- "$f" || exit 1; echo "reservation: the token $1 $2 had expired: logged as a late start" >&2; exit 5
       fi
       echo "reservation: late start of $1 $2 could not be logged: tombstone kept" >&2; exit 1
     fi
-  done
+  done < <(entries)
   return 0
 }
 write_atomic() { printf '%s\n' "$2" > "$1.tmp" && mv -f -- "$1.tmp" "$1"; }
+# open_dir <verb>: the directory for a verb that must have one: dir_ok 1 → exit 1; ENOENT → create it (checked)
+open_dir() { dir_ok; case $? in 1) exit 1 ;; 2) mkdir -p "$DIR" || { echo "reservation: cannot create $DIR" >&2; exit 1; } ;; esac; }
 case "${1:-}" in
   add)
-    mb="${2:-}"; ttl="${3:-90}"; ses=$(san "${4:-}"); typ=$(san "${5:-}"); id=$(san "$OPT_ID")
+    mb="${2:-}"; ttl="${3:-90}"; ses=$(san "${4:-}"); typ=$(san "${5:-}"); id="${OPT_ID:--}"
     valid "$mb" && valid "$ttl" && [ "$((10#$mb))" -le "$MAX_MB" ] || { echo "reservation: mb and ttl are bounded decimals" >&2; exit 2; }
-    take_lock; mkdir -p "$DIR" || exit 2
+    valid_id "$id" || { echo "reservation: an id is 32 hex (or absent)" >&2; exit 2; }
+    take_lock; open_dir; validate_all
+    if [ "$id" != - ]; then   # a repeat is refused: a replayed marker cannot release twice
+      seen=0; dup() { [ "$7" = "$id" ] && seen=1; return 0; }; scan dup
+      while IFS= read -r f; do case "$f" in *.expired) parse "$f" || exit 1; [ "$fid" = "$id" ] && seen=1 ;; esac; done < <(entries)
+      [ "$seen" = 0 ] || { echo "reservation: id $id is already on the ledger" >&2; exit 2; }
+    fi
     f="$DIR/$$-$now-$RANDOM"; write_atomic "$f" "$((10#$mb)) $((now + 10#$ttl)) $ses $typ 0 $id -" || exit 2; echo "$f" ;;
   outstanding|live)
     take_lock; sum=0; n=0
     acc() { [ "$6" = counting ] || return 0; sum=$((sum + 10#$2)); n=$((n + 1)); [ "$sum" -le "$MAX_MB" ]; }
     dir_ok; st=$?
-    if [ "$st" = 0 ]; then scan acc || { echo "reservation: scan failed, nothing counted" >&2; exit 1; }; prune || { echo "reservation: prune failed" >&2; exit 1; }
+    if [ "$st" = 0 ]; then validate_all; scan acc; prune
     elif [ "$st" = 1 ]; then exit 1; fi
     if [ "$1" = live ]; then echo "$sum"; else echo "$sum $n"; fi ;;
   start)
-    ses=$(san "${2:?session}"); typ=$(san "${3:?type}"); ag=$(san "$OPT_AGENT"); take_lock; mkdir -p "$DIR" 2>/dev/null
-    late_start "$ses" "$typ" "$ag"      # tombstones BEFORE any scan or prune (PR B): a day-late start is still a late start
+    ses=$(san "${2:?session}"); typ=$(san "${3:?type}"); ag=$(san "$OPT_AGENT"); take_lock; open_dir; validate_all
+    late_start "$ses" "$typ" "$ag"      # tombstones BEFORE any scan or prune: a day-late start is still a late start
     oldest=""
     pick() { if [ "$6" = counting ] && [ "$3" = "$ses" ] && [ "$4" = "$typ" ] && [ "$5" = 0 ]; then if [ -z "$oldest" ] || [ "$1" -ot "$oldest" ]; then oldest="$1"; fi; fi; }
-    scan pick || exit 1
+    scan pick
     if [ -n "$oldest" ]; then
       parse "$oldest" || exit 1; write_atomic "$oldest" "$fmb $fexp $fses $ftyp $now $fid $ag" || exit 1
       echo "$oldest"; exit 0
     fi
-    prune || exit 1                  # an expired live record of the class becomes its tombstone: a late start too
+    prune                            # an expired live record of the class becomes its tombstone: a late start too
     late_start "$ses" "$typ" "$ag"
     echo "reservation: no unstarted reservation for $ses $typ" >&2; exit 3 ;;
   stop)
-    ses=$(san "${2:?session}"); typ=$(san "${3:?type}"); id=$(san "$OPT_ID"); ag=$(san "$OPT_AGENT"); take_lock
+    ses=$(san "${2:?session}"); typ=$(san "${3:?type}"); id="${OPT_ID:--}"; ag=$(san "$OPT_AGENT"); take_lock
+    valid_id "$id" || { echo "reservation: an id is 32 hex (or absent)" >&2; exit 2; }
+    dir_ok; case $? in 1) exit 1 ;; 2) echo "reservation: no reservations directory" >&2; exit 3 ;; esac
+    validate_all
     byid=""; byag=""; byclass=""
     pick() {
       [ "$id" != - ] && [ "$7" = "$id" ] && byid="$1"
@@ -169,8 +204,8 @@ case "${1:-}" in
       if [ "$3" = "$ses" ] && [ "$4" = "$typ" ] && [ "$5" != 0 ]; then if [ -z "$byclass" ] || [ "$1" -ot "$byclass" ]; then byclass="$1"; fi; fi
       return 0
     }
-    dir_ok >/dev/null 2>&1 && { scan pick || exit 1; }
-    for f in "$byid" "$byag" "$byclass"; do [ -n "$f" ] && { rm -f -- "$f"; echo "$f"; exit 0; }; done
+    scan pick
+    for f in "$byid" "$byag" "$byclass"; do [ -n "$f" ] && { rm -f -- "$f" || { echo "reservation: cannot release $f" >&2; exit 1; }; echo "$f"; exit 0; }; done
     echo "reservation: no started reservation for $ses $typ (id $id, agent $ag)" >&2; exit 3 ;;
   start-hook|stop-hook)
     verb="${1%-hook}"; j=$(cat 2>/dev/null)
@@ -180,8 +215,34 @@ case "${1:-}" in
     if [ -z "$ses" ] || [ -z "$typ" ]; then printf '%s %s-hook: no session_id or agent_type in the hook input: nothing marked\n' "$(date -Is)" "$verb" >> "$DIR/../start-hook.log"; exit 0; fi
     extra=()
     if [ "$verb" = stop ]; then
+      # the id comes back ONLY from the session's own subagent transcript, at its one expected path, a regular file
+      # opened without following symlinks, at most 1 MiB, one bounded field; anything else: release by agent_id
       tp=$(printf '%s' "$j" | jq -r '.agent_transcript_path // empty' 2>/dev/null); tp="${tp/#\~/$HOME}"
-      rid=""; [ -n "$tp" ] && [ -f "$tp" ] && rid=$(head -c 1048576 -- "$tp" 2>/dev/null | grep -o 'dreamteam reservation [A-Za-z0-9._:-]*' | head -1 | awk '{print $3}')
+      ptp=$(printf '%s' "$j" | jq -r '.transcript_path // empty' 2>/dev/null); ptp="${ptp/#\~/$HOME}"
+      rid=""
+      if [ -n "$tp" ] && [ -n "$ptp" ] && [ -n "$aid" ] && valid_tok "$ses" && valid_tok "$aid" \
+         && [ "$tp" = "$(dirname -- "$ptp")/$ses/subagents/agent-$aid.jsonl" ]; then
+        rid=$(python3 - "$tp" <<'PY' 2>/dev/null
+import os, re, stat, sys
+p = sys.argv[1]
+try:
+    fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_NOCTTY)
+except OSError:
+    sys.exit(1)
+try:
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        sys.exit(1)
+    data = os.read(fd, 1 << 20)
+finally:
+    os.close(fd)
+m = re.search(rb"\[dreamteam reservation ([0-9a-f]{32})\]", data)
+if not m:
+    sys.exit(1)
+sys.stdout.write(m.group(1).decode("ascii"))
+PY
+) || rid=""
+      fi
       [ -n "$rid" ] && extra=(--id "$rid")
     fi
     [ -n "$aid" ] && extra+=(--agent "$aid")

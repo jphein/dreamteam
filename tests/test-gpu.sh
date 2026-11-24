@@ -216,7 +216,14 @@ mkdir -p "$h/noaccess/resv"; chmod 000 "$h/noaccess"
 resv=$(python3 "$LIB" probe-script gpu1 | DREAMTEAM_RESERVATIONS="$h/noaccess/resv" PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^RESV,')
 chmod 700 "$h/noaccess"
 check "$resv" "RESV,ERR" "sampler: a reservations directory behind an unreadable parent (EACCES) is RESV,ERR, not RESV,OK,0 (PR B)"
-both "300 $((nowr + 60)) s-a morpheus 0 r-1 ag-1" 300 "a seven-field record (id and agent, PR B) counts in both"
+both "300 $((nowr + 60)) s-a morpheus 0 0123456789abcdef0123456789abcdef ag-1" 300 "a seven-field record (id and agent, PR B) counts in both"
+both "300 $((nowr + 60)) s-a morpheus 0 - -" 300 "a seven-field record with no id and no agent counts in both"
+both "300 $((nowr + 60)) s-a morpheus 0 not-hex ag-1" ERR "an id that is not 32 hex (nor -) is an error for both (#289 r1 (5))"
+both "300 $((nowr + 60)) s-a morpheus 0 0123456789abcdef0123456789abcdef bad/agent" ERR "an agent outside the token alphabet is an error for both"
+both "300 $((nowr + 60)) s-a morpheus 0 0123456789abcdef0123456789abcdef ag-1 extra" ERR "an eight-field record is an error for both"
+rm -rf "$rl"; mkdir -p "$rl"; printf '300 %s s-a morpheus 0 - -\n' "$((nowr + 60))" > "$rl/1-1-1"; chmod 000 "$rl/1-1-1"
+p=$(python3 "$LIB" probe-script gpu1 | DREAMTEAM_RESERVATIONS="$rl" PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^RESV,'); chmod 600 "$rl/1-1-1"
+check "$p" "RESV,ERR" "sampler: an unreadable record is RESV,ERR, never skipped (#289 r1 (4))"
 printf '300 %s s-a morpheus %s\n' "$((nowe - 5))" "$((nowe - 10))" > "$rd/16-7"       # started, past its expiry: still counted
 resv=$(python3 "$LIB" probe-script gpu1 | HOME="$h" DREAMTEAM_RESERVATIONS= PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^RESV,')
 check "$resv" "RESV,OK,1300" "sampler: a STARTED reservation past its expiry still counts (1000 + 300): released by SubagentStop, not by time (r4 item 2)"
