@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# dreamteam — io-shield: make I/O weights real on this host, and give the known hogs a low one.
+# A SYSTEM tool (root). The copy of record is here; the installed copy is /usr/local/sbin/dreamteam-io-shield
+# (systemd/system/README.md). Nothing in this repo installs it.
+#
+# WHY (Flow row 7e039111, measured 2026-11-21). An interactive session froze while "idle class, nice 15" jobs
+# ran. Two reasons niceness cannot fix:
+#   1. The reader was not the job. A palace test asks Postgres, and Postgres (docker container mempalace-db, its
+#      own cgroup, normal class) did the reading: 60 MB/s for one SELECT. A client's nice level stops at the socket.
+#   2. No weight was in force anywhere. With the mq-deadline or none scheduler a cgroup's IOWeight= does nothing
+#      until io.cost is enabled for the device, and the default io.cost settings barely help.
+# The same test on serialhub's NVMe, a victim doing what an interactive session does (4 KiB direct reads, a
+# 4 KiB append + fdatasync) against 4 sequential readers and 1 writer:
+#       alone                                   fsync p99   4.5 ms
+#       hogs, no control                        fsync p99 453   ms   (a typing freeze)
+#       io.cost defaults, weights 10 : 100      fsync p99  19.9 ms
+#       io.cost with latency targets, 10 : 100  fsync p99   7.7 ms   (hogs still 267 MB/s read)
+#       the same io.cost, EQUAL weights         fsync p99  92   ms   (so the weight is what does it)
+#
+# WHAT IT DOES, from one config file (default /etc/dreamteam/io-shield.conf; host data, never in this repo):
+#   device <name> [rlat=<µs>] [wlat=<µs>] [min=<pct>] [max=<pct>]
+#       enable io.cost on /sys/block/<name> with latency targets: 95 % of reads under rlat, of writes under wlat;
+#       the controller slows everyone's budget down to min % of the device model when a target is missed, and it
+#       is that budget which the weights divide. Defaults rlat=2000 wlat=5000 min=25 max=100.
+#   unit <unit> <weight>
+#       systemctl set-property --runtime <unit> IOWeight=<weight>   (1-10000, default weight is 100)
+#   docker <container name> <weight>
+#       the same for that container's scope, docker-<full id>.scope (the id changes when it is recreated, so
+#       the timer re-applies every few minutes).
+#   Blank lines and lines starting with # are skipped. ANY other line, or a bad value, stops the run before
+#   anything is written (exit 22): a half-read config never applies half a policy.
+#
+#   io-shield apply      write the device lines to io.cost.qos, then set the weights. A unit or container that
+#                        is not there is a note, not an error (it may not be running yet); the next run sets it.
+#   io-shield off        disable io.cost on the configured devices (weights then do nothing again).
+#   io-shield status     print io.cost.qos and each configured unit's IOWeight. Read-only.
+#
+# Everything is runtime state: a reboot, or `off`, returns the host to what it was. Exit: 0 done · 1 a write
+# or a set-property failed · 2 not root (apply, off) or no config · 22 bad argument or bad config line.
+set -uo pipefail
+CONF="${IO_SHIELD_CONF:-/etc/dreamteam/io-shield.conf}"
+QOS="${IO_SHIELD_QOS_FILE:-/sys/fs/cgroup/io.cost.qos}"
+SYSBLOCK="${IO_SHIELD_SYSBLOCK:-/sys/block}"
+
+usage() { echo "usage: io-shield apply|off|status" >&2; exit 22; }
+[ "$#" -eq 1 ] || usage
+MODE=$1
+case "$MODE" in apply|off|status) ;; *) usage ;; esac
+[ -r "$CONF" ] && [ -f "$CONF" ] || { echo "io-shield: no readable config at $CONF" >&2; exit 2; }
+if [ "$MODE" != status ] && [ "${IO_SHIELD_ASSUME_ROOT:-}" != 1 ] && [ "$(id -u)" -ne 0 ]; then
+  echo "io-shield: $MODE needs root" >&2; exit 2
+fi
+
+num() { [[ "$1" =~ ^[0-9]{1,7}$ ]]; }
+DEVS=(); DEVQ=(); UNITS=(); UNITW=(); DOCK=(); DOCKW=()
+n=0
+while IFS= read -r line || [ -n "$line" ]; do
+  n=$((n + 1))
+  read -r -a w <<< "$line" || true
+  [ "${#w[@]}" -eq 0 ] && continue
+  case "${w[0]}" in
+    \#*) continue ;;
+    device)
+      [ "${#w[@]}" -ge 2 ] && [[ "${w[1]}" =~ ^[a-z0-9]{1,32}$ ]] || { echo "io-shield: $CONF line $n: device needs a plain block device name" >&2; exit 22; }
+      rlat=2000; wlat=5000; min=25; max=100
+      for kv in "${w[@]:2}"; do
+        k=${kv%%=*}; v=${kv#*=}
+        num "$v" || { echo "io-shield: $CONF line $n: '$kv' is not key=<number>" >&2; exit 22; }
+        case "$k" in rlat) rlat=$v ;; wlat) wlat=$v ;; min) min=$v ;; max) max=$v ;;
+          *) echo "io-shield: $CONF line $n: unknown key '$k' (rlat wlat min max)" >&2; exit 22 ;; esac
+      done
+      { [ "$min" -ge 1 ] && [ "$max" -le 10000 ] && [ "$min" -le "$max" ] && [ "$rlat" -ge 1 ] && [ "$wlat" -ge 1 ]; } \
+        || { echo "io-shield: $CONF line $n: need 1 <= min <= max <= 10000 and latencies of at least 1 µs" >&2; exit 22; }
+      DEVS+=("${w[1]}"); DEVQ+=("ctrl=user rpct=95.00 rlat=$rlat wpct=95.00 wlat=$wlat min=$min.00 max=$max.00") ;;
+    unit|docker)
+      [ "${#w[@]}" -eq 3 ] && num "${w[2]}" && [ "${w[2]}" -ge 1 ] && [ "${w[2]}" -le 10000 ] \
+        || { echo "io-shield: $CONF line $n: ${w[0]} needs <name> <weight 1-10000>" >&2; exit 22; }
+      [[ "${w[1]}" =~ ^[A-Za-z0-9][A-Za-z0-9@_.:\\-]{0,200}$ ]] || { echo "io-shield: $CONF line $n: '${w[1]}' is not a plain name" >&2; exit 22; }
+      if [ "${w[0]}" = unit ]; then UNITS+=("${w[1]}"); UNITW+=("${w[2]}"); else DOCK+=("${w[1]}"); DOCKW+=("${w[2]}"); fi ;;
+    *) echo "io-shield: $CONF line $n: unknown word '${w[0]}' (device, unit, docker)" >&2; exit 22 ;;
+  esac
+done < "$CONF"
+
+devno() {   # block device name → MAJ:MIN, or nothing
+  local f="$SYSBLOCK/$1/dev" d
+  [ -r "$f" ] && read -r d < "$f" && [[ "$d" =~ ^[0-9]+:[0-9]+$ ]] && printf '%s' "$d"
+}
+docker_unit() {   # container name → docker-<id>.scope, or nothing
+  local id
+  id=$(docker inspect -f '{{.Id}}' "$1" 2>/dev/null) && [[ "$id" =~ ^[0-9a-f]{64}$ ]] && printf 'docker-%s.scope' "$id"
+}
+
+rc=0
+case "$MODE" in
+  status)
+    echo "io.cost.qos: $(tr '\n' ';' < "$QOS" 2>/dev/null)"
+    for i in "${!UNITS[@]}"; do echo "unit ${UNITS[$i]}: want ${UNITW[$i]}, IOWeight=$(systemctl show "${UNITS[$i]}" -p IOWeight --value 2>/dev/null)"; done
+    for i in "${!DOCK[@]}"; do u=$(docker_unit "${DOCK[$i]}"); echo "docker ${DOCK[$i]}: want ${DOCKW[$i]}, ${u:-not running}${u:+ IOWeight=$(systemctl show "$u" -p IOWeight --value 2>/dev/null)}"; done ;;
+  off)
+    for d in "${DEVS[@]}"; do
+      mm=$(devno "$d") || true
+      [ -n "${mm:-}" ] || { echo "io-shield: no device $d here" >&2; rc=1; continue; }
+      if printf '%s enable=0\n' "$mm" > "$QOS"; then echo "io.cost off on $d ($mm)"; else echo "io-shield: could not write $QOS for $d" >&2; rc=1; fi
+    done ;;
+  apply)
+    for i in "${!DEVS[@]}"; do
+      d=${DEVS[$i]}; mm=$(devno "$d") || true
+      [ -n "${mm:-}" ] || { echo "io-shield: no device $d here" >&2; rc=1; continue; }
+      if printf '%s enable=1 %s\n' "$mm" "${DEVQ[$i]}" > "$QOS"; then echo "io.cost on $d ($mm): ${DEVQ[$i]}"
+      else echo "io-shield: could not write $QOS for $d" >&2; rc=1; fi
+    done
+    setw() {   # unit weight label
+      if [ "$(systemctl show "$1" -p LoadState --value 2>/dev/null)" != loaded ]; then echo "note: $3 is not loaded now; the next run sets it"; return 0; fi
+      if systemctl set-property --runtime "$1" "IOWeight=$2"; then echo "IOWeight=$2 on $3"; else echo "io-shield: set-property failed for $3" >&2; rc=1; fi
+    }
+    for i in "${!UNITS[@]}"; do setw "${UNITS[$i]}" "${UNITW[$i]}" "${UNITS[$i]}"; done
+    for i in "${!DOCK[@]}"; do
+      u=$(docker_unit "${DOCK[$i]}") || true
+      if [ -n "${u:-}" ]; then setw "$u" "${DOCKW[$i]}" "container ${DOCK[$i]}"; else echo "note: container ${DOCK[$i]} is not there now; the next run sets it"; fi
+    done ;;
+esac
+exit "$rc"

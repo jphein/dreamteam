@@ -37,6 +37,15 @@
     "enforce": true,
     "_notes": "no-poll-guard.sh (PreToolUse Bash|Monitor in TEAMMATE sessions) blocks a LOOPING GraphQL-heavy GitHub CI read (`gh pr checks`, `gh pr view --json statusCheckRollup`). Measured 2026-09-11: three lanes' 30s pollers exhausted the per-ACCOUNT quota and every gh call in the fleet failed, including the lead's merge cascade — and `gh api rate_limit` read 5000 remaining throughout, because it cannot see GraphQL SECONDARY limits. One-shot reads and the REST route (gh api .../check-runs, what pr-gate.sh uses) stay allowed; the orchestrator is never blocked. Escape: enforce=false, or push and let the lead run scripts/pr-gate.sh once."
   },
+  "lanes": {
+    "enabled": false,
+    "cpuWeight": 50,
+    "ioWeight": 25,
+    "memoryHigh": "",
+    "memorySwapMax": "",
+    "units": [],
+    "_notes": "scripts/lane-slice.sh: one user slice, lanes.slice, that every lane session and gate runs under (Flow row 7e039111). enabled=false here: a host opts in through its overlay config.<host>.json, which must also give exclude (a list, may be empty): the tmux sessions that are NOT lanes (the lead's, a person's). Without exclude the tool refuses. cpuWeight / ioWeight are shares under contention (100 = everything outside the slice); memoryHigh / memorySwapMax apply to all lanes together, empty = not set. units: user units that are gates or batch timers, each given a Slice=lanes.slice drop-in. IOWeight is real only with io.cost on (scripts/host/io-shield) and the io controller delegated to the user manager (systemd/system/user@.service.d/20-delegate-io.conf, from the next boot); CPUWeight and the memory limits need neither. Measured on an NVMe 2026-11-21: a victim's fsync p99 beside 4 readers and a writer was 453 ms with no control and 7.7 ms with io.cost latency targets and a 10:100 weight."
+  },
   "flow": {
     "enforce": true,
     "leads": [

@@ -1,0 +1,10 @@
+[Unit]
+Description=dreamteam: io-shield (io.cost with latency targets on the configured devices, low IOWeight on the known hogs)
+Documentation=https://github.com/jphein/dreamteam/blob/main/systemd/system/README.md
+ConditionPathExists=/etc/dreamteam/io-shield.conf
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/dreamteam-io-shield apply
+TimeoutStartSec=60
