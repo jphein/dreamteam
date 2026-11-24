@@ -8,82 +8,64 @@
 # this script said "no tmux session, relaunch by hand" every 2 minutes for 37 hours.
 #
 # IDENTITY: lead.session, written by the lead's own SessionStart hook (scripts/lead-session-write.sh), is the ONLY
-# source of who the lead is and where it lives: session id, pane, working directory. Nothing shown in a pane is
-# ever used as an id (pane history is text anyone can print). No valid lead.session → nothing is made or typed.
+# source of who the lead is and where it lives: session id, pane, working directory. It is read by
+# lib/lead-record.sh and must be COMPLETE and UNAMBIGUOUS (one session=, one pane=, one cwd=, nothing unknown, a
+# plain file of ours, a directory that exists). There is NO default pane and NO default directory: without a valid
+# record this script says fail and looks at nothing, makes nothing, types nothing. Nothing shown in a pane is ever
+# used as an id.
 #
 # WHAT IT DOES, every tick, under ONE lock held from the first look to the last key:
 #   the recorded pane has a running child                         → ok
-#   a process resuming the lead's id is alive ANYWHERE on the host,
-#     or the lead's named scope is active                         → warn, nothing made, nothing typed
+#   ANY process on the host carries the lead's id in its command
+#     line (any name, owner, argument form), or the lead's named
+#     scope is active, or a launch is in progress                 → warn, nothing made, nothing typed
 #   otherwise the lead is gone. The place is restored as recorded (the session, the window at its recorded index,
-#     the working directory), a pane that is dead or not at a shell prompt is respawned, and the lead is resumed
-#     there INSIDE its own named scope:
-#         systemd-run --user --scope --unit=lead-<session> -p ManagedOOMPreference=avoid claude --resume <id> …
-#     so the lead's cgroup is a unit this script named and created (oomd passes it over; the root helper of
-#     dreamteam io-shield gives exactly that unit its OOM score), whichever tmux server or pane it runs in.
+#     the working directory), a pane that is dead or not at a shell prompt is respawned, and ONE line is typed:
+#         bash <this repo>/scripts/lead-launch.sh
+#     The launcher reads lead.session itself and makes the LAST check at launch time, under the launch lock every
+#     launch takes, then execs the lead inside its own named scope (lead-<session>.scope, oomd preference set at
+#     creation). No scope runner → nothing is typed: the lead is never started outside its scope.
 #
-# NEVER TWO LEADS. The check "is a lead alive" (pane child, host-wide process, named scope) is repeated inside the
-# lock immediately before each step that creates, respawns or types; a lead that starts in between stops the run.
-# The lock also serializes this script against itself. A person starting the lead by hand does not take the lock;
-# the repeated host-wide check is what sees them.
+# NEVER TWO LEADS. The gate (pane child, host-wide command-line search, named scope, launch lock) runs inside the
+# lock immediately before every step that creates, respawns or types. NOTHING is sent to the pane before the last
+# gate, and what is sent after it is one tmux call (clear the line, the launcher's line, Enter) with no wait and no
+# step in between. A lead that starts after that gate is seen by the launcher's own look, which refuses.
+#
+# THE LOCK IS THIS PROCESS'S ALONE: everything after it runs as `main 9>&-`, so no program this script starts
+# (tmux, systemctl, date, awk, a pipeline, a sleep, the mailer, a tmux server) ever holds the lock's descriptor.
 #
 # Guards: a kill-switch file; no relaunch while a client typed in the session within 60 s; at most 3 an hour.
 # A tmux SERVER this script has to start is started in a scope of its own (a child of this unit would be ended
-# with the unit); with no systemd-run it does not start one.
+# with the unit).
 #
 # CHECK lead-liveness <ok|warn|fail> · <detail> · every 2 min, owner Sen      (dreamteam docs/CHECKS.md)
 set -u
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P) || exit 0
 STATE="${LEAD_WATCHDOG_STATE:-$HOME/.local/state/dreamteam}"
-UUID='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
-PLAIN='^/[A-Za-z0-9_./-]+$'
-# lead.session is read as data, line by line, each value checked against a strict shape; never sourced. Its
-# `launch=` line is information for a person and is never typed: the command is always built here.
-f_sid=""; f_pane=""; f_cwd=""
-LS="$STATE/lead.session"
-if [ -f "$LS" ] && [ ! -L "$LS" ]; then
-    while IFS= read -r l; do
-        case "$l" in
-            session=*) [[ "${l#session=}" =~ ^$UUID$ ]] && f_sid="${l#session=}" ;;
-            pane=*)    [[ "${l#pane=}" =~ ^[A-Za-z0-9_.-]+:[0-9]+\.[0-9]+$ ]] && f_pane="${l#pane=}" ;;
-            cwd=*)     [[ "${l#cwd=}" =~ $PLAIN ]] && f_cwd="${l#cwd=}" ;;
-        esac
-    done < "$LS"
-fi
-PANE="${LEAD_PANE:-${f_pane:-spire:0.0}}"
-SESSION="${PANE%%:*}"; WIN="${PANE#*:}"; WIN="${WIN%%.*}"
-CWD="${f_cwd:-$HOME}"
 CHECKS="${CHECKS_DIR:-$HOME/.local/state/checks}"
 OFF="$STATE/lead-watchdog.off"
 HIST="$STATE/lead-watchdog.relaunches"      # one epoch per relaunch
 LINE="$CHECKS/lead-liveness.line"
+LAUNCHER="$here/lead-launch.sh"
 LAUNCH_ENV="${LEAD_LAUNCH_ENV:-$HOME/.config/claude-code/env.sh}"
 MAIL="${LEAD_WATCHDOG_MAIL:-agent-mail}"    # `agent-mail send sen "<text>"`; set to "true" in tests
-UNIT="${LEAD_SCOPE_UNIT:-lead-${SESSION//[^A-Za-z0-9_-]/_}}"      # the lead's named scope (without .scope)
-# LEAD_TMUX_SOCKET: a private server (tests). `9>&-`: nothing this script starts gets a copy of the lock's
-# descriptor (see the lock below); a tmux server or any other process that outlived the run would hold the lock.
-tm() { tmux ${LEAD_TMUX_SOCKET:+-L "$LEAD_TMUX_SOCKET"} "$@" 9>&-; }
 MAX_PER_HOUR=3
 mkdir -p "$STATE" "$CHECKS"
 
 line() {  # <status> <detail>: the one fixed-shape line
     printf 'CHECK lead-liveness %s · %s · every 2 min, owner Sen\n' "$1" "$2" | tee "$LINE"
 }
-tell() { "$MAIL" send sen "lead-watchdog $(date +%H:%M): $1" >/dev/null 2>&1 9>&- || true; }
+tell() { "$MAIL" send sen "lead-watchdog $(date +%H:%M): $1" >/dev/null 2>&1 || true; }
+# shellcheck source=lib/lead-record.sh
+. "$here/lib/lead-record.sh" || { line fail "cannot read $here/lib/lead-record.sh: nothing done"; exit 0; }
 
 [ -e "$OFF" ] && { line warn "watchdog off ($OFF present)"; exit 0; }
 
-# ONE lock from here to the end: the looks and the acts below are one critical section. Every process started
-# below is started with `9>&-`, so the lock is held by this script alone and ends with it.
 exec 9>"$STATE/lead-watchdog.lock" || { line fail "cannot open the lock file in $STATE"; exit 0; }
-flock -n 9 || { line warn "another lead-watchdog run holds the lock: nothing done this tick"; exit 0; }
+flock -n 9 || { exec 9>&-; line warn "another lead-watchdog run holds the lock: nothing done this tick"; exit 0; }
 
-# How the lead is put in its scope, and how a tmux server is started when none runs. LEAD_SCOPE_RUN replaces the
-# runner (tests); it must be a plain path. LEAD_SHELL_CMD: what a pane made here runs (default: the user's shell).
-if [ -n "${LEAD_SCOPE_RUN+x}" ]; then SCOPE_RUN="$LEAD_SCOPE_RUN"
-elif command -v systemd-run >/dev/null 2>&1; then SCOPE_RUN="systemd-run --user --scope --quiet --collect"
-else SCOPE_RUN=""; fi
-SHELL_CMD="${LEAD_SHELL_CMD:-}"
-
+tm() { tmux ${LEAD_TMUX_SOCKET:+-L "$LEAD_TMUX_SOCKET"} "$@"; }   # LEAD_TMUX_SOCKET: a private server (tests)
+SHELL_CMD="${LEAD_SHELL_CMD:-}"                                    # what a pane made here runs (default: the user's shell)
 budget_left() {
     local t; t=$(date +%s)
     touch "$HIST"; awk -v t="$((t - 3600))" '$1 >= t' "$HIST" > "$HIST.tmp" && mv "$HIST.tmp" "$HIST"
@@ -100,130 +82,132 @@ prompt_now() {
     return 1
 }
 wait_prompt() { local i; for i in $(seq 1 25); do prompt_now && return 0; sleep 0.2; done; return 1; }
-# A process of ours named claude whose arguments are `--resume <the lead's id>`: the lead, wherever it runs
-# (another pane, another session, detached from its shell). Prints its pid.
-lead_process() {
-    [ -n "$f_sid" ] || return 1
-    local d p
-    for d in /proc/[0-9]*; do
-        p=${d#/proc/}
-        [ "$(cat "$d/comm" 2>/dev/null)" = claude ] || continue
-        [ "$(stat -c %u "$d" 2>/dev/null)" = "$(id -u)" ] || continue
-        if tr '\0' '\n' < "$d/cmdline" 2>/dev/null | grep -A1 -xF -- '--resume' | grep -qxF -- "$f_sid"; then echo "$p"; return 0; fi
-    done
-    return 1
-}
 scope_active() { systemctl --user is-active --quiet "$UNIT.scope" 2>/dev/null; }
-# THE GATE, run inside the lock right before every step that creates, respawns or types. LEAD_WATCHDOG_BEFORE_GATE
-# (tests only, a plain path) runs first: it lets a test start a lead "between the check and the act".
+launch_in_progress() { [ -f "$STATE/lead-launch.lock" ] && ! flock -n "$STATE/lead-launch.lock" true 2>/dev/null; }
+# Test seam (a plain path, tests only), called with `gate` before every gate and with `send` between the LAST gate
+# and the keys: it lets a test start a lead at exactly those moments.
+hook() { [[ "${LEAD_WATCHDOG_TEST_HOOK:-}" =~ $LR_PLAIN ]] && "$LEAD_WATCHDOG_TEST_HOOK" "$1" >/dev/null 2>&1; return 0; }
+# THE GATE: is a lead alive, anywhere, in any form? Run inside the lock right before every step that creates,
+# respawns or types.
 alive=""
 gate() {
-    [[ "${LEAD_WATCHDOG_BEFORE_GATE:-}" =~ $PLAIN ]] && "$LEAD_WATCHDOG_BEFORE_GATE" >/dev/null 2>&1 9>&-
+    hook gate
     local p
     if pane_exists && p=$(pane_child) && [ -n "$p" ]; then alive="pane $PANE has a running child (pid $p)"; return 1; fi
-    if p=$(lead_process); then alive="a process resuming ${f_sid:0:8} is alive (pid $p) outside $PANE"; return 1; fi
+    if p=$(lead_id_holders "$SID"); then alive="the lead's id ${SID:0:8} is in the command line of $(echo $p), outside $PANE"; return 1; fi
     if scope_active; then alive="the lead's scope $UNIT.scope is active"; return 1; fi
+    if launch_in_progress; then alive="a launch of the lead is in progress (the launch lock is held)"; return 1; fi
     return 0
 }
 stop_alive() { line warn "$alive: nothing made, nothing typed${1:+ ($1)}"; tell "$alive; not relaunching"; exit 0; }
 
-# 1. The recorded pane has a running child: alive. (The process table is the instrument on purpose: "is anything
-#    running in that shell", not "is it healthy".)
-if tm has-session -t "=$SESSION" 2>/dev/null && pane_exists && c=$(pane_child) && [ -n "$c" ]; then
-    line ok "pane $PANE has a running child (pid $c)"; exit 0
-fi
-
-# 2. The lead is not in its pane. Everything below needs the recorded identity.
-if [ -z "$f_sid" ]; then
-    if ! tm has-session -t "=$SESSION" 2>/dev/null; then what="no tmux session '$SESSION'"; elif ! pane_exists; then what="pane $PANE not found"; else what="pane $PANE is at a shell"; fi
-    line fail "$what and no valid lead.session (the only source of the lead's id): not relaunching"
-    tell "$what and no valid lead.session; relaunch by hand"; exit 0
-fi
-[[ "$LAUNCH_ENV" =~ $PLAIN && "$CWD" =~ $PLAIN ]] || { line fail "the launch-env path or the working directory is not in a plain form: not typing anything"; tell "lead-watchdog: launch env or cwd not plain; relaunch by hand"; exit 0; }
-[ -z "$SCOPE_RUN" ] || [ "$SCOPE_RUN" = "systemd-run --user --scope --quiet --collect" ] || [[ "$SCOPE_RUN" =~ $PLAIN ]] || { line fail "the scope runner is not in a plain form: not typing anything"; exit 0; }
-[[ "$UNIT" =~ ^[A-Za-z0-9_-]{1,80}$ ]] || { line fail "the scope unit name is not in a plain form: not typing anything"; exit 0; }
-sid="$f_sid"
-
-# 3. Is the lead alive somewhere else? Asked BEFORE anything is made.
-gate || stop_alive
-
-# Someone typing in the session? (a human may be at the keys)
-now=$(date +%s)
-if tm has-session -t "=$SESSION" 2>/dev/null; then
-    act=$(tm display -p -t "=$SESSION:" '#{client_activity}' 2>/dev/null || echo 0)
-    if [ "${act:-0}" -gt 0 ] && [ $((now - act)) -lt 60 ]; then
-        line warn "the lead (${sid:0:8}) is gone from $PANE but a client typed $((now - act)) s ago: retry next tick"; exit 0
+main() {
+    # 0. THE RECORD FIRST. Not valid → fail, before any pane, session or process is looked at.
+    if ! lead_record_read "$STATE/lead.session"; then
+        line fail "no valid lead.session ($LR_ERR): the record is the only source of the lead's id, pane and directory, so nothing is looked at, made or typed"
+        tell "no valid lead.session ($LR_ERR); relaunch by hand"; exit 0
     fi
-fi
-if ! budget_left; then
-    line fail "the lead (${sid:0:8}) is gone from $PANE; $MAX_PER_HOUR relaunches already in the last hour: stopping (clear $HIST)"
-    tell "lead relaunch loop: $MAX_PER_HOUR in an hour; not relaunching ${sid:0:8}"; exit 0
-fi
+    SID=$LR_SID; PANE=$LR_PANE; CWD=$LR_CWD
+    SESSION="${PANE%%:*}"; WIN="${PANE#*:}"; WIN="${WIN%%.*}"
+    lead_unit "$PANE" || { line fail "the scope unit name is not in a plain form: nothing done"; exit 0; }
+    UNIT=$LR_UNIT
 
-# 4. Restore the place as recorded: the session, the window at its recorded index, the working directory.
-made=""
-if ! tm has-session -t "=$SESSION" 2>/dev/null; then
+    # 1. The recorded pane has a running child: alive. (The process table is the instrument on purpose: "is
+    #    anything running in that shell", not "is it healthy".)
+    if tm has-session -t "=$SESSION" 2>/dev/null && pane_exists && c=$(pane_child) && [ -n "$c" ]; then
+        line ok "pane $PANE has a running child (pid $c)"; exit 0
+    fi
+
+    # 2. The lead is not in its pane. What a relaunch needs must all be there BEFORE anything is made: the
+    #    launcher, a plain launch-env path, and a scope runner (no runner → no launch, never a lead outside its scope).
+    [[ "$LAUNCHER" =~ $LR_PLAIN ]] && [ -f "$LAUNCHER" ] || { line fail "the launcher ($LAUNCHER) is missing or its path is not plain: nothing typed"; tell "lead launcher missing; relaunch by hand"; exit 0; }
+    [[ "$LAUNCH_ENV" =~ $LR_PLAIN ]] || { line fail "the launch-env path is not in a plain form: nothing typed"; tell "launch env path not plain; relaunch by hand"; exit 0; }
+    if ! lead_runner; then
+        line fail "the lead (${SID:0:8}) is gone from $PANE and $LR_ERR: the lead is only ever started inside its named scope, so nothing is made or typed"
+        tell "$LR_ERR; the lead is not relaunched outside its scope; relaunch by hand"; exit 0
+    fi
+
+    # 3. Is the lead alive somewhere else? Asked BEFORE anything is made.
     gate || stop_alive
-    if tm list-sessions >/dev/null 2>&1; then
-        tm new-session -d -s "$SESSION" -x 200 -y 50 -c "$CWD" ${SHELL_CMD:+"$SHELL_CMD"} 2>/dev/null
-    elif [ -n "$SCOPE_RUN" ]; then
-        # shellcheck disable=SC2086
-        $SCOPE_RUN --unit="tmux-${UNIT#lead-}-$now" tmux ${LEAD_TMUX_SOCKET:+-L "$LEAD_TMUX_SOCKET"} new-session -d -s "$SESSION" -x 200 -y 50 -c "$CWD" ${SHELL_CMD:+"$SHELL_CMD"} >/dev/null 2>&1 9>&-
-    else
-        line fail "no tmux server and no systemd-run: a server started here would end with this unit; not recreating '$SESSION'"
-        tell "no tmux server and no systemd-run; relaunch by hand"; exit 0
-    fi
-    for _ in 1 2 3 4 5 6 7 8 9 10; do tm has-session -t "=$SESSION" 2>/dev/null && break; sleep 0.3; done
-    cur=$(tm list-windows -t "=$SESSION" -F '#{window_index}' 2>/dev/null | head -1)
-    [ -n "$cur" ] || { line fail "no tmux session '$SESSION' and it could not be recreated"; tell "tmux session $SESSION could not be recreated; relaunch by hand"; exit 0; }
-    [ "$cur" = "$WIN" ] || tm move-window -s "=$SESSION:$cur" -t "=$SESSION:$WIN" 2>/dev/null
-    made="session recreated"
-elif ! pane_exists; then
-    gate || stop_alive
-    if tm list-windows -t "=$SESSION" -F '#{window_index}' 2>/dev/null | grep -qx "$WIN"; then
-        tm split-window -d -t "=$SESSION:$WIN" -c "$CWD" ${SHELL_CMD:+"$SHELL_CMD"} 2>/dev/null; made="pane recreated in window $WIN"
-    else
-        tm new-window -d -t "=$SESSION:$WIN" -c "$CWD" ${SHELL_CMD:+"$SHELL_CMD"} 2>/dev/null; made="window $WIN recreated"
-    fi
-fi
-if [ -n "$made" ] && ! pane_exists; then
-    # the recorded pane index cannot be given to a fresh pane (a new window has one pane; a split takes the next
-    # free index): the lead goes to the newest pane of the recorded window, and the line says so
-    np=$(tm list-panes -t "=$SESSION:$WIN" -F '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null | tail -1)
-    [[ "$np" =~ ^[A-Za-z0-9_.-]+:[0-9]+\.[0-9]+$ ]] || { line fail "the lead's place ($PANE) could not be restored in '$SESSION'"; tell "the lead's pane $PANE could not be restored; relaunch by hand"; exit 0; }
-    made="$made (recorded $PANE, restored as $np)"; PANE="$np"
-fi
-[ -n "$made" ] && wait_prompt
 
-# 5. Nothing is typed into a pane that is dead (remain-on-exit) or whose childless shell does not show a prompt:
-#    it is respawned, which ends only that shell, and the fresh one is at a prompt in the recorded directory.
-if [ "$(tm display -p -t "$PANE" '#{pane_dead}' 2>/dev/null)" = 1 ] || ! prompt_now; then
-    gate || stop_alive "before the respawn"
-    tm respawn-pane -k -t "$PANE" -c "$CWD" ${SHELL_CMD:+"$SHELL_CMD"} 2>/dev/null || { line fail "pane $PANE is dead or not at a prompt and could not be respawned"; tell "lead pane $PANE could not be respawned; relaunch by hand"; exit 0; }
-    wait_prompt || { line fail "pane $PANE was respawned but shows no shell prompt: nothing typed"; tell "lead pane $PANE respawned, no prompt; relaunch by hand"; exit 0; }
-    made="${made:+$made, }pane respawned"
-fi
-
-# 6. The input line must be EMPTY before anything is typed (Ctrl-E, then Ctrl-U: the whole line, wherever the
-#    cursor was). Then THE GATE once more, immediately before the keys: a lead that started meanwhile stops us.
-tm send-keys -t "$PANE" C-e
-tm send-keys -t "$PANE" C-u
-sleep 0.3
-gate || stop_alive "it started while the pane was being prepared"
-if [ -n "$SCOPE_RUN" ]; then inscope="$SCOPE_RUN --unit=$UNIT -p ManagedOOMPreference=avoid "; where=" in scope $UNIT.scope"
-else inscope=""; where=" (no systemd-run here: NOT in its named scope)"; fi
-launch="cd $CWD && . $LAUNCH_ENV; ${inscope}claude --resume $sid --permission-mode bypassPermissions"
-echo "$now" >> "$HIST"
-tm send-keys -t "$PANE" -l "$launch"
-sleep 0.3
-tm send-keys -t "$PANE" Enter
-for i in $(seq 1 "${LEAD_WATCHDOG_WAIT:-20}"); do
-    sleep 1
-    if c=$(pane_child) && [ -n "$c" ]; then
-        line ok "relaunched ${sid:0:8} in $PANE at $(date +%H:%M:%S) from lead.session${made:+, $made}$where (child pid $c)"
-        tell "relaunched the lead (${sid:0:8}) in $PANE${made:+ ($made)}"; exit 0
+    # Someone typing in the session? (a human may be at the keys)
+    now=$(date +%s)
+    if tm has-session -t "=$SESSION" 2>/dev/null; then
+        act=$(tm display -p -t "=$SESSION:" '#{client_activity}' 2>/dev/null || echo 0)
+        if [ "${act:-0}" -gt 0 ] && [ $((now - act)) -lt 60 ]; then
+            line warn "the lead (${SID:0:8}) is gone from $PANE but a client typed $((now - act)) s ago: retry next tick"; exit 0
+        fi
     fi
-done
-line fail "typed the relaunch for ${sid:0:8} in $PANE but no child appeared in ${LEAD_WATCHDOG_WAIT:-20} s"
-tell "relaunch of ${sid:0:8} typed but nothing started; look at $PANE"
-exit 0
+    if ! budget_left; then
+        line fail "the lead (${SID:0:8}) is gone from $PANE; $MAX_PER_HOUR relaunches already in the last hour: stopping (clear $HIST)"
+        tell "lead relaunch loop: $MAX_PER_HOUR in an hour; not relaunching ${SID:0:8}"; exit 0
+    fi
+
+    # 4. Restore the place as recorded: the session, the window at its recorded index, the working directory.
+    made=""
+    if ! tm has-session -t "=$SESSION" 2>/dev/null; then
+        gate || stop_alive
+        if tm list-sessions >/dev/null 2>&1; then
+            tm new-session -d -s "$SESSION" -x 200 -y 50 -c "$CWD" ${SHELL_CMD:+"$SHELL_CMD"} 2>/dev/null
+        else
+            # no server: it is started in a scope of its own, never as a child of this unit
+            "${LR_RUN[@]}" --unit="tmux-${UNIT#lead-}-$now" tmux ${LEAD_TMUX_SOCKET:+-L "$LEAD_TMUX_SOCKET"} new-session -d -s "$SESSION" -x 200 -y 50 -c "$CWD" ${SHELL_CMD:+"$SHELL_CMD"} >/dev/null 2>&1
+        fi
+        for _ in 1 2 3 4 5 6 7 8 9 10; do tm has-session -t "=$SESSION" 2>/dev/null && break; sleep 0.3; done
+        cur=$(tm list-windows -t "=$SESSION" -F '#{window_index}' 2>/dev/null | head -1)
+        [ -n "$cur" ] || { line fail "no tmux session '$SESSION' and it could not be recreated"; tell "tmux session $SESSION could not be recreated; relaunch by hand"; exit 0; }
+        [ "$cur" = "$WIN" ] || tm move-window -s "=$SESSION:$cur" -t "=$SESSION:$WIN" 2>/dev/null
+        made="session recreated"
+    elif ! pane_exists; then
+        gate || stop_alive
+        if tm list-windows -t "=$SESSION" -F '#{window_index}' 2>/dev/null | grep -qx "$WIN"; then
+            tm split-window -d -t "=$SESSION:$WIN" -c "$CWD" ${SHELL_CMD:+"$SHELL_CMD"} 2>/dev/null; made="pane recreated in window $WIN"
+        else
+            tm new-window -d -t "=$SESSION:$WIN" -c "$CWD" ${SHELL_CMD:+"$SHELL_CMD"} 2>/dev/null; made="window $WIN recreated"
+        fi
+    fi
+    if [ -n "$made" ] && ! pane_exists; then
+        # the recorded pane index cannot be given to a fresh pane (a new window has one pane; a split takes the next
+        # free index): the lead goes to the newest pane of the recorded window, and the line says so
+        np=$(tm list-panes -t "=$SESSION:$WIN" -F '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null | tail -1)
+        [[ "$np" =~ ^[A-Za-z0-9_.-]+:[0-9]+\.[0-9]+$ ]] || { line fail "the lead's place ($PANE) could not be restored in '$SESSION'"; tell "the lead's pane $PANE could not be restored; relaunch by hand"; exit 0; }
+        made="$made (recorded $PANE, restored as $np)"; PANE="$np"
+    fi
+    [ -n "$made" ] && wait_prompt
+
+    # 5. Nothing is typed into a pane that is dead (remain-on-exit) or whose childless shell does not show a prompt:
+    #    it is respawned, which ends only that shell, and the fresh one is at a prompt in the recorded directory.
+    if [ "$(tm display -p -t "$PANE" '#{pane_dead}' 2>/dev/null)" = 1 ] || ! prompt_now; then
+        gate || stop_alive "before the respawn"
+        tm respawn-pane -k -t "$PANE" -c "$CWD" ${SHELL_CMD:+"$SHELL_CMD"} 2>/dev/null || { line fail "pane $PANE is dead or not at a prompt and could not be respawned"; tell "lead pane $PANE could not be respawned; relaunch by hand"; exit 0; }
+        wait_prompt || { line fail "pane $PANE was respawned but shows no shell prompt: nothing typed"; tell "lead pane $PANE respawned, no prompt; relaunch by hand"; exit 0; }
+        made="${made:+$made, }pane respawned"
+    fi
+
+    # 6. THE LAST GATE, and immediately after it the keys. Not one key reaches the pane before this gate. What is
+    #    sent is ONE tmux call: Ctrl-E Ctrl-U (the input line emptied, wherever the cursor was), the launcher's
+    #    line, Enter; no wait, no check, no other step between them. The launcher makes the launch-time check.
+    rm -f "$STATE/lead-launch.last"
+    gate || stop_alive "it started while the pane was being prepared"
+    hook send
+    tm send-keys -t "$PANE" C-e C-u \; send-keys -t "$PANE" -l "bash $LAUNCHER" \; send-keys -t "$PANE" Enter \
+        || { line fail "the keys could not be sent to $PANE: nothing typed"; tell "could not type into $PANE; relaunch by hand"; exit 0; }
+    echo "$now" >> "$HIST"
+    for i in $(seq 1 "${LEAD_WATCHDOG_WAIT:-20}"); do
+        sleep 1
+        # started = the pane's child carries the lead's id AND (with real systemd) the named scope is active
+        if c=$(pane_child) && [ -n "$c" ] && grep -qaF -e "$SID" "/proc/$c/cmdline" 2>/dev/null && { [ -n "${LEAD_SCOPE_RUN+x}" ] || scope_active; }; then
+            line ok "relaunched ${SID:0:8} in $PANE at $(date +%H:%M:%S) from lead.session${made:+, $made} in scope $UNIT.scope (child pid $c)"
+            tell "relaunched the lead (${SID:0:8}) in $PANE${made:+ ($made)}"; exit 0
+        fi
+        [ -s "$STATE/lead-launch.last" ] && break
+    done
+    why=""; [ -s "$STATE/lead-launch.last" ] && { read -r _ why < "$STATE/lead-launch.last"; why=${why//[^A-Za-z0-9 _.,:()\/-]/_}; }
+    if [ -n "$why" ] && ! gate; then
+        line warn "$alive: the launcher refused to start a second lead ($why)"; tell "$alive; the launcher refused a second lead"; exit 0
+    fi
+    line fail "typed the launcher for ${SID:0:8} in $PANE but no lead started in ${LEAD_WATCHDOG_WAIT:-20} s${why:+: the launcher refused: $why}"
+    tell "launch of ${SID:0:8} typed but nothing started${why:+ ($why)}; look at $PANE"
+    exit 0
+}
+main 9>&-
