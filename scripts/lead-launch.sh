@@ -2,7 +2,11 @@
 # lead-launch.sh — the ONE way the fleet lead's Claude Code is started again: by the watchdog (which types exactly
 # `bash <this file>` into the lead's pane and nothing else) or by a person (lead.session's launch= line names it).
 #
-#   bash scripts/lead-launch.sh          (no arguments: who the lead is comes from lead.session, read here)
+#   bash scripts/lead-launch.sh [STATE]  who the lead is comes from lead.session in the state directory, read here.
+#       STATE, when given (the watchdog always gives it), is the state directory the CALLER locked and read. The
+#       launcher derives its own ($LEAD_WATCHDOG_STATE, else ~/.local/state/dreamteam) from the environment it runs
+#       in, which is the pane's and may differ from the caller's. If the two are not the same directory it REFUSES
+#       (exit 3) before it opens any lock: both sides lock the same file or nothing is started.
 #
 # Why a launcher (xreview #281 round 2): a watchdog that checks "is a lead alive" and then types a command can
 # always lose to a lead that starts in between; no number of repeated checks makes that atomic. So the last check
@@ -42,7 +46,16 @@ refuse() {  # <exit code> <reason>
     printf '%s %s\n' "$(date +%s)" "$2" > "$STATE/lead-launch.last" 2>/dev/null
     exit "$1"
 }
+[ "$#" -le 1 ] || { echo "lead-launch: refused: usage: lead-launch.sh [STATE]" >&2; exit 3; }
 [ -d "$STATE" ] || { echo "lead-launch: refused: no state directory $STATE" >&2; exit 3; }
+if [ "$#" -eq 1 ]; then
+    mine=$(cd "$STATE" && pwd -P) || mine=""
+    if [[ ! "$1" =~ $LR_PLAIN ]] || [ ! -d "$1" ] || [ "$(cd "$1" && pwd -P)" != "$mine" ]; then
+        echo "lead-launch: refused: the caller's state directory ($1) is not the one this pane's environment gives ($STATE): they would lock different files, so nothing is started" >&2
+        [[ "$1" =~ $LR_PLAIN ]] && [ -d "$1" ] && printf '%s %s\n' "$(date +%s)" "state mismatch: the pane's environment gives $STATE, the watchdog locked $1" > "$1/lead-launch.last" 2>/dev/null
+        exit 3
+    fi
+fi
 lead_record_read "$STATE/lead.session" || refuse 3 "no valid lead.session: $LR_ERR"
 lead_unit "$LR_PANE" || refuse 3 "the scope unit name is not in a plain form"
 [[ "$ENVF" =~ $LR_PLAIN ]] || refuse 6 "the launch-env path is not in a plain form"

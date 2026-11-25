@@ -71,7 +71,7 @@ bad() { fail=$((fail+1)); echo "FAIL $1"; }
 run() { bash "$WD" 2>&1; }
 SID=11111111-2222-3333-4444-555555555555
 OTHER=99999999-8888-7777-6666-555555555555
-reset() { reap_stubs; rm -f "$T/claude.args" "$T/claude.cwd" "$T/claude.pid" "$T/state/lead-watchdog.relaunches" "$T/state/lead-watchdog.off" "$T/scope-run.log" "$T/scope-fail.log" "$T/hook.count" "$T/hook.at" "$T/hook.send" "$T/hook.send-pane" "$T/hook.respawn" "$T/elsewhere.out" "$T/claude.fds" "$T/claude.stdin" "$T/claude.starts" "$T/state/lead-launch.last"; }
+reset() { reap_stubs; rm -f "$T/claude.args" "$T/claude.cwd" "$T/claude.pid" "$T/state/lead-watchdog.relaunches" "$T/state/lead-watchdog.off" "$T/scope-run.log" "$T/scope-fail.log" "$T/hook.count" "$T/hook.at" "$T/hook.send" "$T/hook.send-pane" "$T/hook.respawn" "$T/hook.pause" "$T/elsewhere.out" "$T/claude.fds" "$T/claude.stdin" "$T/claude.starts" "$T/state/lead-launch.last"; }
 sess_file() { printf 'session=%s\npane=%s\ncwd=%s\n' "$SID" "${1:-lwtest:0.0}" "${2:-$CWDR}" > "$T/state/lead.session"; }
 fresh() {  # a server with one session `lwtest`, one pane at a bash prompt; $1 = text to print first
     tmux -L lwtest kill-server 2>/dev/null; reset
@@ -256,7 +256,9 @@ cat > "$T/bin/hook" <<EOF
 #!/bin/bash
 start() { ( cd "$T" && setsid "$T/bin/claude" --resume $SID > /dev/null 2>&1 < /dev/null & ); for i in 1 2 3 4 5 6 7 8 9 10; do [ -s "$T/claude.pid" ] && break; sleep 0.2; done; rm -f "$T/claude.args"; }
 case "\$1" in
-  gate) n=\$(( \$(cat "$T/hook.count" 2>/dev/null || echo 0) + 1 )); echo "\$n" > "$T/hook.count"; [ "\$n" = "\$(cat "$T/hook.at" 2>/dev/null)" ] && start ;;
+  gate) n=\$(( \$(cat "$T/hook.count" 2>/dev/null || echo 0) + 1 )); echo "\$n" > "$T/hook.count"; [ "\$n" = "\$(cat "$T/hook.at" 2>/dev/null)" ] && start
+        # hold THIS watchdog run inside its locked section for a while (the first gate only)
+        [ -e "$T/hook.pause" ] && { rm -f "$T/hook.pause"; sleep 4; } ;;
   send) echo sent >> "$T/hook.count"
         [ -e "$T/hook.send" ] && start
         # a LAUNCH typed into the lead's own pane at this very moment (a person, or another tool, using the launcher)
@@ -281,6 +283,46 @@ grep -q "^CHECK lead-liveness warn · the lead's id 11111111 is in the command l
   && [ ! -e "$T/claude.args" ] && [ "$(holders)" = 1 ] && [ -z "$(pgrep -P "$(tmux -L lwtest display -p -t lwtest:0.0 '#{pane_pid}')")" ] \
   && ok "RACE: a lead starts AFTER the last gate, before the keys land: the launcher refuses; exactly ONE lead on the host" || bad "race after the last gate: holders=$(holders) $out"
 grep -q sent "$T/hook.count" && tmux -L lwtest capture-pane -p -t lwtest:0.0 | grep -q 'lead-launch: refused: a lead is already there' && ok "…the hook ran between the gate and the keys, and the pane shows the launcher's refusal" || bad "after-gate fixture: $(cat "$T/hook.count" 2>&1)"
+
+# ── TWO WATCHDOG RUNS AT ONCE, one dead lead (ruling 7139682014 item 1) ──────────────────────────────────────
+# (i) run A is held inside its locked check-and-act section; run B starts meanwhile. B must find the lock held and
+#     do nothing; A then relaunches. Exactly one launch, one history line, one lock holder at a time.
+reap_stubs; fresh ""; sess_file; touch "$T/hook.pause"; sleep 1.0
+( LEAD_WATCHDOG_TEST_HOOK="$T/bin/hook" bash "$WD" > "$T/A.out" 2>&1 ) & wa=$!
+sleep 1.5; outB=$(run); wait "$wa"; sleep 0.5
+grep -q '^CHECK lead-liveness warn · the lead lock is held (a launch of the lead, or another lead-watchdog run): nothing done this tick' <<<"$outB" \
+  && ok "TWO WATCHDOGS: while run A is inside its locked section, run B finds the lock held and does NOTHING" || bad "second watchdog: $outB"
+grep -q '^CHECK lead-liveness ok · relaunched 11111111 in lwtest:0.0' "$T/A.out" && [ "$(wc -l < "$T/claude.starts")" = 1 ] && [ "$(wc -l < "$T/state/lead-watchdog.relaunches")" = 1 ] && [ "$(holders)" = 1 ] \
+  && ok "…run A relaunches: exactly ONE lead start, ONE history line, ONE process carrying the id" || bad "two watchdogs, A: $(cat "$T/A.out") starts=$(cat "$T/claude.starts" 2>/dev/null | wc -l)"
+# (ii) both started in the same instant, no hook, three times over: whichever wins, one launch
+for round in 1 2 3; do
+  reap_stubs; fresh ""; sess_file; sleep 1.0
+  ( bash "$WD" > "$T/A.out" 2>&1 ) & wa=$!; ( bash "$WD" > "$T/B.out" 2>&1 ) & wb=$!; wait "$wa" "$wb"; sleep 0.5
+  if [ "$(wc -l < "$T/claude.starts" 2>/dev/null)" = 1 ] && [ "$(wc -l < "$T/state/lead-watchdog.relaunches")" = 1 ] && [ "$(holders)" = 1 ] && [ "$(cat "$T/A.out" "$T/B.out" | grep -c ' ok · relaunched ')" = 1 ]; then
+    ok "TWO WATCHDOGS started together (round $round): one relaunch, one history line, one lead; the other run: $(cat "$T/A.out" "$T/B.out" | grep -v ' ok · relaunched ' | sed 's/^CHECK lead-liveness //' | cut -c1-60)"
+  else bad "simultaneous watchdogs round $round: starts=$(cat "$T/claude.starts" 2>/dev/null | wc -l) A=$(cat "$T/A.out") B=$(cat "$T/B.out")"; fi
+done
+
+# ── THE SAME LOCK, NOT BY LUCK (ruling item 2): the pane's environment points at ANOTHER state directory ──────
+# The tmux server (and so the pane's shell) was started with LEAD_WATCHDOG_STATE=<other>, which even holds a valid
+# record of the same lead. The watchdog runs with the real one. The launcher must refuse: it would lock another file.
+reap_stubs; tmux -L lwtest kill-server 2>/dev/null; sleep 0.5; reset; mkdir -p "$T/otherstate"
+for _try in 1 2 3 4 5; do LEAD_WATCHDOG_STATE="$T/otherstate" tmux -L lwtest new-session -d -s lwtest -x 160 -y 30 "bash --norc --noprofile" 2>/dev/null; sleep 0.4; tmux -L lwtest has-session -t =lwtest 2>/dev/null && break; done
+sess_file; cp "$T/state/lead.session" "$T/otherstate/lead.session"; sleep 1.0; out=$(run); sleep 0.5
+grep -q "^CHECK lead-liveness fail · typed the launcher for 11111111 in lwtest:0.0 but no lead started .*the launcher refused: state mismatch" <<<"$out" && [ ! -e "$T/claude.args" ] && [ "$(holders)" = 0 ] \
+  && ok "a pane whose environment gives ANOTHER state directory: the launcher REFUSES (state mismatch), no lead is started" || bad "state mismatch: $out"
+tmux -L lwtest capture-pane -p -t lwtest:0.0 | grep -q "refused: the caller.s state directory" && [ ! -e "$T/otherstate/lead.lock" ] \
+  && ok "…the pane shows the refusal, and the launcher opened NO lock in the other directory" || bad "state mismatch, pane: $(tmux -L lwtest capture-pane -p -t lwtest:0.0 | tail -3) lock=$(ls "$T/otherstate")"
+grep -q -- "-l bash $here/scripts/lead-launch.sh \$STATE_REAL\|bash \$LAUNCHER \$STATE_REAL" "$WD" && ok "the watchdog's typed line carries the state directory it locked" || bad "typed line"
+out=$( cd "$T" && timeout 10 bash "$LA" "$T/otherstate" 2>&1 ); rc=$?
+[ "$rc" = 3 ] && grep -q "refused: the caller.s state directory" <<<"$out" && [ ! -e "$T/claude.args" ] && ok "launcher alone, given a state directory that is not its own: exit 3, nothing started" || bad "launcher mismatch: rc=$rc $out"
+out=$( cd "$T" && timeout 10 bash "$LA" '/x; touch /nope' 2>&1 ); rc=$?
+[ "$rc" = 3 ] && [ ! -e "$T/claude.args" ] && ok "launcher alone, given something that is not a plain path: exit 3, nothing started" || bad "launcher bad arg: rc=$rc $out"
+out=$( cd "$T" && timeout 10 bash "$LA" "$T/state" extra 2>&1 ); rc=$?
+[ "$rc" = 3 ] && [ ! -e "$T/claude.args" ] && ok "launcher alone, with two arguments: exit 3" || bad "launcher two args: rc=$rc"
+reap_stubs; reset; sess_file; ( cd "$T" && setsid bash "$LA" "$T/state" > /dev/null 2>&1 < /dev/null & ); for _i in 1 2 3 4 5 6 7 8 9 10; do [ -s "$T/claude.args" ] && break; sleep 0.3; done
+resumed && ok "launcher alone, given ITS OWN state directory: it starts the lead" || bad "launcher own state: $(cat "$T/claude.args" 2>&1)"
+reap_stubs
 
 # ── THE RULING'S RACE (PR comment 7128795764): a launch appears BETWEEN the gate and the act ─────────────────
 # (a) …in the lead's OWN pane, between the last gate and the keys. Someone runs the launcher there. It cannot start

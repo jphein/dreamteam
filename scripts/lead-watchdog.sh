@@ -21,7 +21,7 @@
 #     scope is active, or a launch is in progress                 → warn, nothing made, nothing typed
 #   otherwise the lead is gone. The place is restored as recorded (the session, the window at its recorded index,
 #     the working directory), a pane that is dead or not at a shell prompt is respawned, and ONE line is typed:
-#         bash <this repo>/scripts/lead-launch.sh
+#         bash <this repo>/scripts/lead-launch.sh <the state directory this run locked>
 #     The launcher reads lead.session itself and makes the LAST check at launch time, under the launch lock every
 #     launch takes, then execs the lead inside its own named scope (lead-<session>.scope, oomd preference set at
 #     creation). No scope runner → nothing is typed: the lead is never started outside its scope.
@@ -129,6 +129,11 @@ act() {
     # 2. The lead is not in its pane. What a relaunch needs must all be there BEFORE anything is made: the
     #    launcher, a plain launch-env path, and a scope runner (no runner → no launch, never a lead outside its scope).
     [[ "$LAUNCHER" =~ $LR_PLAIN ]] && [ -f "$LAUNCHER" ] || { line fail "the launcher ($LAUNCHER) is missing or its path is not plain: nothing typed"; tell "lead launcher missing; relaunch by hand"; exit 0; }
+    # THE SAME LOCK, NOT BY LUCK (ruling after round 3): the launcher runs in the pane, with the PANE's environment,
+    # which need not be this script's. So the state directory this run locked is passed on the typed line, and
+    # the launcher refuses when it would derive another one.
+    STATE_REAL=$(cd "$STATE" 2>/dev/null && pwd -P) || STATE_REAL=""
+    [[ "$STATE_REAL" =~ $LR_PLAIN ]] || { line fail "the state directory ($STATE) is not a plain path: nothing typed"; tell "state dir not plain; relaunch by hand"; exit 0; }
     [[ "$LAUNCH_ENV" =~ $LR_PLAIN ]] || { line fail "the launch-env path is not in a plain form: nothing typed"; tell "launch env path not plain; relaunch by hand"; exit 0; }
     if ! lead_runner; then
         line fail "the lead (${SID:0:8}) is gone from $PANE and $LR_ERR: the lead is only ever started inside its named scope, so nothing is made or typed"
@@ -198,7 +203,7 @@ act() {
     rm -f "$STATE/lead-launch.last"
     gate || stop_alive "it started while the pane was being prepared"
     hook send
-    tm send-keys -t "$PANE" C-e C-u \; send-keys -t "$PANE" -l "bash $LAUNCHER" \; send-keys -t "$PANE" Enter \
+    tm send-keys -t "$PANE" C-e C-u \; send-keys -t "$PANE" -l "bash $LAUNCHER $STATE_REAL" \; send-keys -t "$PANE" Enter \
         || { line fail "the keys could not be sent to $PANE: nothing typed"; tell "could not type into $PANE; relaunch by hand"; exit 0; }
     echo "$now" >> "$HIST"
     typed=1
