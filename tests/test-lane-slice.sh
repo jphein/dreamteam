@@ -25,14 +25,16 @@ ID=7d65ba827db467c06a6c9432b76d9bef1b9aa4255035aee5a0e7d593d1d399a4
 stub docker 'echo "docker $*" >> "'"$LOG"'"; [ "$1" = inspect ] && [ "${4:-}" = mempalace-db ] && { echo '"$ID"'; exit 0; }; exit 1'
 stub systemctl 'echo "systemctl $*" >> "'"$LOG"'"
 case "$*" in
+  *"-p InvocationID"*) cat "'"$T"'/inv/$3" 2>/dev/null || echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;;
+  *"-p Description"*) cat "'"$T"'/desc" 2>/dev/null ;;
+  *"-p ControlGroup"*) cat "'"$T"'/cgof/$3" 2>/dev/null || cat "'"$T"'/controlgroup" 2>/dev/null ;;
   *"show nosuch.service -p LoadState"*) echo not-found ;;
   *"-p LoadState"*) echo loaded ;;
   *"set-property --runtime broken.service"*) exit 1 ;;
   *"-p IOWeight"*) echo 20 ;;
-  *"--user is-active --quiet"*) [ -e "'"$T"'/scope-up" ] ;;
+  *"--user is-active --quiet"*) [ -e "'"$T"'/up/$4" ] || { [ -e "'"$T"'/scope-up" ] && [ ! -e "'"$T"'/strict" ]; } ;;
   *"--user list-units lane-"*) cat "'"$T"'/lane-units" 2>/dev/null ;;
   *"--user list-units dreamteam-"*) cat "'"$T"'/fleet-units" 2>/dev/null ;;
-  *"-p ControlGroup"*) cat "'"$T"'/controlgroup" 2>/dev/null ;;
   *"-p TasksCurrent"*) cat "'"$T"'/tasks" 2>/dev/null || echo 1 ;;
   *"--user daemon-reload"*) [ ! -e "'"$T"'/reload-fails" ] ;;
 esac'
@@ -42,21 +44,36 @@ ok "passes bash -n" 'bash -n "$LS"'
 X="$T/xdg"; P="$T/proc"; mkdir -p "$X" "$P"
 U="$X/systemd/user"
 cfg() { printf '%s\n' "$1" > "$T/config.json"; }
-run_ls() { LANE_SLICE_LOCK="$T/lane.lock" LANE_SLICE_UID=1000 DREAMTEAM_CONFIG="$T/config.json" DREAMTEAM_HOST=test-nooverlay XDG_CONFIG_HOME="$X" DREAMTEAM_PROC="$P" DREAMTEAM_CGROUP_ROOT="$T/cg" PATH="$B:$PATH" bash "$LS" "$@" > "$T/out" 2> "$T/err"; }
+run_ls() { LANE_SLICE_STATE="$T/state" LANE_SLICE_LOCK="$T/lane.lock" LANE_SLICE_UID=1000 DREAMTEAM_CONFIG="$T/config.json" DREAMTEAM_HOST=test-nooverlay XDG_CONFIG_HOME="$X" DREAMTEAM_PROC="$P" DREAMTEAM_CGROUP_ROOT="$T/cg" PATH="$B:$PATH" bash "$LS" "$@" > "$T/out" 2> "$T/err"; }
 # sessions: lead (excluded), alpha (panes 100 → 101 → 102, and 110), beta (200, already in the slice), gamma (300 in a dreamteam scope)
-stub tmux 'case "$*" in
-  *list-sessions*) printf "lead\nalpha\nbeta\ngamma\n" ;;
+# every discovery call (tmux, ps) notes whether the run's lock was HELD at that moment (xreview #288 r2 item 3)
+LSTATE='if flock -n "'"$T"'/lane.lock" true 2>/dev/null; then echo free; else echo held; fi >> "'"$T"'/lockstate"'
+stub tmux "$LSTATE"'
+case "$*" in
+  *list-sessions*) cat "'"$T"'/sessions" 2>/dev/null || printf "lead\nalpha\nbeta\ngamma\n" ;;
+  *"list-panes -s -t =a.b"*) echo 400 ;;
+  *"list-panes -s -t =a_b"*) echo 410 ;;
   *"list-panes -s -t =alpha"*) printf "100\n110\n" ;;
   *"list-panes -s -t =beta"*) echo 200 ;;
   *"list-panes -s -t =gamma"*) echo 300 ;;
   *"list-panes -s -t =lead"*) echo 900 ;;
 esac'
-stub ps 'printf "100 1\n101 100\n102 101\n110 1\n200 1\n300 1\n301 300\n900 1\n901 900\n555 1\n"'
+stub ps "$LSTATE"'
+printf "100 1\n101 100\n102 101\n110 1\n200 1\n300 1\n301 300\n900 1\n901 900\n555 1\n"'
 stub busctl 'echo "busctl $*" >> "'"$LOG"'"; [ ! -e "'"$T"'/busctl-fails" ]'
-stub systemd-run 'echo "systemd-run $*" >> "'"$LOG"'"; touch "'"$T"'/scope-up"'
+stub systemd-run 'echo "systemd-run $*" >> "'"$LOG"'"; touch "'"$T"'/scope-up"
+for a in "$@"; do case "$a" in --unit=*) mkdir -p "'"$T"'/up"; touch "'"$T"'/up/${a#--unit=}.scope" ;; esac; done
+for a in "$@"; do case "$a" in --description=*) if [ -e "'"$T"'/desc-foreign" ]; then echo "someone else" > "'"$T"'/desc"; else printf "%s\n" "${a#--description=}" > "'"$T"'/desc"; fi ;; esac; done'
+# the unit names: <prefix>-<safe name>-<8 hex of sha256 of the raw name>.scope
+h8() { printf '%s' "$1" | sha256sum | cut -c1-8; }
+UA="lane-alpha-$(h8 alpha).scope"; UB="lane-beta-$(h8 beta).scope"; UG="lane-gamma-$(h8 gamma).scope"; UL="lane-lead-$(h8 lead).scope"
+UO="lane-oldsession-$(h8 oldsession).scope"; OL="out-lead-$(h8 lead).scope"; OA="out-alpha-$(h8 alpha).scope"
+ST="$T/state"; INV0=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+own() { mkdir -p -m 700 "$ST"; local u; for u in "$@"; do echo "$INV0" > "$ST/scope.$u"; done; }      # as if this tool had created these scopes
+disown_() { local u; for u in "$@"; do rm -f "$ST/scope.$u"; done; }
 pcg() { mkdir -p "$P/$1"; echo "0::/user.slice/user-1000.slice/user@1000.service/$2" > "$P/$1/cgroup"; }
 for p in 100 101 102 110 900 901 555; do pcg $p "app.slice/tmux-spawn-x.scope"; done
-pcg 200 "lanes.slice/lane-beta.scope"; pcg 300 "lanes.slice/lane-gamma.scope"; pcg 301 "app.slice/dreamteam-proj.scope"
+pcg 200 "lanes.slice/$UB"; pcg 300 "lanes.slice/$UG"; pcg 301 "app.slice/dreamteam-proj.scope"
 
 cfg '{"lanes":{"enabled":false,"exclude":["lead"]}}'; : > "$LOG"; run_ls attach; rc=$?
 ok "not enabled: attach does nothing, exit 0" '[ "$rc" -eq 0 ] && [ ! -s "$LOG" ]'
@@ -94,17 +111,17 @@ ok "uninstall removes the slice and the drop-in it wrote" '[ "$rc" -eq 0 ] && [ 
 
 cfg '{"lanes":{"enabled":true,"exclude":["lead"]}}'; : > "$LOG"; rm -f "$T/scope-up"; run_ls attach; rc=$?
 ok "attach: exit 0" '[ "$rc" -eq 0 ]'
-ok "attach: alpha's panes AND their descendants go in one call (4 pids: 100 101 102 110)" 'grep -q "AttachProcessesToUnit ssau lane-alpha.scope / 4 100 101 102 110$" "$LOG"'
-ok "attach: the scope is created inside lanes.slice, delegated" 'grep -q "systemd-run --user --quiet --scope --unit=lane-alpha --slice=lanes.slice -p Delegate=yes" "$LOG"'
+ok "attach: alpha's panes AND their descendants go in one call (4 pids: 100 101 102 110)" 'grep -q "AttachProcessesToUnit ssau $UA / 4 100 101 102 110$" "$LOG"'
+ok "attach: the scope is created inside lanes.slice, delegated" 'grep -q "systemd-run --user --quiet --scope --unit=${UA%.scope} --slice=lanes.slice -p Delegate=yes" "$LOG"'
 ok "attach: the excluded session (the lead) is never moved" '! grep -q "lane-lead\|[ /]900\b\|[ /]901\b" "$LOG"'
 ok "attach: a process already in the slice is not moved again" '! grep -q "lane-beta" "$LOG"'
 ok "attach: a process in a dreamteam-*.scope stays there" '! grep "AttachProcessesToUnit" "$LOG" | grep -q " 301"'
 ok "attach: an unrelated process of the user is never moved" '! grep "AttachProcessesToUnit" "$LOG" | grep -q " 555"'
 touch "$T/busctl-fails"; run_ls attach; rc=$?; rm -f "$T/busctl-fails"
 ok "attach: a move the manager refuses is exit 1 and says which session" '[ "$rc" -eq 1 ] && grep -q "could not move session alpha" "$T/err"'
-printf 'lane-alpha.scope loaded active running x\nlane-oldsession.scope loaded active running x\n' > "$T/lane-units"; echo 1 > "$T/tasks"; : > "$LOG"; run_ls attach
-ok "attach: a lane scope whose session is gone and that holds only its anchor is stopped, by name" 'grep -qxF "systemctl --user stop lane-oldsession.scope" "$LOG" && ! grep -q "stop lane-alpha.scope" "$LOG"'
-echo 3 > "$T/tasks"; : > "$LOG"; run_ls attach
+printf '%s loaded active running x\n' "$UA" "$UO" > "$T/lane-units"; echo 1 > "$T/tasks"; own "$UO"; : > "$LOG"; run_ls attach
+ok "attach: a lane scope whose session is gone and that holds only its anchor is stopped, by name" 'grep -qxF "systemctl --user stop $UO" "$LOG" && ! grep -q "stop $UA" "$LOG"'
+echo 3 > "$T/tasks"; : > "$LOG"; own "$UO"; run_ls attach      # ours again (the run above stopped it and dropped its record)
 ok "attach: …but not while it still holds processes" '! grep -q "systemctl --user stop" "$LOG"'
 rm -f "$T/lane-units"
 mkdir -p "$T/cg/user.slice/user-$(id -u).slice/user@$(id -u).service"; M="$T/cg/user.slice/user-$(id -u).slice/user@$(id -u).service"
@@ -120,14 +137,14 @@ run_ls bogus; ok "an unknown verb is exit 22" '[ "$?" -eq 22 ]'
 echo "── never a lane · budgets · fleet scopes · the hook · reconcile · rollback (xreview #282 r1) ─"
 UM="user.slice/user-$(id -u).slice/user@$(id -u).service"
 # a session that is NOT a lane but has processes inside the slice (it was attached once) is moved OUT
-pcg 900 "lanes.slice/lane-lead.scope"; pcg 901 "lanes.slice/lane-lead.scope"
+pcg 900 "lanes.slice/$UL"; pcg 901 "lanes.slice/$UL"
 cfg '{"lanes":{"enabled":true,"exclude":[],"lead":["lead"]}}'; : > "$LOG"; rm -f "$T/scope-up"; run_ls status
 ok "status: a lead session found inside the slice is said so" 'grep -qx "session lead: NOT a lane, but 2 of 2 processes are in lanes.slice (the next attach moves them out)" "$T/out"'
 run_ls attach; rc=$?
-ok "attach: a .lanes.lead session's processes inside the slice are moved OUT, into a scope outside it" '[ "$rc" -eq 0 ] && grep -q "AttachProcessesToUnit ssau out-lead.scope / 2 900 901$" "$LOG" && grep -q "systemd-run --user --quiet --scope --unit=out-lead -p Delegate=yes" "$LOG" && ! grep -q -- "--unit=out-lead --slice" "$LOG"'
-ok "…and it is never placed in a lane scope" '! grep -q "lane-lead.scope / " "$LOG"'
+ok "attach: a .lanes.lead session's processes inside the slice are moved OUT, into a scope outside it" '[ "$rc" -eq 0 ] && grep -q "AttachProcessesToUnit ssau $OL / 2 900 901$" "$LOG" && grep -q "systemd-run --user --quiet --scope --unit=${OL%.scope} -p Delegate=yes" "$LOG" && ! grep -q -- "--unit=${OL%.scope} --slice" "$LOG"'
+ok "…and it is never placed in a lane scope" '! grep -q "$UL / " "$LOG"'
 cfg '{"lanes":{"enabled":true,"exclude":["lead"]}}'; : > "$LOG"; run_ls attach
-ok "the same for a session named only in .lanes.exclude" 'grep -q "AttachProcessesToUnit ssau out-lead.scope / 2 900 901$" "$LOG"'
+ok "the same for a session named only in .lanes.exclude" 'grep -q "AttachProcessesToUnit ssau $OL / 2 900 901$" "$LOG"'
 touch "$T/busctl-fails"; run_ls attach; rc=$?; rm -f "$T/busctl-fails"
 ok "a move OUT that fails is exit 1 and names the session" '[ "$rc" -eq 1 ] && grep -q "session lead is not a lane but its processes could not be moved out" "$T/err"'
 pcg 900 "app.slice/tmux-spawn-lead.scope"; pcg 901 "app.slice/tmux-spawn-lead.scope"; : > "$LOG"; run_ls attach; run_ls status
@@ -135,9 +152,9 @@ ok "a lead that is outside the slice is left exactly where it is" '! grep -q "ou
 ok "lane-slice marks and protects nothing (that is the watchdog's scope and the root helper)" '! grep -q "oomd_avoid\|setxattr\|oom_score" "$LS"'
 
 # each lane's OWN budget, on its own scope, also for a lane that is already placed
-cfg '{"lanes":{"enabled":true,"exclude":["lead"],"perLane":{"memoryHigh":"5G","memorySwapMax":"1G"}}}'; : > "$LOG"; touch "$T/scope-up"; run_ls attach
-ok "per-lane budget: set on the lane's own scope" 'grep -qxF "systemctl --user set-property --runtime lane-alpha.scope MemoryHigh=5G MemorySwapMax=1G" "$LOG"'
-ok "…and on a lane that was placed earlier (a changed config reaches a running lane)" 'grep -qxF "systemctl --user set-property --runtime lane-beta.scope MemoryHigh=5G MemorySwapMax=1G" "$LOG"'
+cfg '{"lanes":{"enabled":true,"exclude":["lead"],"perLane":{"memoryHigh":"5G","memorySwapMax":"1G"}}}'; : > "$LOG"; touch "$T/scope-up"; own "$UB" "$UG"; run_ls attach
+ok "per-lane budget: set on the lane's own scope" 'grep -qxF "systemctl --user set-property --runtime $UA MemoryHigh=5G MemorySwapMax=1G" "$LOG"'
+ok "…and on a lane that was placed earlier (a changed config reaches a running lane)" 'grep -qxF "systemctl --user set-property --runtime $UB MemoryHigh=5G MemorySwapMax=1G" "$LOG"'
 cfg '{"lanes":{"enabled":true,"exclude":["lead"]}}'; : > "$LOG"; run_ls attach
 ok "no perLane: no budget is set" '! grep -q "set-property --runtime lane-" "$LOG"'
 cfg '{"lanes":{"enabled":true,"exclude":["lead"],"perLane":{"memoryHigh":"5G; rm"}}}'; run_ls attach
@@ -149,7 +166,7 @@ cfg '{"lanes":{"enabled":true,"exclude":["lead"],"cpuWeight":40,"ioWeight":20}}'
 ok "a dreamteam-*.scope with a lane's processes gets the slice's CPUWeight and IOWeight" 'grep -qxF "systemctl --user set-property --runtime dreamteam-proj.scope CPUWeight=40 IOWeight=20" "$LOG"'
 # ── xreview #288 r1 / Sen 09:46: what is NEVER moved or weighted, and the name that reaches systemctl ──────────
 raw() { mkdir -p "$P/$1"; echo "0::$2" > "$P/$1/cgroup"; }      # a cgroup path given whole
-restore() { for p in 100 101 102 110 900 901 555; do pcg $p "app.slice/tmux-spawn-x.scope"; done; pcg 200 "lanes.slice/lane-beta.scope"; pcg 300 "lanes.slice/lane-gamma.scope"; pcg 301 "app.slice/dreamteam-proj.scope"; }
+restore() { for p in 100 101 102 110 900 901 555; do pcg $p "app.slice/tmux-spawn-x.scope"; done; pcg 200 "lanes.slice/$UB"; pcg 300 "lanes.slice/$UG"; pcg 301 "app.slice/dreamteam-proj.scope"; }
 raw 301 "/system.slice/dreamteam-proj.scope"; : > "$LOG"; run_ls attach
 ok "a lane's process under /system.slice, in a unit NAMED like a fleet scope: never weighted (no set-property for it), never moved, and said" '! grep -q "set-property --runtime dreamteam-proj.scope" "$LOG" && ! grep "AttachProcessesToUnit" "$LOG" | grep -q " 301" && grep -q "pid 301 of session gamma is under system.slice" "$T/out"'
 raw 110 "/system.slice/some.service"; : > "$LOG"; run_ls attach
@@ -163,7 +180,7 @@ for badname in 'dreamteam-a b.scope' 'dreamteam-x;id.scope' 'dreamteam-$(id).sco
   if ! grep "set-property" "$LOG" | grep -q "dreamteam-"; then pass "a cgroup path whose unit name is not a plain fleet-scope name (${badname:0:24}…): nothing is handed to set-property"; else fail "unvalidated unit name reached systemctl: $(grep set-property "$LOG")"; fi
 done
 restore; pcg 901 "app.slice/dreamteam-proj.scope"; : > "$LOG"; run_ls attach
-ok "a fleet scope that ALSO holds the lead's processes (the lead is excluded): NOT given the lanes' weights, and said" '! grep -q "set-property --runtime dreamteam-proj.scope" "$LOG" && grep -q "fleet scope dreamteam-proj.scope also holds the lead" "$T/out"'
+ok "a fleet scope that ALSO holds the lead's processes (the lead is excluded): NOT given the lanes' weights, and said" '! grep -q "set-property --runtime dreamteam-proj.scope CPUWeight=40" "$LOG" && grep -q "fleet scope dreamteam-proj.scope also holds the lead" "$T/out"'
 restore; : > "$LOG"; run_ls attach
 ok "(control: with the fixture restored the fleet scope gets its weights again)" 'grep -qxF "systemctl --user set-property --runtime dreamteam-proj.scope CPUWeight=40 IOWeight=20" "$LOG"'
 # ONE lock over discovery and mutation
@@ -181,11 +198,11 @@ run_ls status
 ok "status counts a lane's processes that sit in a fleet scope" 'grep -q "^session gamma: 1 of 2 processes in lanes.slice, 1 in a fleet scope (weights only)$" "$T/out"'
 
 # the SessionStart form: silent, exit 0 whatever happens
-touch "$T/busctl-fails"; : > "$LOG"; out=$(DREAMTEAM_CONFIG="$T/config.json" DREAMTEAM_HOST=test-nooverlay XDG_CONFIG_HOME="$X" DREAMTEAM_PROC="$P" DREAMTEAM_CGROUP_ROOT="$T/cg" PATH="$B:$PATH" bash "$LS" attach --hook 2>&1); rc=$?; rm -f "$T/busctl-fails"
-ok "attach --hook: silent and exit 0 even when a move fails, and it did try (through its own time-box)" '[ "$rc" -eq 0 ] && [ -z "$out" ] && grep -q "AttachProcessesToUnit ssau lane-alpha.scope" "$LOG"'
+touch "$T/busctl-fails"; : > "$LOG"; out=$(LANE_SLICE_STATE="$T/state" LANE_SLICE_LOCK="$T/lane.lock" DREAMTEAM_CONFIG="$T/config.json" DREAMTEAM_HOST=test-nooverlay XDG_CONFIG_HOME="$X" DREAMTEAM_PROC="$P" DREAMTEAM_CGROUP_ROOT="$T/cg" PATH="$B:$PATH" bash "$LS" attach --hook 2>&1); rc=$?; rm -f "$T/busctl-fails"
+ok "attach --hook: silent and exit 0 even when a move fails, and it did try (through its own time-box)" '[ "$rc" -eq 0 ] && [ -z "$out" ] && grep -q "AttachProcessesToUnit ssau $UA" "$LOG"'
 # a tmux that never answers cannot hold a session start: the hook form is killed at its bound and still exits 0
 mkdir -p "$T/slow"; printf '#!/bin/sh\nsleep 30\n' > "$T/slow/tmux"; chmod +x "$T/slow/tmux"
-t0=$(date +%s); DREAMTEAM_CONFIG="$T/config.json" DREAMTEAM_HOST=test-nooverlay XDG_CONFIG_HOME="$X" DREAMTEAM_PROC="$P" DREAMTEAM_CGROUP_ROOT="$T/cg" LANE_SLICE_HOOK_SECS=2 PATH="$T/slow:$B:$PATH" bash "$LS" attach --hook; rc=$?; t1=$(date +%s)
+t0=$(date +%s); LANE_SLICE_STATE="$T/state" LANE_SLICE_LOCK="$T/lane.lock" DREAMTEAM_CONFIG="$T/config.json" DREAMTEAM_HOST=test-nooverlay XDG_CONFIG_HOME="$X" DREAMTEAM_PROC="$P" DREAMTEAM_CGROUP_ROOT="$T/cg" LANE_SLICE_HOOK_SECS=2 PATH="$T/slow:$B:$PATH" bash "$LS" attach --hook; rc=$?; t1=$(date +%s)
 ok "attach --hook with a tmux that hangs: exit 0 within its bound ($((t1 - t0)) s)" '[ "$rc" -eq 0 ] && [ "$((t1 - t0))" -le 5 ]'
 run_ls attach --bogus; ok "attach with another word is exit 22" '[ "$?" -eq 22 ]'
 hooked() { jq -e --arg c 'bash "${CLAUDE_PLUGIN_ROOT}/scripts/lane-slice.sh" attach --hook' '.hooks.SessionStart[].hooks[] | select(.command == $c and .timeout <= 10)' "$ROOT/hooks/hooks.json" > /dev/null; }
@@ -200,19 +217,82 @@ rm -rf "$U/c-gate.service.d"
 
 # uninstall is the rollback, and works with a config that cannot be read
 run_ls install
-LC="$T/cg/$UM/lanes.slice/lane-alpha.scope"; mkdir -p "$LC"; printf '100\n101\n777\n' > "$LC/cgroup.procs"; echo "/$UM/lanes.slice/lane-alpha.scope" > "$T/controlgroup"
+LC="$T/cg/$UM/lanes.slice/$UA"; mkdir -p "$LC"; printf '100\n101\n777\n' > "$LC/cgroup.procs"; echo "/$UM/lanes.slice/$UA" > "$T/controlgroup"
 mkdir -p "$P/777"; echo sleep > "$P/777/comm"; printf 'sleep\0infinity\0' > "$P/777/cmdline"; for p in 100 101; do echo claude > "$P/$p/comm"; printf 'claude\0' > "$P/$p/cmdline"; done
-printf 'lane-alpha.scope loaded active running x\n' > "$T/lane-units"; printf 'dreamteam-proj.scope loaded active running x\n' > "$T/fleet-units"
+printf '%s loaded active running x\n' "$UA" > "$T/lane-units"; printf 'dreamteam-proj.scope loaded active running x\ndreamteam-leadonly.scope loaded active running x\ndreamteam-other.scope loaded active running x\n' > "$T/fleet-units"
+mkdir -p "$T/cgof"; echo "/user.slice/user-1000.slice/user@1000.service/app.slice/dreamteam-proj.scope" > "$T/cgof/dreamteam-proj.scope"
 echo '{ this is not json' > "$T/config.json"; : > "$LOG"; rm -f "$T/scope-up"; run_ls uninstall; rc=$?
 ok "uninstall with an unreadable config still runs (exit 0)" '[ "$rc" -eq 0 ]'
 ok "uninstall: the attach timer is disabled" 'grep -qxF "systemctl --user disable --now dreamteam-lane-slice.timer" "$LOG"'
-ok "uninstall: each lane's processes are moved out of the slice (the anchor is not)" 'grep -q "AttachProcessesToUnit ssau out-alpha.scope / 2 100 101$" "$LOG" && ! grep "AttachProcessesToUnit" "$LOG" | grep -q " 777"'
-ok "uninstall: the lane scope is stopped, by name" 'grep -qxF "systemctl --user stop lane-alpha.scope" "$LOG"'
-ok "uninstall: the weights set on a fleet scope are reset" 'grep -qxF "systemctl --user set-property --runtime dreamteam-proj.scope CPUWeight= IOWeight=" "$LOG"'
+ok "uninstall: each lane's processes are moved out of the slice (the anchor is not)" 'grep -q "AttachProcessesToUnit ssau $OA / 2 100 101$" "$LOG" && ! grep "AttachProcessesToUnit" "$LOG" | grep -q " 777"'
+ok "uninstall: the lane scope is stopped, by name" 'grep -qxF "systemctl --user stop $UA" "$LOG"'
+ok "uninstall: the weights THIS TOOL set on a fleet scope are reset (it holds the record of that start of it)" 'grep -qxF "systemctl --user set-property --runtime dreamteam-proj.scope CPUWeight= IOWeight=" "$LOG" && [ ! -e "$ST/weight.dreamteam-proj.scope" ]'
+ok "uninstall: a lead-only fleet scope and an unrelated one, both running, are NOT touched: nothing is listed from the manager, nothing set on them" '! grep -q "dreamteam-leadonly\|dreamteam-other" "$LOG" && ! grep -q "list-units dreamteam-" "$LOG"'
 ok "uninstall: the slice file and drop-ins are gone" '[ ! -e "$U/lanes.slice" ] && [ ! -e "$U/a-gate.service.d/20-lanes-slice.conf" ]'
-touch "$T/busctl-fails"; cfg '{"lanes":{"enabled":true,"exclude":[]}}'; run_ls install; echo '{ broken' > "$T/config.json"; : > "$LOG"; run_ls uninstall; rc=$?; rm -f "$T/busctl-fails"
-ok "uninstall: a lane that cannot be moved out is NOT stopped (its processes would be ended), exit 1" '[ "$rc" -eq 1 ] && ! grep -q "stop lane-alpha.scope" "$LOG"'
+touch "$T/busctl-fails"; own "$UA"; cfg '{"lanes":{"enabled":true,"exclude":[]}}'; run_ls install; echo '{ broken' > "$T/config.json"; : > "$LOG"; run_ls uninstall; rc=$?; rm -f "$T/busctl-fails"
+ok "uninstall: a lane that cannot be moved out is NOT stopped (its processes would be ended), exit 1" '[ "$rc" -eq 1 ] && ! grep -q "stop $UA" "$LOG"'
 rm -f "$T/lane-units" "$T/fleet-units" "$T/controlgroup"; rm -rf "$T/cg/$UM/lanes.slice"
+
+echo "── ownership is a record, never a name (xreview #288 r2; lead 17:02 Tue) ─────────────────"
+# strict: a unit is active only when it was started (by the systemd-run stub) or marked up by name, never "all of them"
+fresh() { rm -rf "$ST" "$T/inv" "$T/cgof" "$T/desc" "$T/desc-foreign" "$T/sessions" "$T/lane-units" "$T/fleet-units" "$T/controlgroup" "$T/up"; rm -f "$T/scope-up"; restore; mkdir -p "$T/inv" "$T/cgof" "$T/up"; touch "$T/strict"; : > "$LOG"; }
+up() { local u; for u in "$@"; do touch "$T/up/$u"; done; }
+FC="/user.slice/user-1000.slice/user@1000.service/app.slice"
+cfg '{"lanes":{"enabled":true,"exclude":["lead"],"cpuWeight":40,"ioWeight":20,"perLane":{"memoryHigh":"5G"}}}'
+# (1) the rollback and the fleet scopes
+fresh; run_ls attach
+ok "attach records the fleet scope it weights: the InvocationID of that start, written before the weights" '[ "$(cat "$ST/weight.dreamteam-proj.scope")" = "$INV0" ] && grep -qxF "systemctl --user set-property --runtime dreamteam-proj.scope CPUWeight=40 IOWeight=20" "$LOG"'
+ok "attach records each scope it creates" '[ "$(cat "$ST/scope.$UA")" = "$INV0" ]'
+echo "$FC/dreamteam-proj.scope" > "$T/cgof/dreamteam-proj.scope"; echo bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb > "$T/inv/dreamteam-proj.scope"; : > "$LOG"; run_ls uninstall
+ok "rollback: a fleet scope that was STARTED AGAIN since we weighted it (another InvocationID) is not reset; the stale record goes" '! grep -q "set-property --runtime dreamteam-proj.scope" "$LOG" && [ ! -e "$ST/weight.dreamteam-proj.scope" ] && grep -q "not the scope this tool weighted any more" "$T/out"'
+fresh; run_ls attach; echo "/system.slice/dreamteam-proj.scope" > "$T/cgof/dreamteam-proj.scope"; : > "$LOG"; run_ls uninstall
+ok "rollback: a recorded fleet scope whose cgroup is under /system.slice is not set" '! grep -q "set-property --runtime dreamteam-proj.scope" "$LOG" && grep -q "not inside this user.s manager" "$T/out"'
+fresh; run_ls attach; echo "/user.slice/user-1001.slice/user@1001.service/app.slice/dreamteam-proj.scope" > "$T/cgof/dreamteam-proj.scope"; : > "$LOG"; run_ls uninstall
+ok "rollback: …nor one in another user's manager" '! grep -q "set-property --runtime dreamteam-proj.scope" "$LOG"'
+fresh; mkdir -p -m 700 "$ST"; for bad in 'dreamteam-x;id.scope' 'dreamteam-a b.scope' 'lead-spire.scope' 'octoprint.service'; do echo "$INV0" > "$ST/weight.$bad"; done; echo "$FC/any.scope" > "$T/controlgroup"; : > "$LOG"; run_ls uninstall
+ok "rollback: a weight record whose NAME is not a plain fleet-scope name (also lead-spire.scope, a service) hands nothing to set-property" '! grep -q "set-property" "$LOG"'
+fresh; mkdir -p -m 700 "$ST"; echo "$FC/dreamteam-lead.scope" > "$T/cgof/dreamteam-lead.scope"; echo "$INV0" > "$T/planted"; ln -s "$T/planted" "$ST/weight.dreamteam-lead.scope"; : > "$LOG"; run_ls uninstall
+ok "rollback: a weight record that is a symlink is not believed" '! grep -q "set-property" "$LOG"'
+fresh; mkdir -p "$T/elsewhere"; echo "$INV0" > "$T/elsewhere/weight.dreamteam-lead.scope"; echo "$FC/dreamteam-lead.scope" > "$T/cgof/dreamteam-lead.scope"; ln -s "$T/elsewhere" "$ST"; : > "$LOG"; run_ls uninstall; rm -f "$ST"
+ok "rollback: a state directory that is a symlink is not believed" '! grep -q "set-property" "$LOG"'
+# the lead comes to live in a fleet scope we had weighted: our weights are taken back, and only ours
+fresh; run_ls attach; echo "$FC/dreamteam-proj.scope" > "$T/cgof/dreamteam-proj.scope"; pcg 901 "app.slice/dreamteam-proj.scope"; : > "$LOG"; run_ls attach
+ok "a fleet scope WE weighted that now also holds the lead: the weights are taken back and the record dropped" 'grep -qxF "systemctl --user set-property --runtime dreamteam-proj.scope CPUWeight= IOWeight=" "$LOG" && [ ! -e "$ST/weight.dreamteam-proj.scope" ]'
+: > "$LOG"; run_ls attach
+ok "…and a lead-shared fleet scope we hold NO record for is not written at all (not weighted, not reset)" '! grep -q "set-property --runtime dreamteam-proj.scope" "$LOG"'
+# (2) a lane scope is ours only by record
+fresh; up "$UA"; run_ls attach; rc=$?
+ok "a RUNNING $UA that this tool did not create: REFUSED (exit 1, said), no process moved into it, none started, no budget set on it" '[ "$rc" -eq 1 ] && grep -q "$UA is running and was NOT created by this tool" "$T/err" && ! grep -q "AttachProcessesToUnit ssau $UA" "$LOG" && ! grep -q "systemd-run" "$LOG" && ! grep -q "set-property --runtime $UA" "$LOG"'
+fresh; up "$UA"; own "$UA"; echo cccccccccccccccccccccccccccccccc > "$T/inv/$UA"; run_ls attach; rc=$?
+ok "…the same when our record is of an EARLIER start of that name (another InvocationID)" '[ "$rc" -eq 1 ] && ! grep -q "AttachProcessesToUnit ssau $UA" "$LOG" && ! grep -q "set-property --runtime $UA" "$LOG"'
+fresh; up "$UA"; own "$UA"; run_ls attach; rc=$?
+ok "(control: with a record of this start it is used: moved into, budget set)" '[ "$rc" -eq 0 ] && grep -q "AttachProcessesToUnit ssau $UA / 4 100 101 102 110$" "$LOG" && grep -qxF "systemctl --user set-property --runtime $UA MemoryHigh=5G" "$LOG"'
+# a running, unowned unit of the lane's name whose processes are ALREADY in it (nothing to move): still no budget on it
+fresh; up "$UA"; for q in 100 101 102 110; do pcg $q "lanes.slice/$UA"; done; run_ls attach
+ok "a running $UA we did not create, holding the lane's processes already: no budget is set on it" '! grep -q "set-property --runtime $UA" "$LOG"'
+fresh; touch "$T/desc-foreign"; run_ls attach; rc=$?
+ok "a unit of that name that came up WITHOUT this run's token (started by someone else in the same moment): refused, not recorded, nothing moved in" '[ "$rc" -eq 1 ] && [ ! -e "$ST/scope.$UA" ] && ! grep -q "AttachProcessesToUnit ssau $UA" "$LOG" && grep -q "did not come up as the scope this run started" "$T/err"'
+fresh; run_ls attach
+ok "the scope this tool starts carries a random token in its Description" 'grep -Eq "systemd-run --user --quiet --scope --unit=${UA%.scope} --slice=lanes.slice -p Delegate=yes --description=dreamteam lane-slice [0-9a-f]{16} sleep infinity" "$LOG"'
+# a foreign lane-*.scope and the rollback, and the orphan sweep
+fresh; up "$UA" lane-foreign-12345678.scope "$UO"; own "$UA"; printf '%s loaded active running x\n' "$UA" "lane-foreign-12345678.scope" "$UO" > "$T/lane-units"; echo 1 > "$T/tasks"
+LCF="$T/cg/$UM/lanes.slice/x"; mkdir -p "$LCF"; printf '100\n101\n' > "$LCF/cgroup.procs"; echo "/$UM/lanes.slice/x" > "$T/controlgroup"; for q in 100 101; do echo claude > "$P/$q/comm"; printf 'claude\0' > "$P/$q/cmdline"; done
+: > "$LOG"; run_ls attach
+ok "attach's orphan sweep: a lane-*.scope this tool did not create is never stopped, though its session is gone and it holds one task" '! grep -q "stop lane-foreign-12345678.scope" "$LOG" && ! grep -q "stop $UO" "$LOG"'
+: > "$LOG"; run_ls uninstall
+ok "rollback: a FOREIGN lane-*.scope is left alone: nothing moved out of it, not stopped, and said" '! grep -q "lane-foreign-12345678\|out-foreign" "$LOG" && ! grep -q "stop $UO" "$LOG" && grep -q "lane-foreign-12345678.scope was not created by this tool" "$T/out"'
+ok "…while the lane scope that IS ours is emptied and stopped in the same run" 'grep -q "AttachProcessesToUnit ssau $OA / 2 100 101$" "$LOG" && grep -qxF "systemctl --user stop $UA" "$LOG" && [ ! -e "$ST/scope.$UA" ]'
+rm -rf "$T/cg/$UM/lanes.slice"
+# two session names that safe() folds to the same text get two units
+fresh; printf 'a.b\na_b\n' > "$T/sessions"; pcg 400 "app.slice/tmux-spawn-x.scope"; pcg 410 "app.slice/tmux-spawn-x.scope"; run_ls attach
+ok "sessions a.b and a_b: two different units (the hash is of the RAW name), one process each" '[ "$(grep -o "AttachProcessesToUnit ssau lane-a_b-[0-9a-f]\{8\}.scope / 1 4[01]0" "$LOG" | sort -u | wc -l)" -eq 2 ] && [ "$(grep -o "ssau lane-a_b-[0-9a-f]\{8\}.scope" "$LOG" | sort -u | wc -l)" -eq 2 ]'
+rm -rf "$P/400" "$P/410"
+# (3) discovery happens INSIDE the lock: the tmux and ps stubs noted the lock's state each time they were called
+fresh; : > "$T/lockstate"; run_ls attach
+ok "attach: every tmux and ps call found the lock HELD ($(wc -l < "$T/lockstate") calls)" '[ "$(wc -l < "$T/lockstate")" -ge 3 ] && ! grep -qv "^held$" "$T/lockstate"'
+: > "$T/lockstate"; run_ls status
+ok "(control: status takes no lock, and the same stubs say so)" '[ -s "$T/lockstate" ] && ! grep -qv "^free$" "$T/lockstate"'
+fresh; rm -f "$T/strict"
 
 echo "── host-io-check.sh ─────────────────────────────────────────────"
 ok "passes bash -n" 'bash -n "$HC"'

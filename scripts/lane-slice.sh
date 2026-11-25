@@ -7,7 +7,7 @@
 #
 # WHAT IS COVERED, exactly:
 #   • Every tmux session that is not in `.lanes.exclude` or `.lanes.lead`: its panes and all their descendants
-#     are moved into `lane-<session>.scope`, a scope of that lane alone, inside `lanes.slice`. Whatever a lane
+#     are moved into `lane-<session>-<hash>.scope` (the hash is of the raw session name), a scope of that lane alone, inside `lanes.slice`. Whatever a lane
 #     starts afterwards (a test suite, a gate it runs as a child) is born there.
 #       - lanes.slice carries the AGGREGATE: CPUWeight, IOWeight, MemoryHigh, MemorySwapMax for all lanes together.
 #       - each lane scope carries its OWN budget (`.lanes.perLane`: memoryHigh, memorySwapMax), so one lane's
@@ -38,10 +38,11 @@
 #   lane-slice.sh attach      place every lane session; move excluded sessions out; set each lane's budget
 #   lane-slice.sh attach --hook   the same, silent, always exit 0 (SessionStart)
 #   lane-slice.sh status      the slice's settings, each session's place, what IOWeight still waits for
-#   lane-slice.sh uninstall   THE ROLLBACK: move every lane's processes out of the slice (into
-#                             out-<session>.scope), stop the lane scopes, reset the weights set on fleet
-#                             scopes, remove the unit and drop-ins this tool wrote, disable the attach timer.
-#                             Works without a readable config.
+#   lane-slice.sh uninstall   THE ROLLBACK, of what this tool did and nothing else: move the processes of each
+#                             lane scope IT CREATED out of the slice (into an out-* scope) and stop that scope;
+#                             reset the weights on each fleet scope IT WEIGHTED; remove the unit and drop-ins
+#                             it wrote; disable the attach timer. A lane-*.scope or dreamteam-*.scope it has
+#                             no record of is left exactly as it is. Works without a readable config.
 #
 # CONFIG (config.json `.lanes`, per-host overlay config.<host>.json; this repo is public, so session names live
 # in the overlay): enabled (false) · exclude (REQUIRED when enabled, may be []) · lead ([]) ·
@@ -93,15 +94,47 @@ uc() { systemctl --user "$@"; }
 ours() { [ -f "$1" ] && [ ! -L "$1" ] && head -n 1 "$1" 2>/dev/null | grep -qxF "$MARK"; }
 cg() { local l; l=$(tail -n 1 "$PROC/$1/cgroup" 2>/dev/null) && printf '%s' "${l#*::}"; }
 safe() { printf '%s' "$1" | tr -c 'A-Za-z0-9_-' '_'; }
+# unit_for <lane|out> <raw session name> → <prefix>-<safe name>-<8 hex of sha256(RAW name)>.scope. safe() folds
+# every other character to "_", so "a.b" and "a_b" would share a unit; the hash of the raw name keeps them apart.
+unit_for() { printf '%s-%s-%s.scope' "$1" "$(safe "$2" | cut -c1-80)" "$(printf '%s' "$2" | sha256sum | cut -c1-8)"; }
+OURSCOPE='^(lane|out)-[A-Za-z0-9_-]{1,90}\.scope$'
+LANERE='^lane-[A-Za-z0-9_-]{1,90}\.scope$'
+FLEETRE='^dreamteam-[A-Za-z0-9_.-]{1,80}\.scope$'
+MYUID="${LANE_SLICE_UID:-$(id -u)}"; [[ "$MYUID" =~ ^[0-9]{1,9}$ ]] || MYUID=$(id -u)       # LANE_SLICE_UID: the fixture tree's uid (tests)
+MINE="/user.slice/user-$MYUID.slice/user@$MYUID.service/"
+# OWNERSHIP IS A RECORD, NEVER A NAME (xreview #288 r2). A unit called lane-x.scope or dreamteam-y.scope is not
+# ours because of what it is called. What this tool did is written down when it does it, as the InvocationID of
+# that START of the unit (systemd gives every start a new one):
+#   $STATE/scope.<unit>    a lane-* or out-* scope this tool CREATED
+#   $STATE/weight.<unit>   a fleet scope this tool set the lanes' weights on
+# and read back before anything is done to the unit again. No record, or a record of an earlier start: not ours,
+# nothing is moved into it, set on it, reset on it or stopped. The directory is in the runtime dir: it is gone at
+# reboot, as are the scopes and the runtime properties it speaks of.
+STATE="${LANE_SLICE_STATE:-${XDG_RUNTIME_DIR:-$HOME/.local/state}/dreamteam-lane-slice}"
+state_ok() { mkdir -p -m 700 "$STATE" 2>/dev/null; [ -d "$STATE" ] && [ ! -L "$STATE" ] && [ -O "$STATE" ]; }
+inv() { local i; i=$(uc show "$1" -p InvocationID --value 2>/dev/null) && [[ "$i" =~ ^[0-9a-f]{32}$ ]] && printf '%s' "$i"; }
+rec_write() { local i; state_ok && i=$(inv "$2") && printf '%s\n' "$i" > "$STATE/$1.$2.tmp.$$" && mv -f "$STATE/$1.$2.tmp.$$" "$STATE/$1.$2"; }
+rec_is() { local f="$STATE/$1.$2" i; state_ok && [ -f "$f" ] && [ ! -L "$f" ] && i=$(inv "$2") && [ "$(head -n 1 "$f" 2>/dev/null)" = "$i" ]; }
+rec_drop() { rm -f -- "$STATE/$1.$2"; }
+in_mine() { local c; c=$(uc show "$1" -p ControlGroup --value 2>/dev/null); case "$c" in "$MINE"?*) return 0 ;; esac; return 1; }
 # move <unit.scope> <slice or ""> <pid>...: make the scope if it is not there (delegated: the manager refuses to
 # move processes into a scope that is not), then move the processes with AttachProcessesToUnit.
+# A unit of that name that is ALREADY RUNNING is used only when it is ours by record; otherwise it is refused,
+# never reused. A new one is started with a random token in its Description, and is recorded only when the unit
+# that came up carries that token: a unit of the same name started by someone else in the same moment does not.
 move() {
-  local unit=$1 slice=$2; shift 2
+  local unit=$1 slice=$2 tok; shift 2
   [ "$#" -gt 0 ] || return 0
-  if ! uc is-active --quiet "$unit" 2>/dev/null; then
-    systemd-run --user --quiet --scope --unit="${unit%.scope}" ${slice:+--slice="$slice"} -p Delegate=yes sleep infinity > /dev/null 2>&1 &
+  [[ "$unit" =~ $OURSCOPE ]] || { echo "lane-slice: '$unit' is not a unit name this tool makes: refused" >&2; return 1; }
+  if uc is-active --quiet "$unit" 2>/dev/null; then
+    rec_is scope "$unit" || { echo "lane-slice: $unit is running and was NOT created by this tool (no record of this start of it): refused, never reused" >&2; return 1; }
+  else
+    tok="dreamteam lane-slice $(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+    systemd-run --user --quiet --scope --unit="${unit%.scope}" ${slice:+--slice="$slice"} -p Delegate=yes --description="$tok" sleep infinity > /dev/null 2>&1 &
     disown 2>/dev/null || true
     for _ in 1 2 3 4 5 6 7 8 9 10; do uc is-active --quiet "$unit" 2>/dev/null && break; sleep 0.2; done
+    [ "$(uc show "$unit" -p Description --value 2>/dev/null)" = "$tok" ] || { echo "lane-slice: $unit did not come up as the scope this run started (another unit of that name, or none): refused" >&2; return 1; }
+    rec_write scope "$unit" || { echo "lane-slice: could not record $unit as ours; nothing moved into it" >&2; return 1; }
   fi
   busctl call --user org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager \
     AttachProcessesToUnit "ssau" "$unit" "/" "$#" "$@" > /dev/null 2>&1
@@ -116,16 +149,29 @@ if [ "$MODE" = uninstall ]; then
   if command -v busctl >/dev/null 2>&1 && command -v systemd-run >/dev/null 2>&1; then
     while read -r u; do
       [ -n "$u" ] || continue
+      [[ "$u" =~ $LANERE ]] || { echo "note: '$u' is not a lane unit name: left alone"; continue; }
+      rec_is scope "$u" || { echo "note: $u was not created by this tool (no record of this start of it): left alone, nothing moved, not stopped"; continue; }
       s=${u#lane-}; s=${s%.scope}
       mapfile -t pids < <(unit_pids "$u" | while read -r p; do [ "$(cat "$PROC/$p/comm" 2>/dev/null)" = sleep ] && [ "$(tr '\0' ' ' < "$PROC/$p/cmdline" 2>/dev/null)" = "sleep infinity " ] || echo "$p"; done)
       if [ "${#pids[@]}" -gt 0 ]; then
         if move "out-$s.scope" "" "${pids[@]}"; then echo "moved ${#pids[@]} process(es) of $u out of the slice (out-$s.scope)"; else echo "lane-slice: could not move $u's processes out" >&2; rc=1; continue; fi
       fi
-      uc stop "$u" 2>/dev/null && echo "stopped $u"
+      uc stop "$u" 2>/dev/null && echo "stopped $u" && rec_drop scope "$u"
     done < <(lane_units)
   fi
-  while read -r u; do [ -n "$u" ] && uc set-property --runtime "$u" CPUWeight= IOWeight= 2>/dev/null && echo "weights reset on $u"; done \
-    < <(uc list-units 'dreamteam-*.scope' --no-legend --plain 2>/dev/null | awk '{print $1}')
+  # the fleet scopes: ONLY those this tool weighted, each by its record. Nothing is listed from the manager: a
+  # dreamteam-*.scope we never weighted (the lead's own fleet, somebody else's) is not looked at, let alone set.
+  if state_ok; then
+    for f in "$STATE"/weight.*; do
+      [ -e "$f" ] || [ -L "$f" ] || continue            # (whether the record is believed is rec_is's question, below)
+      u=${f##*/weight.}
+      case "$u" in *.tmp.*) continue ;; esac
+      [[ "$u" =~ $FLEETRE ]] || { echo "note: a weight record named '$u' is not a plain fleet-scope name: nothing set"; continue; }
+      if ! rec_is weight "$u"; then echo "note: $u is not the scope this tool weighted any more (gone, or started again since): nothing set, the record dropped"; rec_drop weight "$u"; continue; fi
+      in_mine "$u" || { echo "note: $u is not inside this user's manager: nothing set"; continue; }
+      if uc set-property --runtime "$u" CPUWeight= IOWeight= 2>/dev/null; then echo "weights reset on $u"; rec_drop weight "$u"; else echo "lane-slice: could not reset the weights on $u" >&2; rc=1; fi
+    done
+  fi
   for f in "$UDIR/$SLICE.slice" "$UDIR"/*.d/20-lanes-slice.conf; do
     [ -e "$f" ] || [ -L "$f" ] || continue
     if ours "$f"; then rm -f -- "$f" && echo "removed $f" || rc=1; rmdir --ignore-fail-on-non-empty "$(dirname "$f")" 2>/dev/null || true
@@ -235,8 +281,6 @@ fi
 command -v busctl >/dev/null 2>&1 && command -v systemd-run >/dev/null 2>&1 || { echo "lane-slice: busctl and systemd-run are needed" >&2; exit 1; }
 rc=0
 declare -A LIVE=() FLEET=() LEADFLEET=()
-MYUID="${LANE_SLICE_UID:-$(id -u)}"; [[ "$MYUID" =~ ^[0-9]{1,9}$ ]] || MYUID=$(id -u)       # LANE_SLICE_UID: the fixture tree's uid (tests)
-MINE="/user.slice/user-$MYUID.slice/user@$MYUID.service/"
 # fleet_unit <cgroup path> → the dreamteam-*.scope name in it, ONLY when the path is inside this user's own
 # manager; nothing otherwise. The NAME comes from a cgroup path, so it is validated against the fleet-scope shape
 # at the one place it is handed to systemctl (the weights loop below), never trusted before.
@@ -256,12 +300,13 @@ for s in "${SESSIONS[@]}"; do
       esac
     done < <(session_pids "$s")
     if [ "${#out[@]}" -gt 0 ]; then
-      if move "out-$(safe "$s").scope" "" "${out[@]}"; then echo "session $s is not a lane: ${#out[@]} process(es) moved OUT of $SLICE.slice (out-$(safe "$s").scope)"
+      ou=$(unit_for out "$s")
+      if move "$ou" "" "${out[@]}"; then echo "session $s is not a lane: ${#out[@]} process(es) moved OUT of $SLICE.slice ($ou)"
       else echo "lane-slice: session $s is not a lane but its processes could not be moved out of $SLICE.slice" >&2; rc=1; fi
     fi
     continue
   fi
-  unit="lane-$(safe "$s").scope"; LIVE[$unit]=1
+  unit=$(unit_for lane "$s"); LIVE[$unit]=1
   pend=()
   while read -r p; do
     [ -n "$p" ] || continue
@@ -282,21 +327,31 @@ for s in "${SESSIONS[@]}"; do
     else echo "lane-slice: could not move session $s into $unit" >&2; rc=1; continue; fi
   fi
   # the lane's own budget, set on its scope every time (a changed config reaches a running lane)
-  if { [ -n "$PLHIGH" ] || [ -n "$PLSWAP" ]; } && uc is-active --quiet "$unit" 2>/dev/null; then
+  # (only on a scope that is ours by record: a running unit of that name that we did not create gets nothing)
+  if { [ -n "$PLHIGH" ] || [ -n "$PLSWAP" ]; } && uc is-active --quiet "$unit" 2>/dev/null && rec_is scope "$unit"; then
     uc set-property --runtime "$unit" ${PLHIGH:+MemoryHigh=$PLHIGH} ${PLSWAP:+MemorySwapMax=$PLSWAP} 2>/dev/null || { echo "lane-slice: could not set the budget on $unit" >&2; rc=1; }
   fi
 done
 # a fleet scope that holds lane processes is not moved; it gets the lanes' weights
 for u in "${!FLEET[@]}"; do
-  [[ "$u" =~ ^dreamteam-[A-Za-z0-9_.-]{1,80}\.scope$ ]] || { echo "note: '$u' (from a cgroup path) is not a plain fleet-scope name: nothing is set on it"; continue; }
-  if [ -n "${LEADFLEET[$u]:-}" ]; then echo "fleet scope $u also holds the lead's (or an excluded session's) processes: NOT given the lanes' weights"; continue; fi
-  uc set-property --runtime "$u" "CPUWeight=$CPUW" "IOWeight=$IOW" 2>/dev/null && echo "fleet scope $u: CPUWeight=$CPUW IOWeight=$IOW (its memory stays under its own cap)" || { echo "lane-slice: could not set weights on $u" >&2; rc=1; }
+  [[ "$u" =~ $FLEETRE ]] || { echo "note: '$u' (from a cgroup path) is not a plain fleet-scope name: nothing is set on it"; continue; }
+  if [ -n "${LEADFLEET[$u]:-}" ]; then
+    echo "fleet scope $u also holds the lead's (or an excluded session's) processes: NOT given the lanes' weights"
+    # weights WE set on it earlier, before the lead was in it, are taken back now; one we never weighted is not touched
+    if rec_is weight "$u"; then uc set-property --runtime "$u" CPUWeight= IOWeight= 2>/dev/null && echo "fleet scope $u: the weights this tool had set are taken back" && rec_drop weight "$u" || rc=1; fi
+    continue
+  fi
+  # the record FIRST, then the weights: a weight without its record could never be taken back by the rollback
+  rec_write weight "$u" || { echo "lane-slice: could not record $u; no weights set on it" >&2; rc=1; continue; }
+  if uc set-property --runtime "$u" "CPUWeight=$CPUW" "IOWeight=$IOW" 2>/dev/null; then echo "fleet scope $u: CPUWeight=$CPUW IOWeight=$IOW (its memory stays under its own cap)"
+  else rec_drop weight "$u"; echo "lane-slice: could not set weights on $u" >&2; rc=1; fi
 done
 # a lane scope whose session is gone and that holds only its anchor
 while read -r u; do
   [ -n "$u" ] || continue
   [ -n "${LIVE[$u]:-}" ] && continue
+  [[ "$u" =~ $LANERE ]] && rec_is scope "$u" || continue          # a lane-*.scope this tool did not create is not ours to stop
   [ "$(uc show "$u" -p TasksCurrent --value 2>/dev/null)" = 1 ] || continue
-  uc stop "$u" 2>/dev/null && echo "stopped $u (its session is gone)"
+  uc stop "$u" 2>/dev/null && echo "stopped $u (its session is gone)" && rec_drop scope "$u"
 done < <(lane_units)
 exit "$rc"
