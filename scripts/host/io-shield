@@ -1,0 +1,428 @@
+#!/usr/bin/env bash
+# dreamteam — io-shield: make I/O weights real on this host, give the known hogs a low one, and give the fleet
+# lead's own scope the kernel OOM score a user cannot give itself.
+# A SYSTEM tool (root). The copy of record is here; the installed copy is /usr/local/sbin/dreamteam-io-shield
+# (systemd/system/README.md). Nothing in this repo installs it.
+#
+# WHY (Flow rows 7e039111, f72945bc; measured 2026-11-21/23).
+#   1. An interactive session froze while "idle class, nice 15" jobs ran. The reader was not the job: a palace
+#      test asks Postgres, and Postgres (container mempalace-db, its own cgroup, normal class) read 60 MB/s for
+#      one SELECT. A client's nice level stops at the socket.
+#   2. No weight was in force anywhere: with the mq-deadline or none scheduler a cgroup's IOWeight= does nothing
+#      until io.cost is enabled for the device, and the default io.cost settings barely help. On an NVMe, a
+#      victim doing what an interactive session does, against 4 readers and 1 writer:
+#          alone                                   fsync p99   4.5 ms
+#          hogs, no control                        fsync p99 453   ms
+#          io.cost defaults, weights 10 : 100      fsync p99  19.9 ms
+#          io.cost with latency targets, 10 : 100  fsync p99   7.7 ms   (hogs still 267 MB/s read)
+#          the same io.cost, EQUAL weights         fsync p99  92   ms
+#   3. 2026-11-22 the kernel-side question: a user process cannot lower its own oom_score_adj (a scope refuses
+#      the property, a user service is clamped to the manager's value, the /proc write is denied). Root can.
+#
+# CONFIG, one file (default /etc/dreamteam/io-shield.conf; host data, never in this repo):
+#   device <name> [rlat=<µs>] [wlat=<µs>] [min=<pct>] [max=<pct>]
+#       enable io.cost on /sys/block/<name> with latency targets (95 % of reads under rlat, of writes under wlat;
+#       the controller slows everyone's budget to min % of the device model when a target is missed, and the
+#       weights divide that budget). Defaults rlat=2000 wlat=5000 min=25 max=100.
+#   unit <unit> <weight>           systemctl set-property --runtime <unit> IOWeight=<weight>   (1-10000; 100 = default)
+#   docker <container> <weight>    the same for that container's scope, docker-<full id>.scope
+#   oomprotect <uid> <unit> <score>
+#       <unit> must be `lead-<name>.scope`: the unit scripts/lead-watchdog.sh creates when it launches the fleet
+#       lead. Every process of <uid> in EXACTLY this cgroup,
+#           <cgroup root>/user.slice/user-<uid>.slice/user@<uid>.service/app.slice/<unit>
+#       (and below it) whose score is not already negative gets /proc/<pid>/oom_score_adj = <score>,
+#       -1000..0, and a record of that write. NOTHING else earns it: no mark, no attribute, no other unit name,
+#       no parent slice. THE UNDO IS NARROWER THAN THE WRITE. A score is written back in one case only: `off`,
+#       the same process (pid and start time), still holding the score we wrote, its cgroup STILL the lead unit
+#       named in its record. A recorded process found anywhere else is NEVER written, under /system.slice first
+#       of all: its record is retired to <ledger>/left/ and `status` names it (it keeps our score until it
+#       ends; a person decides). A negative score the helper has no record of is never written to either,
+#       wherever the process lives: system services that run as the user (on familiar: palace-daemon -500,
+#       qwen3-coder -500, familiar-loadguard -800, donkey-llm -100), anything in the user slice or a login
+#       session, and a process inside the lead unit that already had one.
+#       ONE LOCK: apply, off and on (the timer's run and a run by hand alike) take
+#       /run/dreamteam-io-shield.lock for the whole run, so a record is never read by one run while another
+#       writes it. A run that cannot have the lock in time does nothing and exits 75.
+#       THE LIMIT, stated plainly: the lead and the lanes are the same uid. A same-uid process can move itself
+#       into that cgroup, or be started in a unit of that name while the lead is down, and will then be scored
+#       like the lead. Closing that needs lanes under their own uid, not a check here. What this rules out is
+#       the accidental and the cheap: a lane marking, naming or configuring its way to the score.
+#   Blank lines and lines starting with # are skipped. ANY other line, or a bad value, stops the run before
+#   anything is written (exit 22): a half-read config never applies half a policy.
+#
+#   io-shield apply      device lines to io.cost.qos, the weights, the scores. A unit or container that is not
+#                        there is a note (the next run sets it). Does NOTHING while the off stamp exists.
+#   io-shield off        the rollback: io.cost disabled on the configured devices, IOWeight reset on the
+#                        configured units and containers, every score THIS TOOL RECORDED whose process is
+#                        still in its lead unit put back to what it was before (a recorded process that left
+#                        is retired, not written; nothing else is touched), and a stamp
+#                        (/run/dreamteam-io-shield.off) that keeps the timer's `apply` from undoing this. The
+#                        stamp is gone after a reboot, or after `io-shield on`.
+#   io-shield on         remove the stamp (the next `apply` applies again).
+#   io-shield status     print io.cost.qos, the stamp, each unit's IOWeight, the protected unit's processes
+#                        and scores (which of them are ours), the ledger and the retired records. Read-only, no lock.
+#
+# Exit: 0 done · 1 a write or a set-property failed · 2 not root (apply, off, on) or no config · 22 bad argument
+# or bad config line · 75 another io-shield run held the lock for the whole wait: nothing done.
+set -uo pipefail
+CONF="${IO_SHIELD_CONF:-/etc/dreamteam/io-shield.conf}"
+QOS="${IO_SHIELD_QOS_FILE:-/sys/fs/cgroup/io.cost.qos}"
+SYSBLOCK="${IO_SHIELD_SYSBLOCK:-/sys/block}"
+CGROOT="${IO_SHIELD_CGROUP_ROOT:-/sys/fs/cgroup}"
+PROCROOT="${IO_SHIELD_PROC:-/proc}"
+STAMP="${IO_SHIELD_RUN_DIR:-/run}/dreamteam-io-shield.off"
+LEDGER="${IO_SHIELD_LEDGER:-${IO_SHIELD_RUN_DIR:-/run}/dreamteam-io-shield}"
+
+usage() { echo "usage: io-shield apply|off|on|status" >&2; exit 22; }
+[ "$#" -eq 1 ] || usage
+MODE=$1
+case "$MODE" in apply|off|on|status) ;; *) usage ;; esac
+[ -r "$CONF" ] && [ -f "$CONF" ] || { echo "io-shield: no readable config at $CONF" >&2; exit 2; }
+if [ "$MODE" != status ] && [ "${IO_SHIELD_ASSUME_ROOT:-}" != 1 ] && [ "$(id -u)" -ne 0 ]; then
+  echo "io-shield: $MODE needs root" >&2; exit 2
+fi
+
+num() { [[ "$1" =~ ^[0-9]{1,7}$ ]]; }
+DEVS=(); DEVQ=(); UNITS=(); UNITW=(); DOCK=(); DOCKW=(); OOMU=(); OOMN=(); OOMS=()
+n=0
+while IFS= read -r line || [ -n "$line" ]; do
+  n=$((n + 1))
+  read -r -a w <<< "$line" || true
+  [ "${#w[@]}" -eq 0 ] && continue
+  case "${w[0]}" in
+    \#*) continue ;;
+    device)
+      [ "${#w[@]}" -ge 2 ] && [[ "${w[1]}" =~ ^[a-z0-9]{1,32}$ ]] || { echo "io-shield: $CONF line $n: device needs a plain block device name" >&2; exit 22; }
+      rlat=2000; wlat=5000; min=25; max=100
+      for kv in "${w[@]:2}"; do
+        k=${kv%%=*}; v=${kv#*=}
+        num "$v" || { echo "io-shield: $CONF line $n: '$kv' is not key=<number>" >&2; exit 22; }
+        case "$k" in rlat) rlat=$v ;; wlat) wlat=$v ;; min) min=$v ;; max) max=$v ;;
+          *) echo "io-shield: $CONF line $n: unknown key '$k' (rlat wlat min max)" >&2; exit 22 ;; esac
+      done
+      { [ "$min" -ge 1 ] && [ "$max" -le 10000 ] && [ "$min" -le "$max" ] && [ "$rlat" -ge 1 ] && [ "$wlat" -ge 1 ]; } \
+        || { echo "io-shield: $CONF line $n: need 1 <= min <= max <= 10000 and latencies of at least 1 µs" >&2; exit 22; }
+      DEVS+=("${w[1]}"); DEVQ+=("ctrl=user rpct=95.00 rlat=$rlat wpct=95.00 wlat=$wlat min=$min.00 max=$max.00") ;;
+    unit|docker)
+      [ "${#w[@]}" -eq 3 ] && num "${w[2]}" && [ "${w[2]}" -ge 1 ] && [ "${w[2]}" -le 10000 ] \
+        || { echo "io-shield: $CONF line $n: ${w[0]} needs <name> <weight 1-10000>" >&2; exit 22; }
+      [[ "${w[1]}" =~ ^[A-Za-z0-9][A-Za-z0-9@_.:\\-]{0,200}$ ]] || { echo "io-shield: $CONF line $n: '${w[1]}' is not a plain name" >&2; exit 22; }
+      if [ "${w[0]}" = unit ]; then UNITS+=("${w[1]}"); UNITW+=("${w[2]}"); else DOCK+=("${w[1]}"); DOCKW+=("${w[2]}"); fi ;;
+    oomprotect)
+      [ "${#w[@]}" -eq 4 ] && [[ "${w[1]}" =~ ^[0-9]{1,9}$ ]] && [[ "${w[2]}" =~ ^lead-[A-Za-z0-9_-]{1,80}\.scope$ ]] \
+        && [[ "${w[3]}" =~ ^(0|-[0-9]{1,4})$ ]] && [ "${w[3]}" -ge -1000 ] \
+        || { echo "io-shield: $CONF line $n: oomprotect needs <uid> <lead-NAME.scope> <score -1000..0>" >&2; exit 22; }
+      OOMU+=("${w[1]}"); OOMN+=("${w[2]}"); OOMS+=("${w[3]}") ;;
+    *) echo "io-shield: $CONF line $n: unknown word '${w[0]}' (device, unit, docker, oomprotect)" >&2; exit 22 ;;
+  esac
+done < "$CONF"
+
+devno() {   # block device name → MAJ:MIN, or nothing
+  local f="$SYSBLOCK/$1/dev" d
+  [ -r "$f" ] && read -r d < "$f" && [[ "$d" =~ ^[0-9]+:[0-9]+$ ]] && printf '%s' "$d"
+}
+docker_unit() {   # container name → docker-<id>.scope, or nothing
+  local id
+  id=$(docker inspect -f '{{.Id}}' "$1" 2>/dev/null) && [[ "$id" =~ ^[0-9a-f]{64}$ ]] && printf 'docker-%s.scope' "$id"
+}
+
+# oom_scores <list|apply|reset> <uid> <unit> <score>
+#
+# THE RULE (fleet-incidents 2026-11-23; Sen, xreview #282 r2): this helper undoes ONLY what it scored itself,
+# and it proves "itself" with its own record. A negative score it did not write is never written to, anywhere:
+# not in system.slice, not in the user slice, not in a login session, not inside the lead unit either.
+#   On 2026-11-23 23:21 an earlier version reset every negative score of the uid outside the lead unit; on
+#   serialhub that hit octoprint, ustreamer-builtin and ustreamer (-900 each, restored by hand), and on familiar
+#   it would have hit palace-daemon, qwen3-coder, familiar-loadguard and donkey-llm. The version after that
+#   still reset any negative score in the user slice: the same class. Being root, or the cgroup being the
+#   user slice, is not proof that a score is ours.
+#
+# THE LEDGER: one file per scored process in $LEDGER (default /run/dreamteam-io-shield, root only, gone at
+# reboot like the processes it names): <pid> holding "start=<starttime> unit=<unit> score=<n> prev=<n> uid=<n>".
+# starttime is field 22 of /proc/<pid>/stat: with the pid it names ONE process, never a later one of that number.
+#   apply  1. each record of this uid+unit is looked at, and NOTHING is written in this step:
+#             the process is gone, the pid now is another process, or someone has changed the score since
+#               → the record is dropped;
+#             the SAME process still holds our score but its cgroup is no longer the lead unit of the record
+#               (it moved: to another user scope, to a lane, or under /system.slice)
+#               → the record is RETIRED: moved to <ledger>/left/<pid>.<starttime>, kept there for a person to
+#                 see (`status` lists it) until that process exits. The process is NOT written. Ever.
+#          2. each process in the unit that has no record and whose score is not negative: the record is
+#             written FIRST, then the score. A process in the unit that already holds a negative score we have
+#             no record for (inherited, or given by something else) is left exactly as it is.
+#   reset  (off) for every record of this uid: the same looks as step 1, and ONLY a process that is the same
+#          process, still holds our score AND whose cgroup STILL IS the lead unit of its record gets its previous
+#          score written back. Everything else is dropped or retired without a write.
+#   list   read-only: who is in the unit with which score, which of them we recorded, the records, and the
+#          retired ones.
+# WHY NO WRITE OUTSIDE THE UNIT (lead ruling on #282, 2026-11-24): "it left the unit, so put its score back" was
+# still a write to a process this helper can no longer place. A process we scored can end up under
+# /system.slice (a service adopted it, a unit was started from it) or in another lane's scope, and there its
+# score is somebody else's business. The cost is stated, not hidden: such a process KEEPS the score we gave it
+# until it exits; apply and off both say how many there are, and status names them.
+# Prints "scored left retired" (apply), "undone retired" (reset). A child that INHERITS the score from a scored
+# process keeps it too; we did not write it, so we do not undo it.
+# Every process is held as ONE directory descriptor on /proc/<pid>; its owner, start time, cgroup and score are
+# read through it and the write goes through it: a pid recycled meanwhile is never reached.
+oom_scores() {
+  python3 -I -c 'import os, re, sys
+mode, cgroot, procroot, ledger, uid, unit, score = sys.argv[1:8]
+rel = "/user.slice/user-%s.slice/user@%s.service/app.slice/%s" % (uid, uid, unit)
+unit_dir = cgroot + rel
+real = os.path.isdir(unit_dir) and not os.path.islink(unit_dir)
+
+def rd(fd, name):
+    f = os.open(name, os.O_RDONLY, dir_fd=fd)
+    try: return os.read(f, 65536).decode("utf-8", "replace")
+    finally: os.close(f)
+
+def wr(fd, value):
+    f = os.open("oom_score_adj", os.O_WRONLY | os.O_TRUNC, dir_fd=fd)     # what a shell > does; /proc ignores it
+    try: os.write(f, (value + "\n").encode())
+    finally: os.close(f)
+
+def hold(pid):
+    """(fd, starttime, cgroup, score) of a live process of <uid>, else None. The caller closes fd."""
+    try:
+        fd = os.open(os.path.join(procroot, pid), os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return None
+    try:
+        if os.fstat(fd).st_uid != int(uid):
+            os.close(fd); return None
+        stat = rd(fd, "stat")
+        start = stat[stat.rindex(")") + 2:].split()[19]
+        cg = rd(fd, "cgroup").strip().split("\n")[-1].split("::", 1)[-1]
+        return fd, start, cg, rd(fd, "oom_score_adj").strip()
+    except (OSError, ValueError, IndexError):
+        os.close(fd); return None
+
+def inside(cg):
+    return real and (cg == rel or cg.startswith(rel + "/"))
+
+UNITRE = re.compile(r"^lead-[A-Za-z0-9_-]{1,80}\.scope$")
+
+def still_in(cg, runit):
+    """Is this cgroup STILL the lead unit named in the record (or below it)? Never true under /system.slice,
+    for a name that is not a lead unit name, or when the directory of that unit is not a real directory."""
+    if cg.startswith("/system.slice") or not UNITRE.match(runit or ""):
+        return False
+    r = "/user.slice/user-%s.slice/user@%s.service/app.slice/%s" % (uid, uid, runit)
+    d = cgroot + r
+    return os.path.isdir(d) and not os.path.islink(d) and (cg == r or cg.startswith(r + "/"))
+
+# the ledger: ours alone. A directory that is a symlink or not owned by us is not trusted and nothing is undone.
+def ledger_ok(create):
+    if os.path.islink(ledger):
+        return False
+    if not os.path.isdir(ledger):
+        if not create:
+            return False
+        os.makedirs(ledger, mode=0o700)
+    st = os.lstat(ledger)
+    return st.st_uid == os.geteuid() and (st.st_mode & 0o022) == 0
+
+def records():
+    out = {}
+    for n in sorted(os.listdir(ledger)):
+        if not n.isdigit():
+            continue
+        p = os.path.join(ledger, n)
+        try:
+            if os.path.islink(p) or os.lstat(p).st_uid != os.geteuid():
+                continue
+            f = dict(kv.split("=", 1) for kv in open(p).read().split())
+            if f["uid"] == uid and f["start"].isdigit() and f["score"].lstrip("-").isdigit() and f["prev"].lstrip("-").isdigit():
+                out[n] = f
+        except (OSError, ValueError, KeyError):
+            continue
+    return out
+
+def drop(pid):
+    try: os.unlink(os.path.join(ledger, pid))
+    except OSError: pass
+
+LEFT = os.path.join(ledger, "left")
+
+def retire(pid, r):
+    """The record goes aside, for a person; the process is not written."""
+    try:
+        if not os.path.isdir(LEFT):
+            os.mkdir(LEFT, 0o700)
+        if os.path.islink(LEFT):
+            raise OSError("left is a symlink")
+        os.replace(os.path.join(ledger, pid), os.path.join(LEFT, "%s.%s" % (pid, r["start"])))
+    except OSError:
+        drop(pid)                                        # it cannot be kept: it still is never acted on
+
+def left_now():
+    """The retired records whose process still lives (pid AND start time); the others are removed."""
+    out = []
+    try: names = sorted(os.listdir(LEFT)) if os.path.isdir(LEFT) and not os.path.islink(LEFT) else []
+    except OSError: names = []
+    for n in names:
+        pid, _, start = n.partition(".")
+        h = hold(pid) if pid.isdigit() else None
+        if h and h[1] == start:
+            out.append("%s(%s)" % (pid, h[2].rstrip("/").split("/")[-1] or "/")); os.close(h[0])
+        else:
+            if h: os.close(h[0])
+            try: os.unlink(os.path.join(LEFT, n))
+            except OSError: pass
+    return out
+
+scored = undone = left = retired = failed = 0
+have = ledger_ok(mode == "apply")
+recs = records() if have else {}
+if mode == "list":
+    ins = []
+    if real:
+        for sub, _, _ in os.walk(unit_dir):
+            try: pids = open(os.path.join(sub, "cgroup.procs")).read().split()
+            except OSError: continue
+            for pid in pids:
+                h = hold(pid) if pid.isdigit() else None
+                if h:
+                    os.close(h[0])
+                    ours = pid in recs and recs[pid]["start"] == h[1]
+                    ins.append("%s=%s%s" % (pid, h[3], "" if ours else "(not ours)"))
+    gone = []
+    if have:
+        try: names = sorted(os.listdir(LEFT)) if os.path.isdir(LEFT) and not os.path.islink(LEFT) else []
+        except OSError: names = []
+        for n in names:                                  # read-only here: nothing is removed by a status
+            pid, _, start = n.partition(".")
+            h = hold(pid) if pid.isdigit() else None
+            if h:
+                if h[1] == start: gone.append("%s=%s(%s)" % (pid, h[3], h[2].rstrip("/").split("/")[-1] or "/"))
+                os.close(h[0])
+    print("in:%s; recorded:%s; left the unit holding our score, NOT written:%s" % (" ".join(ins) or "none", " ".join("%s(%s)" % (p, r["unit"]) for p, r in recs.items()) or "none", " ".join(gone) or "none"))
+    sys.exit(0)
+
+# 1. the records. A write happens in exactly one case: reset, the same process, our score, STILL in its lead unit.
+for pid, r in recs.items():
+    if mode == "apply" and r.get("unit") != unit:
+        continue
+    h = hold(pid)
+    if h is None:
+        drop(pid); continue                              # gone: nothing to undo, nobody written
+    fd, start, cg, cur = h
+    try:
+        if start != r["start"]:
+            drop(pid)                                    # the number belongs to another process now: never touched
+        elif cur != r["score"]:
+            drop(pid)                                    # someone changed it since: it is theirs now
+        elif not still_in(cg, r.get("unit")):
+            retire(pid, r); retired += 1                 # it left its lead unit holding our score: NEVER written
+        elif mode == "reset":
+            wr(fd, r["prev"]); undone += 1; drop(pid)
+    except (ProcessLookupError, FileNotFoundError):
+        drop(pid)
+    except OSError as e:
+        failed += 1; sys.stderr.write("io-shield: undo for %s: %s\n" % (pid, e))
+    finally:
+        os.close(fd)
+if have:
+    left_now()                                           # forget retired records whose process has exited
+
+# 2. score: only processes in the unit, only a score that is not already negative, record first
+if mode == "apply" and real and have:
+    recs = records()
+    for sub, _, _ in os.walk(unit_dir):
+        try: pids = open(os.path.join(sub, "cgroup.procs")).read().split()
+        except OSError: continue
+        for pid in pids:
+            h = hold(pid) if pid.isdigit() else None
+            if h is None:
+                continue
+            fd, start, cg, cur = h
+            try:
+                if not inside(cg):
+                    continue                             # listed there a moment ago, not there now
+                if pid in recs and recs[pid]["start"] == start:
+                    continue                             # ours already
+                if cur.startswith("-"):
+                    left += 1; continue                  # a negative score we did not write: never touched
+                tmp = os.path.join(ledger, ".%s.tmp" % pid)
+                try: os.unlink(tmp)                      # a leftover of a run that was stopped mid-record
+                except OSError: pass
+                f = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                try: os.write(f, ("start=%s unit=%s score=%s prev=%s uid=%s\n" % (start, unit, score, cur, uid)).encode())
+                finally: os.close(f)
+                os.replace(tmp, os.path.join(ledger, pid))
+                try:
+                    wr(fd, score); scored += 1
+                except OSError:
+                    drop(pid); raise
+            except (ProcessLookupError, FileNotFoundError):
+                pass
+            except OSError as e:
+                failed += 1; sys.stderr.write("io-shield: score for %s: %s\n" % (pid, e))
+            finally:
+                os.close(fd)
+print("%d %d %d" % (scored, left, retired) if mode == "apply" else "%d %d" % (undone, retired))
+sys.exit(1 if failed else 0)' "$1" "$CGROOT" "$PROCROOT" "$LEDGER" "$2" "$3" "$4"
+}
+
+# ONE LOCK for every verb that changes anything (apply from the timer, apply by hand, off, on): the stamp, the
+# weights, the ledger and the scores are one operation, and two of them never overlap. Without it two runs could
+# both see a score of 0, and the loser's clean-up could delete the record of the score the winner had just
+# written, leaving a protection nobody can undo. `status` changes nothing and takes no lock.
+LOCKF="${IO_SHIELD_RUN_DIR:-/run}/dreamteam-io-shield.lock"
+LOCKWAIT="${IO_SHIELD_LOCK_WAIT:-60}"; [[ "$LOCKWAIT" =~ ^[0-9]{1,3}$ ]] || LOCKWAIT=60
+if [ "$MODE" != status ]; then
+  exec 9>"$LOCKF" || { echo "io-shield: cannot open the lock $LOCKF" >&2; exit 1; }
+  flock -w "$LOCKWAIT" 9 || { exec 9>&-; echo "io-shield: another io-shield run holds $LOCKF (waited $LOCKWAIT s): nothing done" >&2; exit 75; }
+fi
+
+rc=0
+setw() {   # unit weight-or-empty label
+  if [ "$(systemctl show "$1" -p LoadState --value 2>/dev/null)" != loaded ]; then echo "note: $3 is not loaded now; the next run sets it"; return 0; fi
+  if systemctl set-property --runtime "$1" "IOWeight=$2"; then echo "IOWeight=${2:-<default>} on $3"; else echo "io-shield: set-property failed for $3" >&2; rc=1; fi
+}
+run_mode() {
+case "$MODE" in
+  status)
+    echo "io.cost.qos: $(tr '\n' ';' < "$QOS" 2>/dev/null)"
+    if [ -e "$STAMP" ]; then echo "OFF: $STAMP exists, apply does nothing until 'io-shield on' or a reboot"; fi
+    for i in "${!UNITS[@]}"; do echo "unit ${UNITS[$i]}: want ${UNITW[$i]}, IOWeight=$(systemctl show "${UNITS[$i]}" -p IOWeight --value 2>/dev/null)"; done
+    for i in "${!DOCK[@]}"; do u=$(docker_unit "${DOCK[$i]}"); echo "docker ${DOCK[$i]}: want ${DOCKW[$i]}, ${u:-not running}${u:+ IOWeight=$(systemctl show "$u" -p IOWeight --value 2>/dev/null)}"; done
+    for i in "${!OOMU[@]}"; do echo "oomprotect uid ${OOMU[$i]} unit ${OOMN[$i]}: want ${OOMS[$i]}; $(oom_scores list "${OOMU[$i]}" "${OOMN[$i]}" "${OOMS[$i]}" 2>/dev/null)"; done ;;
+  on)
+    rm -f -- "$STAMP" && echo "on: the stamp is gone; the next apply applies" || rc=1 ;;
+  off)
+    : > "$STAMP" 2>/dev/null && echo "stamp written: $STAMP (apply does nothing until 'io-shield on' or a reboot)" || { echo "io-shield: could not write $STAMP" >&2; rc=1; }
+    for d in "${DEVS[@]}"; do
+      mm=$(devno "$d") || true
+      [ -n "${mm:-}" ] || { echo "io-shield: no device $d here" >&2; rc=1; continue; }
+      if printf '%s enable=0\n' "$mm" > "$QOS"; then echo "io.cost off on $d ($mm)"; else echo "io-shield: could not write $QOS for $d" >&2; rc=1; fi
+    done
+    for i in "${!UNITS[@]}"; do setw "${UNITS[$i]}" "" "${UNITS[$i]}"; done
+    for i in "${!DOCK[@]}"; do u=$(docker_unit "${DOCK[$i]}") || true; [ -n "${u:-}" ] && setw "$u" "" "container ${DOCK[$i]}"; done
+    for i in "${!OOMU[@]}"; do
+      c=$(oom_scores reset "${OOMU[$i]}" "${OOMN[$i]}" "${OOMS[$i]}") || rc=1
+      read -r un rt <<< "${c:-0 0}"
+      echo "oom scores of uid ${OOMU[$i]}: $un of OUR recorded score(s), each still in its lead unit, put back to what they were; ${rt:-0} recorded process(es) had LEFT their unit holding our score and were NOT written (status names them); nothing else is touched"
+    done ;;
+  apply)
+    if [ -e "$STAMP" ]; then echo "off ($STAMP exists): nothing applied"; return 0; fi
+    for i in "${!DEVS[@]}"; do
+      d=${DEVS[$i]}; mm=$(devno "$d") || true
+      [ -n "${mm:-}" ] || { echo "io-shield: no device $d here" >&2; rc=1; continue; }
+      if printf '%s enable=1 %s\n' "$mm" "${DEVQ[$i]}" > "$QOS"; then echo "io.cost on $d ($mm): ${DEVQ[$i]}"
+      else echo "io-shield: could not write $QOS for $d" >&2; rc=1; fi
+    done
+    for i in "${!UNITS[@]}"; do setw "${UNITS[$i]}" "${UNITW[$i]}" "${UNITS[$i]}"; done
+    for i in "${!DOCK[@]}"; do
+      u=$(docker_unit "${DOCK[$i]}") || true
+      if [ -n "${u:-}" ]; then setw "$u" "${DOCKW[$i]}" "container ${DOCK[$i]}"; else echo "note: container ${DOCK[$i]} is not there now; the next run sets it"; fi
+    done
+    for i in "${!OOMU[@]}"; do
+      c=$(oom_scores apply "${OOMU[$i]}" "${OOMN[$i]}" "${OOMS[$i]}") || rc=1
+      read -r sc lf rt <<< "${c:-0 0 0}"
+      echo "oomprotect uid ${OOMU[$i]} unit ${OOMN[$i]}: $sc process(es) scored ${OOMS[$i]} and recorded; $lf in the unit left as found (a negative score we did not write); ${rt:-0} of ours have LEFT the unit holding our score and were NOT written (status names them)"
+    done ;;
+esac
+}
+run_mode 9>&-          # nothing this helper starts (systemctl, docker, python) holds the lock's descriptor
+exit "$rc"
