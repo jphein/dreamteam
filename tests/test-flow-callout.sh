@@ -207,9 +207,9 @@ rm -f "$FIX/delay"; printf '#!/usr/bin/env bash\necho "%s"\n' "example-lane" > "
 reset; printf '#!/usr/bin/env bash\necho $$ > "%s"\ntrap "" TERM\nsleep 20\n' "$TMP/tmux.pid" > "$TMP/bin/tmux"; rm -f "$TMP/tmux.pid"; list "$(row ffff0022 example-lane ordered $T0 null)"
 ASK_WHO="" BUDGET=2 run
 allowed && [ "$ELAPSED" -le 3 ] && [ "$(calls)" -eq 0 ] && pass "a TERM-ignoring tmux does not hold the hook: back in ${ELAPSED}s, nothing asked" || fail "TERM-ignoring tmux: rc=$RC elapsed=${ELAPSED}s calls=$(calls)"
-#      …and it is KILLED after the grace (-k 1), not left behind: the hook has returned by then, so wait it out
-sleep 2.5
-if [ -s "$TMP/tmux.pid" ] && ! kill -0 "$(cat "$TMP/tmux.pid")" 2>/dev/null; then pass "the TERM-ignoring tmux is gone after the grace (-k)"; else fail "the TERM-ignoring tmux is still alive after the grace (pid $(cat "$TMP/tmux.pid" 2>/dev/null))"; fi
+#      …and it is KILLED by the hook itself before the hook returns: checked the moment the hook is back, no waiting
+if [ -s "$TMP/tmux.pid" ] && ! kill -0 "$(cat "$TMP/tmux.pid")" 2>/dev/null; then pass "the TERM-ignoring tmux is gone when the hook returns"; else fail "the TERM-ignoring tmux is still alive when the hook returns (pid $(cat "$TMP/tmux.pid" 2>/dev/null))"; fi
+grep -q 'tmux fallback overran its bound: .* signalled (TERM, then KILL after [0-9]* ms); none left' "$TMP/callout.log" && pass "…and the outcome is one logged line: what was signalled, and that none is left" || fail "no clean-up outcome in the log: [$(cat "$TMP/callout.log")]"
 # 6f4) 2026-11-24, CHECK dreamteam-audit red on familiar since 11-22: a timeout that signals ONLY its direct child,
 #      never the process group. That is uutils coreutils 0.10.0 (Ubuntu 26.04; measured on familiar: a forked
 #      grandchild outlived `timeout -k 1 2` and held the caller's $( ) for its whole life, 7.0 s against 3.0 s with
@@ -222,12 +222,33 @@ k=0; [ "$1" = -k ] && { k=$2; shift 2; }; s=$1; shift
 w=$!; wait "$c"; rc=$?; kill "$w" 2>/dev/null; exit "$rc"
 S
 chmod +x "$TMP/uu/timeout"
-reset; printf '#!/usr/bin/env bash\ntrap "" TERM\nsleep 8\necho late-name\n' > "$TMP/bin/tmux"; list "$(row ffff0023 example-lane ordered $T0 null)"
+#      The wrapper AND the child it forks are both recorded (pid and start time) and both must be gone when the hook
+#      returns: the hook's own clean-up, by session, does that; it no longer rests on what any timeout kills.
+ident() { local st f; st=$(cat "/proc/$1/stat" 2>/dev/null) || return 0; st=${st##*) }; read -r -a f <<< "$st"; printf '%s' "${f[19]:-}"; }
+reset; rm -f "$TMP"/w.id "$TMP"/c.id
+cat > "$TMP/bin/tmux" <<S
+#!/usr/bin/env bash
+trap "" TERM
+sleep 8 &
+echo "\$\$" > "$TMP/w.id"; echo "\$!" > "$TMP/c.id"
+wait
+echo late-name
+S
+list "$(row ffff0023 example-lane ordered $T0 null)"
 EXTRA_PATH="$TMP/uu" ASK_WHO="" BUDGET=2 run
 allowed && [ "$ELAPSED" -le 3 ] && [ "$(calls)" -eq 0 ] && pass "a timeout that kills only its child (uutils): a tmux whose forked child keeps the pipe does not hold the hook (${ELAPSED}s)" || fail "child-only timeout: rc=$RC elapsed=${ELAPSED}s calls=$(calls)"
+w=$(cat "$TMP/w.id" 2>/dev/null); c=$(cat "$TMP/c.id" 2>/dev/null)
+if [ -n "$w" ] && [ -n "$c" ] && [ "$w" != "$c" ] && ! kill -0 "$w" 2>/dev/null && ! kill -0 "$c" 2>/dev/null; then pass "…and BOTH the wrapper and its forked child are gone when the hook returns (recorded pids $w and $c)"
+else fail "left behind after the hook returned: wrapper ${w:-?} $(kill -0 "$w" 2>/dev/null && echo ALIVE || echo gone), forked child ${c:-?} $(kill -0 "$c" 2>/dev/null && echo ALIVE || echo gone)"; fi
+grep -q 'tmux fallback overran its bound: 2 process(es) of its session [0-9]* signalled (TERM, then KILL after [0-9]* ms); none left' "$TMP/callout.log" && pass "…reported: 2 processes of its session signalled, TERM then KILL, none left" || fail "clean-up outcome not reported: [$(cat "$TMP/callout.log")]"
+#      a child that takes TERM: no KILL is needed, and the line says so
+reset; printf '#!/usr/bin/env bash\nsleep 8\n' > "$TMP/bin/tmux"; list "$(row ffff0026 example-lane ordered $T0 null)"
+ASK_WHO="" BUDGET=2 run
+allowed && grep -q 'signalled (TERM); none left' "$TMP/callout.log" && pass "a slow tmux that takes TERM: ended with TERM alone, reported, no KILL" || fail "TERM-only clean-up: rc=$RC log=[$(cat "$TMP/callout.log")]"
 reset; printf '#!/usr/bin/env bash\necho "%s"\n' "example-lane" > "$TMP/bin/tmux"; list "$(row ffff0024 example-lane ordered $T0 null)"; show ffff0024 "$(row ffff0024 example-lane ordered $T0 null)" "[]"
 EXTRA_PATH="$TMP/uu" ASK_WHO="" BUDGET=9 run
 blocked && pass "under that timeout the tmux fallback still names the lane (the silent row blocks)" || fail "child-only timeout, fallback identity: rc=$RC err=[$(head -c 200 "$TMP/err")]"
+! grep -q 'tmux fallback' "$TMP/callout.log" && pass "a tmux that answered and exited leaves nothing to clean up: nothing signalled, nothing logged" || fail "a clean exit was reported as an overrun: [$(cat "$TMP/callout.log")]"
 #      a name that did not arrive WHOLE before the bound (no newline) is no identity: a truncated name could be
 #      another lane's. The row below belongs to the truncated name; it is never asked for.
 reset; printf '#!/usr/bin/env bash\nprintf "example-la"\nsleep 4\n' > "$TMP/bin/tmux"; list "$(row ffff0025 example-la ordered $T0 null)"; show ffff0025 "$(row ffff0025 example-la ordered $T0 null)" "[]"

@@ -50,6 +50,45 @@ CFG="${DREAMTEAM_CONFIG:-$ROOT/config.json}"
 LOG="${DREAMTEAM_FLOW_LOG:-$HOME/.claude/state/dreamteam/flow-callout.log}"
 . "$ROOT/scripts/lib/agent-id.sh"
 
+# start_of <pid> → its start time (field 22 of /proc/<pid>/stat), or nothing
+start_of() { local st f; st=$(cat "/proc/$1/stat" 2>/dev/null) || return 0; st=${st##*) }; read -r -a f <<< "$st"; printf '%s' "${f[19]:-}"; }
+# reap_session <session id> <start time of its leader> <1 when the answer arrived>
+#   The session is one this hook created (setsid), so "everything still in it" is exactly what the tmux call left
+#   behind: the client, a wrapper, a wrapper's children. IDENTITY: a session id cannot be given to anything else
+#   while one member lives; and when a process with that id exists, its start time must be the one read when the
+#   id arrived, else NOTHING is signalled (said). Nothing left: the usual case, nothing done, nothing said.
+#   Otherwise TERM to each member, a grace of at most 1 s and never more than what is left of the budget, KILL to
+#   what remains, and one line with the outcome. Bounded: every wait below is counted in ms against the budget.
+reap_session() {
+  local sid=$1 st=$2 got=$3 pids cur g t0 sent="TERM" n
+  command -v pgrep >/dev/null 2>&1 || { note "tmux fallback: no pgrep here; what the call left behind (session $sid) was not checked"; return 0; }
+  members() { pgrep -s "$sid" 2>/dev/null | tr '\n' ' '; }
+  pids=$(members)
+  if [ -n "${pids// /}" ] && [ "$got" = 1 ]; then      # it answered: give a client that is just exiting 150 ms to be gone
+    t0=$(( $(date +%s%N) / 1000000 ))
+    while [ -n "${pids// /}" ] && [ $(( $(date +%s%N) / 1000000 - t0 )) -lt 150 ]; do sleep 0.03; pids=$(members); done
+  fi
+  [ -n "${pids// /}" ] || return 0
+  if [ -e "/proc/$sid" ]; then
+    cur=$(start_of "$sid")
+    if [ -z "$st" ] || [ "$cur" != "$st" ]; then note "tmux fallback: session $sid is not the one this hook started (its leader's start time differs): nothing signalled"; return 0; fi
+  fi
+  n=$(wc -w <<< "$pids")
+  # shellcheck disable=SC2086
+  kill -TERM $pids 2>/dev/null || true
+  g=$(left); [ "$g" -gt 1000 ] && g=1000; [ "$g" -lt 100 ] && g=100
+  t0=$(( $(date +%s%N) / 1000000 ))
+  while pids=$(members); [ -n "${pids// /}" ] && [ $(( $(date +%s%N) / 1000000 - t0 )) -lt "$g" ]; do sleep 0.05; done
+  if [ -n "${pids// /}" ]; then
+    sent="TERM, then KILL after ${g} ms"
+    # shellcheck disable=SC2086
+    kill -KILL $pids 2>/dev/null || true
+    sleep 0.05; pids=$(members)
+  fi
+  if [ -n "${pids// /}" ]; then note "tmux fallback overran its bound: $n process(es) of its session $sid signalled ($sent); STILL ALIVE: $pids"
+  else note "tmux fallback overran its bound: $n process(es) of its session $sid signalled ($sent); none left"; fi
+}
+
 # note — the one logged line of a fail-open path; never fails the hook
 note() {
   mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
@@ -98,17 +137,29 @@ is_lead() { local l; for l in "${leads[@]}"; do [ "$1" = "$l" ] && return 0; don
 add "${ASK_WHO:-}"
 AID="$(dt_agent_id)"; add "${AID%%@*}"
 if [ "${#names[@]}" -eq 0 ] && [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
-  # ms, the same clock as the requests; the TERM grace (-k 1) is paid from the budget, so a tmux that ignores TERM
-  # is still killed inside it (xreview #237 r3)
+  # ms, the same clock as the requests; one second is kept back for the clean-up's grace, so a tmux that ignores
+  # TERM is still killed inside the budget (xreview #237 r3)
   tl=$(( BUDGET * 1000 - ($(( $(date +%s%N) / 1000000 )) - T0) - 1000 )); [ "$tl" -gt 3000 ] && tl=3000
-  # Read with `read -t` from a process substitution, never $( ): $( ) waits until EVERY holder of the pipe is gone.
-  # GNU timeout kills the whole process group; the uutils one (0.10.0, Ubuntu 26.04) signals only its direct child,
-  # so a tmux wrapper's forked child kept the pipe and the hook waited its whole life (familiar 2026-11-22: 20 s
-  # under a 2 s budget). read gives up at the bound by itself, whoever still holds the pipe; a line that did not
-  # arrive whole is no identity.
+  # THE CALL IS BOUNDED AND CLEANED UP BY THIS HOOK, not by `timeout` (xreview #292 r1). What `timeout` kills
+  # differs by implementation: GNU signals the process group, uutils 0.10.0 (Ubuntu 26.04) only its direct child,
+  # and with $( ) a wrapper's forked child then held the pipe for its whole life (familiar 2026-11-22: 20 s under
+  # a 2 s budget). So:
+  #   • tmux runs in a SESSION OF ITS OWN (setsid) and prints that session's id first;
+  #   • both lines are read with `read -t` from a process substitution: read gives up at the bound by itself,
+  #     whoever still holds the pipe. A name that did not arrive whole is no identity;
+  #   • then reap_session: whatever is still in that session gets TERM, a grace paid from the budget, then KILL,
+  #     and ONE logged line says what was signalled and whether anything is left.
   if [ "$tl" -ge 200 ]; then
-    ts="$(( tl / 1000 )).$(printf '%03d' $(( tl % 1000 )))"; tname=""
-    if IFS= read -r -t "$ts" tname < <(timeout -k 1 "$ts" tmux display-message -p '#S' 2>/dev/null); then add "$tname"; fi
+    tdl=$(( $(date +%s%N) / 1000000 + tl )); tname=""; tsid=""; tstart=""; tgot=0
+    rem() { local r=$(( tdl - $(date +%s%N) / 1000000 )); [ "$r" -lt 10 ] && r=10; secs "$r"; }
+    if exec {tfd}< <(setsid bash -c 'echo "$$"; exec tmux display-message -p "#S"' 2>/dev/null); then
+      if IFS= read -r -t "$(rem)" -u "$tfd" tsid && [[ "$tsid" =~ ^[0-9]{1,9}$ ]]; then
+        tstart=$(start_of "$tsid")
+        if IFS= read -r -t "$(rem)" -u "$tfd" tname; then add "$tname"; tgot=1; fi
+      else tsid=""; fi
+      exec {tfd}<&-
+      [ -n "$tsid" ] && reap_session "$tsid" "$tstart" "$tgot"
+    fi
   fi
 fi
 [ "${#names[@]}" -gt 0 ] || exit 0
