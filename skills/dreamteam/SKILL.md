@@ -576,6 +576,16 @@ CI AND MERGE — you push, the lead gates. Four rules, all measured 2026-09-11:
   it and every gh call in the fleet failed, including the lead's cascade. A
   watch also survives a force-push and then never terminates. (no-poll-guard.sh
   blocks this, but the rule is yours to keep — the guard is the backstop.)
+- ⛔ NEVER stop a test run by NAME (`pkill -f pytest`, `ps | grep 'make test' | … kill`).
+  A command line carries no owner: it reads the same in every lane's worktree, so
+  you end every lane's suite on the host (serialhub 11-18 and 11-20: twelve runs,
+  the victims saw only "Terminated"; setsid/nohup does not protect a run). Capture
+  the pid at launch (`make test > log 2>&1 & echo $! > run.pid`) and `kill` that, or
+  `"$CLAUDE_PLUGIN_ROOT"/scripts/kill-mine.py 'make test|python.* -m pytest'`, which
+  takes only processes inside your worktree. Launch a suite as
+  `DREAMTEAM_WORKTREE="$PWD" make test`: kill-mine reads that marker from the
+  process's environment, so a runner that chdir's away is still yours.
+  (wide-kill-guard.sh is the backstop.)
 - `gh api rate_limit` CANNOT warn you. It read 5000 remaining throughout that
   outage; it does not see GraphQL secondary limits.
 - REST, not GraphQL, for every read: `gh api repos/O/R/...`. `gh issue view`
@@ -1120,7 +1130,7 @@ measured sizes and each host's admission rules in `gpu/fleet.json`. Spec:
   training. The granter runs `dreamteam gpu claim <card> --lane <you> --until 3h --peak-ram 2.9G --peak-vram 3500M`.
   Admission refuses (exit 75) anything that breaks the host's rules:
   - the cap is peak × 1.2, or × 1.5 when it grows;
-  - gpu0/gpu1 pair rule: Σ caps + 1.5 GiB ≤ RAM − 0.5 GiB;
+  - gpu0/gpu1 pair rule: Σ peaks + 1.5 GiB ≤ the host's idle-MemAvailable limit, minus the live lane footprint when a lane runs there (#241);
   - katana/game guest budgets are sums (katana 12 GB and 9 GiB; game 8 GB and 3.5 GiB);
   - familiar: one heavy job;
   - VRAM leaves 1 GiB beside the resident services; katana's desktop is one, at about 2.7 GiB. A growing job's VRAM

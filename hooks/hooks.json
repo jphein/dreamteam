@@ -44,6 +44,11 @@
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/gpu-guard.sh\"",
             "timeout": 4
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/wide-kill-guard.sh\"",
+            "timeout": 4
           }
         ]
       },
@@ -119,6 +124,11 @@
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/idle-assign.sh\" idle",
             "timeout": 4
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/reservation.sh\" stop-hook",
+            "timeout": 8
           }
         ]
       }
@@ -131,6 +141,11 @@
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/team-events.sh\"",
             "timeout": 4,
             "async": true
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/reservation.sh\" start-hook",
+            "timeout": 8
           }
         ]
       }
@@ -221,6 +236,16 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/lead-session-write.sh\"",
+            "timeout": 8
+          }
+        ]
+      },
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/lane-style-hook.sh\"",
             "timeout": 8
           }
         ]
