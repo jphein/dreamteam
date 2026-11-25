@@ -79,7 +79,7 @@ done
 #     (scripts/lib/gpu_fleet.py HostLock takes the same file over ssh). Held elsewhere past the wait → BLOCK (fail
 #     closed): a measurement never races a claim. Seams: DREAMTEAM_HOST_LOCK (path), DREAMTEAM_HOST_LOCK_WAIT (s, 5).
 HLOCK="${DREAMTEAM_HOST_LOCK:-$HOME/.local/state/dreamteam/host.lock}"; HLOCK_WAIT="${DREAMTEAM_HOST_LOCK_WAIT:-5}"
-mkdir -p "$(dirname "$HLOCK")" 2>/dev/null
+mkdir -p "$(dirname "$HLOCK")" 2>/dev/null || invalid "cannot create the host lock directory $(dirname "$HLOCK")"
 ( : >>"$HLOCK" ) 2>/dev/null || invalid "cannot open the host lock $HLOCK"
 exec 9>>"$HLOCK"
 flock -w "$HLOCK_WAIT" 9 || invalid "host lock $HLOCK not taken within ${HLOCK_WAIT}s (a GPU claim is probing this host, or another lane is starting): retry"
@@ -129,5 +129,17 @@ NAGENTS=$(( NAGENTS + RESV_N ))                                   # reserved age
 #     sees this lane's budget before its process exists. The lane's SubagentStart marks it started (hooks.json) and its
 #     SubagentStop releases it; unstarted, it expires in 90 s (scripts/reservation.sh LIFECYCLE). Cannot write it →
 #     BLOCK: an unreserved start is the race this closes.
-bash "$RSV" add "$PER_AGENT" 90 "$SESSION" "$ATYPE" --locked >/dev/null || invalid "cannot write the lane reservation (scripts/reservation.sh beside this gate)"
+#     The per-spawn id (PR B of #256) goes into the reservation and, as the first line of the Agent prompt through
+#     updatedInput, into the spawn itself: SubagentStart sees no env and no prompt, SubagentStop sees the subagent's
+#     transcript, which is where the id comes back for an exact release. No permissionDecision is returned: the gate
+#     admits on memory, it never approves the call for the user (security review on 10d4aa7a).
+RID=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n') || invalid "cannot mint a reservation id (od on /dev/urandom failed)"   # 128 random bits; od's own status reaches us through this script's pipefail (#289 r2)
+{ [ "${#RID}" -eq 32 ] && case "$RID" in *[!0-9a-f]*) false ;; *) true ;; esac; } || invalid "cannot mint a reservation id (not 32 hex)"
+# the session's transcript directory, recorded at spawn: the stop hook reads the subagent transcript ONLY under it
+TPATH="$(printf '%s' "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null || true)"
+if [ -n "$TPATH" ]; then bash "$RSV" record-session "$SESSION" "$(dirname -- "$TPATH")" --locked >/dev/null || invalid "cannot record the session's transcript directory"; fi
+bash "$RSV" add "$PER_AGENT" 90 "$SESSION" "$ATYPE" --id "$RID" --locked >/dev/null || invalid "cannot write the lane reservation (scripts/reservation.sh beside this gate)"
+printf '%s' "$INPUT" | jq -c --arg id "$RID" '{hookSpecificOutput: {hookEventName: "PreToolUse",
+  updatedInput: (.tool_input | .prompt = ("[dreamteam reservation " + $id + "]\n" + (.prompt // "")))}}' 2>/dev/null \
+  || invalid "cannot stamp the reservation id into the spawn (jq on the hook input failed)"
 exit 0
