@@ -378,7 +378,10 @@ fresh_resv; rm -rf "$sdir"; mkdir -p "$sdir/s-c/subagents"
 FAKE_AVAIL=60000 FAKE_SWAP_USED=0 FAKE_PGREP_COUNT=1 DREAMTEAM_RESERVATIONS="$RESV" DREAMTEAM_HOST_LOCK="$HL" \
   run_gate "$MEM_GATE" "$(printf '{"session_id":"s-c","transcript_path":"%s/s-c.jsonl","tool_name":"Agent","tool_input":{"prompt":"x","subagent_type":"morpheus"}}' "$sdir")"
 r2_2_setup
-{ printf '{"type":"user","message":{"role":"user","content":"[dreamteam reservation %s]\\n' "$rid"; head -c 70000 /dev/zero | tr '\0' 'x'; printf '"}}\n'; } > "$sdir/s-c/subagents/agent-ag-c.jsonl"   # a VALID user line, the marker as its prefix, past the 64 KiB line bound
+pre=$(printf '{"type":"user","message":{"role":"user","content":"[dreamteam reservation %s]\\n' "$rid"); post='"}}'
+pad=$(( 65537 - 1 - ${#pre} - ${#post} ))   # a VALID user line of exactly 65537 bytes: one past the bound, so only the bound refuses it
+{ printf '%s' "$pre"; head -c "$pad" /dev/zero | tr '\0' 'x'; printf '%s\n' "$post"; } > "$sdir/s-c/subagents/agent-ag-c.jsonl"
+[ "$(wc -c < "$sdir/s-c/subagents/agent-ag-c.jsonl")" -eq 65537 ] || fail "line-bound fixture is not 65537 bytes"
 printf '{"hook_event_name":"SubagentStop","session_id":"s-c","transcript_path":"%s/s-c.jsonl","agent_id":"ag-c","agent_type":"morpheus","agent_transcript_path":"%s/s-c/subagents/agent-ag-c.jsonl"}' "$sdir" "$sdir" | RC stop-hook >/dev/null 2>&1
 [ -e "$afile" ] && [ ! -e "$b" ] && pass "r2-2: the field is parsed from one bounded line: a marker past the 64 KiB line bound is not read (release by agent_id, b)" || fail "r2-2 bounded line: afile=$([ -e "$afile" ] && echo y || echo n) b=$([ -e "$b" ] && echo y || echo n)"
 fresh_resv; rm -rf "$sdir"; mkdir -p "$sdir/s-c/subagents"

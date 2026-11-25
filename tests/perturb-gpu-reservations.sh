@@ -36,7 +36,7 @@ MUT=(
   'gate-no-reservation@scripts/mem-gate.sh@s/^bash "\$RSV" add "\$PER_AGENT" 90 "\$SESSION" "\$ATYPE" --id "\$RID" --locked >\/dev\/null || invalid/true || invalid/@tests/test-gates.sh'
   'gate-reservations-not-subtracted@scripts/mem-gate.sh@s/^AVAIL=\$(( AVAIL - RESV_MB ))/AVAIL=$(( AVAIL - 0 ))/@tests/test-gates.sh'
   'gate-reserved-slots-uncounted@scripts/mem-gate.sh@s/^NAGENTS=\$(( NAGENTS + RESV_N ))/NAGENTS=$(( NAGENTS + 0 ))/@tests/test-gates.sh'
-  'id-not-random@scripts/mem-gate.sh@s/^RID=\$(set -o pipefail; od .*$/RID="r-$$-$RANDOM"/@tests/test-gates.sh'
+  'id-not-random@scripts/mem-gate.sh@s/^RID=\$(od -An -tx1 -N16 \/dev\/urandom | tr -d .*$/RID="r-$$-$RANDOM"/@tests/test-gates.sh'
   'id-length-unchecked@scripts/mem-gate.sh@s/^{ \[ "\${#RID}" -eq 32 \] \&\& case "\$RID" in \*\[!0-9a-f\]\*) false ;; \*) true ;; esac; } || invalid/true || invalid/@tests/test-gates.sh'
   'entropy-status-ignored@scripts/mem-gate.sh@s/^set -uo pipefail$/set -u/@tests/test-gates.sh'
   'session-dir-unrecorded@scripts/mem-gate.sh@s/^if \[ -n "\$TPATH" \]; then bash "\$RSV" record-session/if false; then bash "$RSV" record-session/@tests/test-gates.sh'
