@@ -1,7 +1,12 @@
 [Unit]
-Description=CHECK lead-liveness: relaunch the fleet lead's Claude Code in spire:0.0 when it has exited (docs/CHECKS.md)
+Description=CHECK lead-liveness: bring the fleet lead's Claude Code back in its recorded pane, in its own scope (docs/CHECKS.md)
 
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/bash %h/Projects/dreamteam/scripts/lead-watchdog.sh
 Nice=10
+# Nothing this unit starts may live in ITS cgroup past the run: a oneshot's control group is ended when it
+# finishes. The lead is typed into a tmux pane (the tmux server's child) and put in lead-<session>.scope by
+# systemd-run; a tmux server the script has to start gets a scope of its own. KillMode stays the default on
+# purpose: anything left in this unit's cgroup is a bug and should be ended.
+TimeoutStartSec=90
