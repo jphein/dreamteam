@@ -113,7 +113,8 @@ MINE="/user.slice/user-$MYUID.slice/user@$MYUID.service/"
 STATE="${LANE_SLICE_STATE:-${XDG_RUNTIME_DIR:-$HOME/.local/state}/dreamteam-lane-slice}"
 state_ok() { mkdir -p -m 700 "$STATE" 2>/dev/null; [ -d "$STATE" ] && [ ! -L "$STATE" ] && [ -O "$STATE" ]; }
 inv() { local i; i=$(uc show "$1" -p InvocationID --value 2>/dev/null) && [[ "$i" =~ ^[0-9a-f]{32}$ ]] && printf '%s' "$i"; }
-rec_write() { local i; state_ok && i=$(inv "$2") && printf '%s\n' "$i" > "$STATE/$1.$2.tmp.$$" && mv -f "$STATE/$1.$2.tmp.$$" "$STATE/$1.$2"; }
+rec_put() { state_ok && [[ "$3" =~ ^[0-9a-f]{32}$ ]] && printf '%s\n' "$3" > "$STATE/$1.$2.tmp.$$" && mv -f "$STATE/$1.$2.tmp.$$" "$STATE/$1.$2"; }   # rec_put <kind> <unit> <invocation id>
+rec_write() { local i; i=$(inv "$2") && rec_put "$1" "$2" "$i"; }
 rec_is() { local f="$STATE/$1.$2" i; state_ok && [ -f "$f" ] && [ ! -L "$f" ] && i=$(inv "$2") && [ "$(head -n 1 "$f" 2>/dev/null)" = "$i" ]; }
 rec_drop() { rm -f -- "$STATE/$1.$2"; }
 in_mine() { local c; c=$(uc show "$1" -p ControlGroup --value 2>/dev/null); case "$c" in "$MINE"?*) return 0 ;; esac; return 1; }
@@ -123,7 +124,7 @@ in_mine() { local c; c=$(uc show "$1" -p ControlGroup --value 2>/dev/null); case
 # never reused. A new one is started with a random token in its Description, and is recorded only when the unit
 # that came up carries that token: a unit of the same name started by someone else in the same moment does not.
 move() {
-  local unit=$1 slice=$2 tok; shift 2
+  local unit=$1 slice=$2 tok both d id; shift 2
   [ "$#" -gt 0 ] || return 0
   [[ "$unit" =~ $OURSCOPE ]] || { echo "lane-slice: '$unit' is not a unit name this tool makes: refused" >&2; return 1; }
   if uc is-active --quiet "$unit" 2>/dev/null; then
@@ -133,8 +134,14 @@ move() {
     systemd-run --user --quiet --scope --unit="${unit%.scope}" ${slice:+--slice="$slice"} -p Delegate=yes --description="$tok" sleep infinity > /dev/null 2>&1 &
     disown 2>/dev/null || true
     for _ in 1 2 3 4 5 6 7 8 9 10; do uc is-active --quiet "$unit" 2>/dev/null && break; sleep 0.2; done
-    [ "$(uc show "$unit" -p Description --value 2>/dev/null)" = "$tok" ] || { echo "lane-slice: $unit did not come up as the scope this run started (another unit of that name, or none): refused" >&2; return 1; }
-    rec_write scope "$unit" || { echo "lane-slice: could not record $unit as ours; nothing moved into it" >&2; return 1; }
+    # ONE call for both properties (lead ruling on #288): the token and the id that gets recorded are of the same
+    # unit at the same moment. Read apart, a unit replaced between the two reads would be recorded as ours.
+    both=$(uc show "$unit" -p Description -p InvocationID 2>/dev/null)
+    d=$(sed -n 's/^Description=//p' <<< "$both" | head -n 1); id=$(sed -n 's/^InvocationID=//p' <<< "$both" | head -n 1)
+    [ -n "$d" ] && [ "$d" = "$tok" ] || { echo "lane-slice: $unit did not come up as the scope this run started (another unit of that name, or none): refused" >&2; return 1; }
+    rec_put scope "$unit" "$id" || { echo "lane-slice: could not record $unit as ours; nothing moved into it" >&2; return 1; }
+    # and the unit about to be acted on is still that start
+    rec_is scope "$unit" || { echo "lane-slice: $unit was replaced after this run started it (another start of that name now): refused, nothing moved into it" >&2; return 1; }
   fi
   busctl call --user org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager \
     AttachProcessesToUnit "ssau" "$unit" "/" "$#" "$@" > /dev/null 2>&1
@@ -341,10 +348,18 @@ for u in "${!FLEET[@]}"; do
     if rec_is weight "$u"; then uc set-property --runtime "$u" CPUWeight= IOWeight= 2>/dev/null && echo "fleet scope $u: the weights this tool had set are taken back" && rec_drop weight "$u" || rc=1; fi
     continue
   fi
-  # the record FIRST, then the weights: a weight without its record could never be taken back by the rollback
-  rec_write weight "$u" || { echo "lane-slice: could not record $u; no weights set on it" >&2; rc=1; continue; }
-  if uc set-property --runtime "$u" "CPUWeight=$CPUW" "IOWeight=$IOW" 2>/dev/null; then echo "fleet scope $u: CPUWeight=$CPUW IOWeight=$IOW (its memory stays under its own cap)"
-  else rec_drop weight "$u"; echo "lane-slice: could not set weights on $u" >&2; rc=1; fi
+  # The record is PER SCOPE and follows each successful set-property (lead ruling on #288). A set-property that
+  # fails changes no record: a scope we weighted in an earlier run keeps its record (the rollback can still take
+  # those weights back), and a scope we never managed to weight has none (it is not ours, the rollback leaves it).
+  # A weighting that succeeded but could not be recorded is taken back at once, unless an earlier record covers it.
+  had=0; rec_is weight "$u" && had=1
+  if uc set-property --runtime "$u" "CPUWeight=$CPUW" "IOWeight=$IOW" 2>/dev/null; then
+    if rec_write weight "$u"; then echo "fleet scope $u: CPUWeight=$CPUW IOWeight=$IOW (its memory stays under its own cap)"
+    else [ "$had" -eq 1 ] || uc set-property --runtime "$u" CPUWeight= IOWeight= 2>/dev/null; echo "lane-slice: could not record $u as weighted; its weights were taken back" >&2; rc=1; fi
+  else
+    if [ "$had" -eq 1 ]; then echo "lane-slice: could not set weights on $u; the record of the earlier weighting is kept" >&2; else echo "lane-slice: could not set weights on $u; it is not recorded as weighted" >&2; fi
+    rc=1
+  fi
 done
 # a lane scope whose session is gone and that holds only its anchor
 while read -r u; do

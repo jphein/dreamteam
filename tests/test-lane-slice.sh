@@ -25,6 +25,10 @@ ID=7d65ba827db467c06a6c9432b76d9bef1b9aa4255035aee5a0e7d593d1d399a4
 stub docker 'echo "docker $*" >> "'"$LOG"'"; [ "$1" = inspect ] && [ "${4:-}" = mempalace-db ] && { echo '"$ID"'; exit 0; }; exit 1'
 stub systemctl 'echo "systemctl $*" >> "'"$LOG"'"
 case "$*" in
+  *"--user set-property --runtime"*) [ ! -e "'"$T"'/setfail/$4" ] ;;
+  *"-p Description -p InvocationID"*) printf "Description=%s\nInvocationID=%s\n" "$(cat "'"$T"'/desc" 2>/dev/null)" "$(cat "'"$T"'/inv/$3" 2>/dev/null || echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)"
+    # swap: the unit is REPLACED right after this answer (another start of that name: another InvocationID)
+    if [ -e "'"$T"'/swap" ]; then mkdir -p "'"$T"'/inv"; echo dddddddddddddddddddddddddddddddd > "'"$T"'/inv/$3"; fi ;;
   *"-p InvocationID"*) cat "'"$T"'/inv/$3" 2>/dev/null || echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;;
   *"-p Description"*) cat "'"$T"'/desc" 2>/dev/null ;;
   *"-p ControlGroup"*) cat "'"$T"'/cgof/$3" 2>/dev/null || cat "'"$T"'/controlgroup" 2>/dev/null ;;
@@ -235,7 +239,7 @@ rm -f "$T/lane-units" "$T/fleet-units" "$T/controlgroup"; rm -rf "$T/cg/$UM/lane
 
 echo "── ownership is a record, never a name (xreview #288 r2; lead 17:02 Tue) ─────────────────"
 # strict: a unit is active only when it was started (by the systemd-run stub) or marked up by name, never "all of them"
-fresh() { rm -rf "$ST" "$T/inv" "$T/cgof" "$T/desc" "$T/desc-foreign" "$T/sessions" "$T/lane-units" "$T/fleet-units" "$T/controlgroup" "$T/up"; rm -f "$T/scope-up"; restore; mkdir -p "$T/inv" "$T/cgof" "$T/up"; touch "$T/strict"; : > "$LOG"; }
+fresh() { rm -rf "$ST" "$T/inv" "$T/cgof" "$T/desc" "$T/desc-foreign" "$T/sessions" "$T/lane-units" "$T/fleet-units" "$T/controlgroup" "$T/up" "$T/setfail" "$T/swap"; rm -f "$T/scope-up"; restore; mkdir -p "$T/inv" "$T/cgof" "$T/up"; touch "$T/strict"; : > "$LOG"; }
 up() { local u; for u in "$@"; do touch "$T/up/$u"; done; }
 FC="/user.slice/user-1000.slice/user@1000.service/app.slice"
 cfg '{"lanes":{"enabled":true,"exclude":["lead"],"cpuWeight":40,"ioWeight":20,"perLane":{"memoryHigh":"5G"}}}'
@@ -260,6 +264,22 @@ fresh; run_ls attach; echo "$FC/dreamteam-proj.scope" > "$T/cgof/dreamteam-proj.
 ok "a fleet scope WE weighted that now also holds the lead: the weights are taken back and the record dropped" 'grep -qxF "systemctl --user set-property --runtime dreamteam-proj.scope CPUWeight= IOWeight=" "$LOG" && [ ! -e "$ST/weight.dreamteam-proj.scope" ]'
 : > "$LOG"; run_ls attach
 ok "…and a lead-shared fleet scope we hold NO record for is not written at all (not weighted, not reset)" '! grep -q "set-property --runtime dreamteam-proj.scope" "$LOG"'
+# the lead's ruling on #288 (7150707190), item 1: a failed set-property never costs a record
+fresh; pcg 110 "app.slice/dreamteam-two.scope"; mkdir -p "$T/setfail"; touch "$T/setfail/dreamteam-two.scope"; for f in proj two; do echo "$FC/dreamteam-$f.scope" > "$T/cgof/dreamteam-$f.scope"; done
+run_ls attach; rc=$?
+ok "two fleet scopes, the second's set-property FAILS: exit 1, the first is recorded as weighted, the second is not" '[ "$rc" -eq 1 ] && [ "$(cat "$ST/weight.dreamteam-proj.scope")" = "$INV0" ] && [ ! -e "$ST/weight.dreamteam-two.scope" ] && grep -q "could not set weights on dreamteam-two.scope; it is not recorded" "$T/err"'
+rm -rf "$T/setfail"; : > "$LOG"; run_ls uninstall
+ok "…and the rollback resets the FIRST and sets nothing on the second" 'grep -qxF "systemctl --user set-property --runtime dreamteam-proj.scope CPUWeight= IOWeight=" "$LOG" && ! grep -q "set-property --runtime dreamteam-two.scope" "$LOG"'
+fresh; echo "$FC/dreamteam-proj.scope" > "$T/cgof/dreamteam-proj.scope"; run_ls attach; mkdir -p "$T/setfail"; touch "$T/setfail/dreamteam-proj.scope"; run_ls attach; rc=$?
+ok "a scope weighted in an earlier run whose re-weighting FAILS keeps its record (exit 1, said)" '[ "$rc" -eq 1 ] && [ "$(cat "$ST/weight.dreamteam-proj.scope")" = "$INV0" ] && grep -q "the record of the earlier weighting is kept" "$T/err"'
+rm -rf "$T/setfail"; : > "$LOG"; run_ls uninstall
+ok "…so the rollback can still take the earlier weights back" 'grep -qxF "systemctl --user set-property --runtime dreamteam-proj.scope CPUWeight= IOWeight=" "$LOG"'
+fresh; : > "$ST"; run_ls attach; rc=$?; rm -f "$ST"
+ok "a weighting that succeeds but CANNOT be recorded (no usable state directory) is taken back at once: no weight is left that the rollback could not find" '[ "$rc" -eq 1 ] && [ "$(grep -c "set-property --runtime dreamteam-proj.scope" "$LOG")" -eq 2 ] && [ "$(grep "set-property --runtime dreamteam-proj.scope" "$LOG" | tail -n 1)" = "systemctl --user set-property --runtime dreamteam-proj.scope CPUWeight= IOWeight=" ]'
+# item 2: the token and the recorded id are read in ONE call; a unit replaced right after it is not ours
+fresh; touch "$T/swap"; run_ls attach; rc=$?
+ok "the scope is REPLACED between the reads (the stub swaps it after the first answer): the replacement is never recorded as ours, nothing is moved into it, exit 1" '[ "$rc" -eq 1 ] && [ "$(cat "$ST/scope.$UA" 2>/dev/null)" != dddddddddddddddddddddddddddddddd ] && ! grep -q "AttachProcessesToUnit ssau $UA" "$LOG" && grep -q "$UA was replaced after this run started it" "$T/err"'
+ok "Description and InvocationID are asked for in one call, and nowhere apart for a new scope" 'grep -q "systemctl --user show $UA -p Description -p InvocationID" "$LOG" && ! grep -q "show $UA -p Description --value" "$LOG"'
 # (2) a lane scope is ours only by record
 fresh; up "$UA"; run_ls attach; rc=$?
 ok "a RUNNING $UA that this tool did not create: REFUSED (exit 1, said), no process moved into it, none started, no budget set on it" '[ "$rc" -eq 1 ] && grep -q "$UA is running and was NOT created by this tool" "$T/err" && ! grep -q "AttachProcessesToUnit ssau $UA" "$LOG" && ! grep -q "systemd-run" "$LOG" && ! grep -q "set-property --runtime $UA" "$LOG"'
