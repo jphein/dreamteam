@@ -101,7 +101,15 @@ if [ "${#names[@]}" -eq 0 ] && [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 
   # ms, the same clock as the requests; the TERM grace (-k 1) is paid from the budget, so a tmux that ignores TERM
   # is still killed inside it (xreview #237 r3)
   tl=$(( BUDGET * 1000 - ($(( $(date +%s%N) / 1000000 )) - T0) - 1000 )); [ "$tl" -gt 3000 ] && tl=3000
-  [ "$tl" -ge 200 ] && add "$(timeout -k 1 "$(( tl / 1000 )).$(printf '%03d' $(( tl % 1000 )))" tmux display-message -p '#S' 2>/dev/null || true)"
+  # Read with `read -t` from a process substitution, never $( ): $( ) waits until EVERY holder of the pipe is gone.
+  # GNU timeout kills the whole process group; the uutils one (0.10.0, Ubuntu 26.04) signals only its direct child,
+  # so a tmux wrapper's forked child kept the pipe and the hook waited its whole life (familiar 2026-11-22: 20 s
+  # under a 2 s budget). read gives up at the bound by itself, whoever still holds the pipe; a line that did not
+  # arrive whole is no identity.
+  if [ "$tl" -ge 200 ]; then
+    ts="$(( tl / 1000 )).$(printf '%03d' $(( tl % 1000 )))"; tname=""
+    if IFS= read -r -t "$ts" tname < <(timeout -k 1 "$ts" tmux display-message -p '#S' 2>/dev/null); then add "$tname"; fi
+  fi
 fi
 [ "${#names[@]}" -gt 0 ] || exit 0
 

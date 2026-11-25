@@ -204,9 +204,35 @@ allowed && [ "$ELAPSED" -le 4 ] && [ "$(calls)" -eq 1 ] && grep -q 'budget' "$TM
 rm -f "$FIX/delay"; printf '#!/usr/bin/env bash\necho "%s"\n' "example-lane" > "$TMP/bin/tmux"
 # 6f3) xreview #237 r3: a tmux that ignores TERM is killed after the grace period; the hook returns within the budget
 #      plus that grace (BUDGET 2: the tmux call gets at most 2 s, then -k 1), with no identity → allowed
-reset; printf '#!/usr/bin/env bash\ntrap "" TERM\nsleep 20\n' > "$TMP/bin/tmux"; list "$(row ffff0022 example-lane ordered $T0 null)"
+reset; printf '#!/usr/bin/env bash\necho $$ > "%s"\ntrap "" TERM\nsleep 20\n' "$TMP/tmux.pid" > "$TMP/bin/tmux"; rm -f "$TMP/tmux.pid"; list "$(row ffff0022 example-lane ordered $T0 null)"
 ASK_WHO="" BUDGET=2 run
-allowed && [ "$ELAPSED" -le 5 ] && [ "$(calls)" -eq 0 ] && pass "a TERM-ignoring tmux is killed (-k): back in ${ELAPSED}s, nothing asked" || fail "TERM-ignoring tmux: rc=$RC elapsed=${ELAPSED}s calls=$(calls)"
+allowed && [ "$ELAPSED" -le 3 ] && [ "$(calls)" -eq 0 ] && pass "a TERM-ignoring tmux does not hold the hook: back in ${ELAPSED}s, nothing asked" || fail "TERM-ignoring tmux: rc=$RC elapsed=${ELAPSED}s calls=$(calls)"
+#      …and it is KILLED after the grace (-k 1), not left behind: the hook has returned by then, so wait it out
+sleep 2.5
+if [ -s "$TMP/tmux.pid" ] && ! kill -0 "$(cat "$TMP/tmux.pid")" 2>/dev/null; then pass "the TERM-ignoring tmux is gone after the grace (-k)"; else fail "the TERM-ignoring tmux is still alive after the grace (pid $(cat "$TMP/tmux.pid" 2>/dev/null))"; fi
+# 6f4) 2026-11-24, CHECK dreamteam-audit red on familiar since 11-22: a timeout that signals ONLY its direct child,
+#      never the process group. That is uutils coreutils 0.10.0 (Ubuntu 26.04; measured on familiar: a forked
+#      grandchild outlived `timeout -k 1 2` and held the caller's $( ) for its whole life, 7.0 s against 3.0 s with
+#      GNU 9.4). The stand-in below is that behaviour on any host; the tmux here forks, as a wrapper script does.
+mkdir -p "$TMP/uu"; cat > "$TMP/uu/timeout" <<'S'
+#!/usr/bin/env bash
+k=0; [ "$1" = -k ] && { k=$2; shift 2; }; s=$1; shift
+"$@" & c=$!
+( sleep "$s"; kill -TERM "$c" 2>/dev/null; sleep "$k"; kill -KILL "$c" 2>/dev/null ) > /dev/null 2>&1 &
+w=$!; wait "$c"; rc=$?; kill "$w" 2>/dev/null; exit "$rc"
+S
+chmod +x "$TMP/uu/timeout"
+reset; printf '#!/usr/bin/env bash\ntrap "" TERM\nsleep 8\necho late-name\n' > "$TMP/bin/tmux"; list "$(row ffff0023 example-lane ordered $T0 null)"
+EXTRA_PATH="$TMP/uu" ASK_WHO="" BUDGET=2 run
+allowed && [ "$ELAPSED" -le 3 ] && [ "$(calls)" -eq 0 ] && pass "a timeout that kills only its child (uutils): a tmux whose forked child keeps the pipe does not hold the hook (${ELAPSED}s)" || fail "child-only timeout: rc=$RC elapsed=${ELAPSED}s calls=$(calls)"
+reset; printf '#!/usr/bin/env bash\necho "%s"\n' "example-lane" > "$TMP/bin/tmux"; list "$(row ffff0024 example-lane ordered $T0 null)"; show ffff0024 "$(row ffff0024 example-lane ordered $T0 null)" "[]"
+EXTRA_PATH="$TMP/uu" ASK_WHO="" BUDGET=9 run
+blocked && pass "under that timeout the tmux fallback still names the lane (the silent row blocks)" || fail "child-only timeout, fallback identity: rc=$RC err=[$(head -c 200 "$TMP/err")]"
+#      a name that did not arrive WHOLE before the bound (no newline) is no identity: a truncated name could be
+#      another lane's. The row below belongs to the truncated name; it is never asked for.
+reset; printf '#!/usr/bin/env bash\nprintf "example-la"\nsleep 4\n' > "$TMP/bin/tmux"; list "$(row ffff0025 example-la ordered $T0 null)"; show ffff0025 "$(row ffff0025 example-la ordered $T0 null)" "[]"
+ASK_WHO="" BUDGET=2 run
+allowed && [ "$(calls)" -eq 0 ] && pass "a tmux line that did not arrive whole is no identity: nothing asked, the stop allowed" || fail "partial tmux line: rc=$RC calls=$(calls) err=[$(head -c 160 "$TMP/err")]"
 printf '#!/usr/bin/env bash\necho "%s"\n' "example-lane" > "$TMP/bin/tmux"
 
 # 6h) xreview #237 r2: a malformed LIST reply allows with the promised log line, shape by shape (like 6e)

@@ -19,6 +19,8 @@ MUTATIONS=(
   'list-stream-accepted|s/jq -se '"'"'length == 1 and (\.\[0\] | type == "object"/jq -se '"'"'length >= 1 and (.[0] | type == "object"/'
   'detail-stream-accepted|s/if length != 1 or (\.\[0\] | type) != "object"/if length < 1 or (.[0] | type) != "object"/'
   'tmux-no-kill-escalation|s/timeout -k 1 "/timeout "/'
+  'tmux-read-unbounded|s/IFS= read -r -t "\$ts" tname/IFS= read -r tname/'
+  'tmux-partial-line-is-a-name|s/tname < <(timeout -k 1 "\$ts" tmux display-message -p .#S. 2>\/dev\/null); then add "\$tname"; fi/tname < <(timeout -k 1 "$ts" tmux display-message -p "#S" 2>\/dev\/null); then :; fi; add "$tname"/'
   'row-cap-removed|s/(\$all\[:\$max\]\[\]/($all[:999999][]/'
   'row-cap-unlogged|s/rowcapped=\$(( TOTAL - MAX_ROWS ))/rowcapped=0/'
   'owner-filter-dropped|s/| map(select((\.lane | type) == "string" and/| map(select(true or (.lane | type) == "string" and/'
