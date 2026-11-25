@@ -43,7 +43,8 @@ dreamteam/
 │   ├── cleanup-marker.sh          SessionEnd — clears the active marker (clean exit)
 │   ├── mem-budget.sh              shared budget calculator (also /dreamteam-status)
 │   ├── launch-dreamteam.sh        systemd-scope + tmux -L isolated launcher
-│   └── tmux-layout.sh             move agent panes into their own window
+│   ├── tmux-layout.sh             move agent panes into their own window
+│   └── lane-style-hook.sh         SessionStart — gives a LANE session the lane output style, by its role; never the lead
 ├── commands/
 │   ├── dreamteam.md               /dreamteam — guarded launch
 │   ├── dreamteam-status.md        /dreamteam-status — budget + footprint snapshot
@@ -51,6 +52,7 @@ dreamteam/
 ├── agents/                        named dream-agent types (luna, morpheus, lucid, nebula)
 ├── workflows/                     saved Workflow scripts (merge-cascade, overnight, review-sweep)
 ├── templates/                     Artifact dashboard HTML template
+├── output-styles/lane.md          the token-saving output style every lane session is given at its start
 ├── skills/dreamteam/SKILL.md      the existing skill (moved here verbatim + §3 prose adds)
 └── state/                         runtime: active marker, HANDOFF.md, dreamteam.log
 ```
@@ -72,6 +74,35 @@ external tools (guildmaster, dashboards) shell out to them and parse the result.
 JSON shape is a **frozen, versioned contract**, not an internal detail free to drift:
 see [`docs/json-contract.md`](docs/json-contract.md) for every field, type, enum, and
 the empty/exit-code guarantees — locked against drift by `tests/test-json-contract.sh`.
+
+## Output for lanes
+
+A lane's reader is the lead, reading many lanes at once. `output-styles/lane.md` is an output style for that
+reader: the first line is the bottom line, then **Changed / Checked / Evidence / Not verified** (only the parts
+that have content), twelve lines at most, no restating and no closing offers. It limits what a lane writes,
+never what it checks. A failure, anything needed to act safely, every "Not verified" item and required
+disclosure, and anything asked for in full keep their length.
+
+`scripts/lane-style-hook.sh` injects that text as context at every SessionStart event (startup, resume, clear,
+compact). It is injection, repeated each time; it is not an `outputStyle` setting and nothing is stored per
+session. Who gets it, first match wins:
+
+| The session | Gets the style |
+|---|---|
+| on katana, or on a host in `.laneStyle.neverHosts` | never |
+| outside tmux (a one-off `claude -p`, a nightly job) | no |
+| the lead: the session id or pane recorded in `lead.session`; or a tmux session named `spire`, `$DREAMTEAM_LEAD_SESSION`, or in `.laneStyle.lead` | never |
+| a tmux session whose name is EXACTLY in `.laneStyle.lanes` | yes, at every event |
+| any other session, such as one a person opens and types in | no |
+
+`.laneStyle.lanes` ships empty and takes exact names, no patterns. To make a host's lanes use the style, list
+them in that host's overlay:
+
+    config.<host>.json:   { "laneStyle": { "lanes": ["luna-map", "morpheus-roam"] } }
+
+`scripts/lane-style-hook.sh --who <name>` says what a session of that name gets on this host and why. Each
+injection starts with a stamp (`[lane style given <time> on <event> to <name>]`) and leaves a line in
+`~/.claude/state/dreamteam/lane-style.log`.
 
 ## Fleet lessons
 
