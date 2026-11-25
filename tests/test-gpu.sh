@@ -211,6 +211,40 @@ both "garbage" ERR "garbage"
 both "700 $((nowr + 60)) s-a morpheus 0" 700 "a valid unstarted record"
 both "300 $((nowr - 5)) s-a morpheus $((nowr - 10))" 300 "a started record past its expiry (counts until SubagentStop)"
 both "300 $((nowr - 5)) s-a morpheus 0" 0 "an expired unstarted record (counts nothing in both)"
+# PR B item B3: a reservations directory behind an unreadable parent is EACCES, not ENOENT: RESV,ERR, never a zero
+mkdir -p "$h/noaccess/resv"; chmod 000 "$h/noaccess"
+resv=$(python3 "$LIB" probe-script gpu1 | DREAMTEAM_RESERVATIONS="$h/noaccess/resv" PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^RESV,')
+chmod 700 "$h/noaccess"
+check "$resv" "RESV,ERR" "sampler: a reservations directory behind an unreadable parent (EACCES) is RESV,ERR, not RESV,OK,0 (PR B)"
+both "300 $((nowr + 60)) s-a morpheus 0 0123456789abcdef0123456789abcdef ag-1" 300 "a seven-field record (id and agent, PR B) counts in both"
+both "300 $((nowr + 60)) s-a morpheus 0 - -" 300 "a seven-field record with no id and no agent counts in both"
+both "300 $((nowr + 60)) s-a morpheus 0 not-hex ag-1" ERR "an id that is not 32 hex (nor -) is an error for both (#289 r1 (5))"
+both "300 $((nowr + 60)) s-a morpheus 0 0123456789abcdef0123456789abcdef bad/agent" ERR "an agent outside the token alphabet is an error for both"
+both "300 $((nowr + 60)) s-a morpheus 0 0123456789abcdef0123456789abcdef ag-1 extra" ERR "an eight-field record is an error for both"
+both "300 $((nowr + 60)) $(printf 'x%.0s' $(seq 1 129)) morpheus 0 - -" ERR "a 129-char session is an error for both (#289 r2-5: the 128-char token bound)"
+both "300 1234567890123 s-a morpheus 0 - -" ERR "a 13-digit expiry is an error for both (#289 r2-5: the 12-digit epoch bound)"
+rm -rf "$rl"; mkdir -p "$rl"; printf '300 %s s-a morpheus 0 - -\n' "$((nowr + 60))" > "$rl/1-1-1"; echo garbage > "$rl/2-2-2.expired"
+p=$(python3 "$LIB" probe-script gpu1 | DREAMTEAM_RESERVATIONS="$rl" PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^RESV,')
+o=$(DREAMTEAM_RESERVATIONS="$rl" DREAMTEAM_HOST_LOCK="$TMP/rl.lock" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$R" outstanding 2>/dev/null); orc=$?
+[ "$p" = "RESV,ERR" ] && [ "$orc" -ne 0 ] && pass "one validity rule: a malformed tombstone is an error for both (#289 r2-5: the probe validates tombstones too)" || fail "malformed tombstone: probe=[$p] helper rc=$orc"
+# #289 r3 ruling (3): the enumeration status is checked in both parsers: a symlink among the entries is RESV,ERR for
+# the probe as it is an error for the helper
+rm -rf "$rl"; mkdir -p "$rl"; printf '300 %s s-a morpheus 0 - -\n' "$((nowr + 60))" > "$rl/1-1-1"; ln -s /nonexistent/never "$rl/9-9-9"
+p=$(python3 "$LIB" probe-script gpu1 | DREAMTEAM_RESERVATIONS="$rl" PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^RESV,')
+o=$(DREAMTEAM_RESERVATIONS="$rl" DREAMTEAM_HOST_LOCK="$TMP/rl.lock" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$R" outstanding 2>/dev/null); orc=$?
+[ "$p" = "RESV,ERR" ] && [ "$orc" -ne 0 ] && pass "r3-3: a symlink among the entries is an error for both parsers (probe RESV,ERR, helper exit $orc)" || fail "r3-3 symlink entry: probe=[$p] helper rc=$orc"
+rm -rf "$rl" "$TMP/rl-out"; mkdir -p "$rl" "$TMP/rl-out"; printf '300 %s s-a morpheus 0 - -\n' "$((nowr + 60))" > "$TMP/rl-out/real"; ln -s "$TMP/rl-out/real" "$rl/1-1-1"
+p=$(python3 "$LIB" probe-script gpu1 | DREAMTEAM_RESERVATIONS="$rl" PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^RESV,')
+o=$(DREAMTEAM_RESERVATIONS="$rl" DREAMTEAM_HOST_LOCK="$TMP/rl.lock" DREAMTEAM_HOST_LOCK_WAIT=1 bash "$R" outstanding 2>/dev/null); orc=$?
+[ "$p" = "RESV,ERR" ] && [ "$orc" -ne 0 ] && pass "r3-3: a symlink to a VALID record elsewhere is still an error for both (the entry itself is the rule, not its target)" || fail "r3-3 symlink to a valid record: probe=[$p] helper rc=$orc"
+# #289 r3 ruling (5): ONE validity rule, one function both parsers read: the probe script carries the helper's record
+# rule block verbatim (the probe-script output contains the same text the helper defines)
+blk=$(sed -n '/^# --- record rule begin/,/^# --- record rule end/p' "$R" | sha256sum | cut -c1-16)
+pblk=$(python3 "$LIB" probe-script gpu1 | sed -n '/^# --- record rule begin/,/^# --- record rule end/p' | sha256sum | cut -c1-16)
+[ -n "$blk" ] && [ "$blk" = "$pblk" ] && [ "$blk" != "$(printf '' | sha256sum | cut -c1-16)" ] && pass "r3-5: the probe carries the helper's record rule block verbatim ($blk)" || fail "r3-5 shared rule block: helper=[$blk] probe=[$pblk]"
+rm -rf "$rl"; mkdir -p "$rl"; printf '300 %s s-a morpheus 0 - -\n' "$((nowr + 60))" > "$rl/1-1-1"; chmod 000 "$rl/1-1-1"
+p=$(python3 "$LIB" probe-script gpu1 | DREAMTEAM_RESERVATIONS="$rl" PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^RESV,'); chmod 600 "$rl/1-1-1"
+check "$p" "RESV,ERR" "sampler: an unreadable record is RESV,ERR, never skipped (#289 r1 (4))"
 printf '300 %s s-a morpheus %s\n' "$((nowe - 5))" "$((nowe - 10))" > "$rd/16-7"       # started, past its expiry: still counted
 resv=$(python3 "$LIB" probe-script gpu1 | HOME="$h" DREAMTEAM_RESERVATIONS= PATH="$TMP/psstub:$PATH" bash 2>/dev/null | grep '^RESV,')
 check "$resv" "RESV,OK,1300" "sampler: a STARTED reservation past its expiry still counts (1000 + 300): released by SubagentStop, not by time (r4 item 2)"

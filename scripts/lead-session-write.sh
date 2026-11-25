@@ -6,10 +6,12 @@
 # could only relaunch from a "Resume this session with: claude --resume <id>" hint still visible in that pane.
 # With this file it knows the pane the lead really runs in and the session id, whatever the pane shows.
 #
-# Writes ~/.local/state/dreamteam/lead.session (0600, atomic), three KEY=VALUE lines, never sourced by anyone:
+# Writes ~/.local/state/dreamteam/lead.session (0600, atomic), four KEY=VALUE lines, never sourced by anyone:
 #   session=<uuid>      the session id Claude Code handed this hook on stdin
 #   pane=<s>:<w>.<p>    the tmux pane this session runs in
-#   launch=. <env file>; claude --resume <uuid> --permission-mode bypassPermissions
+#   cwd=<absolute path>  the directory this session runs in (the watchdog restores the lead there)
+#   launch=bash <this repo>/scripts/lead-launch.sh    (for a person: the one way to start the lead again; the
+#                        launcher reads this file itself, checks that no lead is alive, and starts it in its scope)
 # "The lead" = a session inside tmux whose tmux session is $DREAMTEAM_LEAD_SESSION (default `spire`) and whose
 # working directory is $HOME (FOR-AGENTS: the fleet lead is tmux `spire`, Claude in ~). Any other session: nothing.
 # A hook must never block a session start: every path exits 0 and prints nothing, every wait is bounded (2 s each
@@ -41,6 +43,8 @@ umask 077
 mkdir -p "$STATE" 2>/dev/null || exit 0
 f="$STATE/lead.session"
 tmp=$(mktemp "$STATE/.lead.session.XXXXXX" 2>/dev/null) || exit 0
-printf 'session=%s\npane=%s\nlaunch=. %s; claude --resume %s --permission-mode bypassPermissions\n' "$sid" "$pane" "$ENVF" "$sid" > "$tmp" \
+cwd=$(pwd -P); [[ "$cwd" =~ ^/[A-Za-z0-9_./-]+$ ]] || exit 0
+launcher="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/lead-launch.sh"; [[ "$launcher" =~ ^/[A-Za-z0-9_./-]+$ ]] || exit 0
+printf 'session=%s\npane=%s\ncwd=%s\nlaunch=bash %s\n' "$sid" "$pane" "$cwd" "$launcher" > "$tmp" \
   && mv -T -f "$tmp" "$f" 2>/dev/null || rm -f "$tmp"
 exit 0
