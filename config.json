@@ -77,6 +77,20 @@
       "memoryAccounting": "RESOLVED in #37 via reserveMB above (was the #16-bullet-3 deferral). The chosen lever is a config reserve subtracted from the admission budget when armed — NOT attaching the ollama server to the dreamteam scope: ollama is a shared SYSTEM daemon (own systemd unit), so pulling it into dreamteam-<project>.scope would (a) make a scope OOM-kill take ollama down with the team, and (b) not change the free-based admission math anyway. The reserve throttles spawns to leave RAM for the model; the scope + earlyoom remain the containment backstops."
     }
   },
+  "lanes": {
+    "enabled": false,
+    "cpuWeight": 50,
+    "ioWeight": 25,
+    "memoryHigh": "",
+    "memorySwapMax": "",
+    "units": [],
+    "lead": [],
+    "perLane": {
+      "memoryHigh": "",
+      "memorySwapMax": ""
+    },
+    "_notes": "scripts/lane-slice.sh: one user slice, lanes.slice, that every lane session and listed gate unit runs under (Flow row 7e039111). enabled=false here: a host opts in through its overlay config.<host>.json, which must also set memoryHigh from that host's own measured numbers. cpuWeight / ioWeight: the slice's share against everything else (100 is the default share). memoryHigh / memorySwapMax: the slice's limits; empty = not set. units: user units that are gates or batch timers, each given a Slice=lanes.slice drop-in. exclude: tmux sessions that are never lanes. lead: the lead's session names: never a lane, and moved OUT of the slice on every attach if found inside. perLane: each lane's OWN budget, set on its lane-<session>.scope (memoryHigh, memorySwapMax; empty = not set). What this delivers by itself: placement, CPUWeight and the memory limits. IOWeight is set too but is real only where io.cost is on for the device and the io controller is delegated to the user manager; both are root's and are not part of this change. Nothing here runs as root, and nothing here protects the lead."
+  },
   "laneStyle": {
     "enabled": true,
     "lanes": [],
