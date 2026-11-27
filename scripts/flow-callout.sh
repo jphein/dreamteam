@@ -50,43 +50,54 @@ CFG="${DREAMTEAM_CONFIG:-$ROOT/config.json}"
 LOG="${DREAMTEAM_FLOW_LOG:-$HOME/.claude/state/dreamteam/flow-callout.log}"
 . "$ROOT/scripts/lib/agent-id.sh"
 
-# start_of <pid> → its start time (field 22 of /proc/<pid>/stat), or nothing
-start_of() { local st f; st=$(cat "/proc/$1/stat" 2>/dev/null) || return 0; st=${st##*) }; read -r -a f <<< "$st"; printf '%s' "${f[19]:-}"; }
+# ident_of <pid> → "<start time> <session id>" (fields 22 and 6 of /proc/<pid>/stat), or nothing for a process that
+# is gone or a zombie (a zombie holds nothing and cannot be signalled: it is not "left behind")
+ident_of() { local st f; st=$(cat "/proc/$1/stat" 2>/dev/null) || return 0; st=${st##*) }; read -r -a f <<< "$st"
+             [ "${f[0]:-Z}" = Z ] || printf '%s %s' "${f[19]:-}" "${f[3]:-}"; }
+start_of() { local i; i=$(ident_of "$1"); printf '%s' "${i%% *}"; }
+now_ms() { echo $(( $(date +%s%N) / 1000000 )); }
+# A clean-up that FAILED (or could not be checked) makes the hook exit 1 instead of 0: a non-blocking hook error the
+# harness shows, with the reason in the log. A block (exit 2) stays a block. Set by reap_session and its caller.
+REAPFAIL=0
+trap 'rc=$?; if [ "$rc" -eq 0 ] && [ "$REAPFAIL" = 1 ]; then echo "flow-callout: the tmux fallback could not be cleaned up or checked (see $LOG)" >&2; exit 1; fi; exit "$rc"' EXIT
 # reap_session <session id> <start time of its leader> <1 when the answer arrived>
 #   The session is one this hook created (setsid), so "everything still in it" is exactly what the tmux call left
-#   behind: the client, a wrapper, a wrapper's children. IDENTITY: a session id cannot be given to anything else
-#   while one member lives; and when a process with that id exists, its start time must be the one read when the
-#   id arrived, else NOTHING is signalled (said). Nothing left: the usual case, nothing done, nothing said.
-#   Otherwise TERM to each member, a grace of at most 1 s and never more than what is left of the budget, KILL to
-#   what remains, and one line with the outcome. Bounded: every wait below is counted in ms against the budget.
+#   behind: the client, a wrapper, a wrapper's children. EXACTLY ONE logged line says the outcome, on every path.
+#   IDENTITY, twice:
+#     - the session: its id cannot be given to anything else while one member lives; when a process with that id
+#       exists, its start time must be the one read when the id arrived. If it differs, ours has ended and the id
+#       belongs to someone else now: nothing is signalled (said);
+#     - each process: members are listed as pid + start time, and IMMEDIATELY before each signal the pid must
+#       still have that start time and still be in this session, else it is skipped (a pid reused in between is
+#       never signalled). What remains is the instant between that read and the kill.
+#   TERM to each member, a grace of at most 1 s paid ONLY from what is left of the budget (none left: no grace),
+#   KILL to what remains, then a confirmation paid from the budget too. Not gone, or not checkable: REAPFAIL.
 reap_session() {
-  local sid=$1 st=$2 got=$3 pids cur g t0 sent="TERM" n
-  command -v pgrep >/dev/null 2>&1 || { note "tmux fallback: no pgrep here; what the call left behind (session $sid) was not checked"; return 0; }
-  members() { pgrep -s "$sid" 2>/dev/null | tr '\n' ' '; }
-  pids=$(members)
-  if [ -n "${pids// /}" ] && [ "$got" = 1 ]; then      # it answered: give a client that is just exiting 150 ms to be gone
-    t0=$(( $(date +%s%N) / 1000000 ))
-    while [ -n "${pids// /}" ] && [ $(( $(date +%s%N) / 1000000 - t0 )) -lt 150 ]; do sleep 0.03; pids=$(members); done
+  local sid=$1 st=$2 got=$3 cur g dl r n sent="TERM" m p
+  command -v pgrep >/dev/null 2>&1 || { REAPFAIL=1; note "tmux fallback: no pgrep here; what the call left behind (session $sid) was NOT CHECKED"; return 1; }
+  members() { local q i; for q in $(pgrep -s "$sid" 2>/dev/null); do i=$(ident_of "$q"); [ "${i#* }" = "$sid" ] && printf '%s:%s ' "$q" "${i%% *}"; done; }
+  sig() { local sg=$1; shift; for m in "$@"; do p=${m%%:*}; [ "$(ident_of "$p")" = "${m#*:} $sid" ] && kill "-$sg" "$p" 2>/dev/null; done; true; }
+  # wait_gone <ms>: poll until the session is empty or <ms> have passed; the last listing is in $cur
+  wait_gone() { dl=$(( $(now_ms) + $1 )); while cur=$(members); [ -n "$cur" ] && r=$(( dl - $(now_ms) )) && [ "$r" -gt 0 ]; do [ "$r" -gt 30 ] && r=30; sleep "$(secs "$r")"; done; }
+  budget() { local l; l=$(left); [ "$l" -gt "$1" ] && l=$1; [ "$l" -lt 0 ] && l=0; echo "$l"; }      # min(<cap>, what is left), never below 0
+  cur=$(members)
+  [ -n "$cur" ] && [ "$got" = 1 ] && wait_gone "$(budget 150)"     # it answered: a client that is just exiting gets a moment, from the budget
+  if [ -z "$cur" ]; then note "tmux fallback: nothing left in its session $sid: nothing signalled"; return 0; fi
+  if [ -e "/proc/$sid" ] && { [ -z "$st" ] || [ "$(start_of "$sid")" != "$st" ]; }; then
+    note "tmux fallback: session id $sid now belongs to another process (its leader's start time differs), so ours has ended: nothing signalled"; return 0
   fi
-  [ -n "${pids// /}" ] || return 0
-  if [ -e "/proc/$sid" ]; then
-    cur=$(start_of "$sid")
-    if [ -z "$st" ] || [ "$cur" != "$st" ]; then note "tmux fallback: session $sid is not the one this hook started (its leader's start time differs): nothing signalled"; return 0; fi
-  fi
-  n=$(wc -w <<< "$pids")
+  n=$(wc -w <<< "$cur")
   # shellcheck disable=SC2086
-  kill -TERM $pids 2>/dev/null || true
-  g=$(left); [ "$g" -gt 1000 ] && g=1000; [ "$g" -lt 100 ] && g=100
-  t0=$(( $(date +%s%N) / 1000000 ))
-  while pids=$(members); [ -n "${pids// /}" ] && [ $(( $(date +%s%N) / 1000000 - t0 )) -lt "$g" ]; do sleep 0.05; done
-  if [ -n "${pids// /}" ]; then
+  sig TERM $cur
+  g=$(budget 1000); wait_gone "$g"
+  if [ -n "$cur" ]; then
     sent="TERM, then KILL after ${g} ms"
     # shellcheck disable=SC2086
-    kill -KILL $pids 2>/dev/null || true
-    sleep 0.05; pids=$(members)
+    sig KILL $cur
+    wait_gone "$(budget 200)"
   fi
-  if [ -n "${pids// /}" ]; then note "tmux fallback overran its bound: $n process(es) of its session $sid signalled ($sent); STILL ALIVE: $pids"
-  else note "tmux fallback overran its bound: $n process(es) of its session $sid signalled ($sent); none left"; fi
+  if [ -n "$cur" ]; then REAPFAIL=1; note "tmux fallback overran its bound: $n process(es) of its session $sid signalled ($sent); STILL ALIVE: ${cur% }"; return 1; fi
+  note "tmux fallback overran its bound: $n process(es) of its session $sid signalled ($sent); none left"
 }
 
 # note — the one logged line of a fail-open path; never fails the hook
@@ -148,17 +159,27 @@ if [ "${#names[@]}" -eq 0 ] && [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 
   #   • both lines are read with `read -t` from a process substitution: read gives up at the bound by itself,
   #     whoever still holds the pipe. A name that did not arrive whole is no identity;
   #   • then reap_session: whatever is still in that session gets TERM, a grace paid from the budget, then KILL,
-  #     and ONE logged line says what was signalled and whether anything is left.
+  #     and ONE logged line says the outcome on every path (nothing left included). A clean-up that failed or
+  #     could not be checked makes the hook exit 1 (REAPFAIL);
+  #   • a session id that never arrived: the process this hook started ($!, identity by start time) is killed,
+  #     what it may have started cannot be known, and that is said and is a failure too.
   if [ "$tl" -ge 200 ]; then
-    tdl=$(( $(date +%s%N) / 1000000 + tl )); tname=""; tsid=""; tstart=""; tgot=0
+    tdl=$(( $(date +%s%N) / 1000000 + tl )); tname=""; tsid=""; tstart=""; tgot=0; tpid=""; tpst=""
     rem() { local r=$(( tdl - $(date +%s%N) / 1000000 )); [ "$r" -lt 10 ] && r=10; secs "$r"; }
     if exec {tfd}< <(setsid bash -c 'echo "$$"; exec tmux display-message -p "#S"' 2>/dev/null); then
+      tpid=$!; tpst=$(start_of "$tpid")
       if IFS= read -r -t "$(rem)" -u "$tfd" tsid && [[ "$tsid" =~ ^[0-9]{1,9}$ ]]; then
         tstart=$(start_of "$tsid")
         if IFS= read -r -t "$(rem)" -u "$tfd" tname; then add "$tname"; tgot=1; fi
       else tsid=""; fi
       exec {tfd}<&-
-      [ -n "$tsid" ] && reap_session "$tsid" "$tstart" "$tgot"
+      if [ -n "$tsid" ]; then reap_session "$tsid" "$tstart" "$tgot" || true
+      else
+        REAPFAIL=1; tk="already gone"
+        if [ -n "$tpst" ] && [ "$(start_of "$tpid")" = "$tpst" ]; then kill -KILL "$tpid" 2>/dev/null && tk="killed"; fi
+        note "tmux fallback: its session id did not arrive within the bound; the process this hook started ($tpid) $tk, anything it started was NOT CHECKED"
+      fi
+    else note "tmux fallback: the call could not be started: nothing to clean up, no identity from it"
     fi
   fi
 fi
