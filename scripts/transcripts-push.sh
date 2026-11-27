@@ -20,29 +20,35 @@
 # the line says "sent", not "identical".
 #
 # Line (docs/CHECKS.md):
-#   CHECK transcripts-push[-<host>] ok   · N transcripts changed since the cut, all sent to <dest> · every 10 min, owner Sen
+#   CHECK transcripts-push[-<host>] ok   · N transcripts changed since the cut, all at <dest> (K copied this pass) · every 10 min, owner Sen
+#   CHECK …                         warn · N transcripts changed since the cut, K copied this pass to <dest>; M over 300 MB not copied (token item): <every name (size)> · …
+#   CHECK …                         warn · free space at <dest> unknown (<why>): nothing sent this pass · …
 #   CHECK …                         warn · N listed for <dest>, some vanished mid-pass (next pass retries) · …
 #   CHECK …                         fail · <not initialised | destination … | rsync exit R | …> · owner Sen
 # HARDENED 2026-11-25 (Flow row 1de527eb; ubox0's root filled at 03:40: 43 rsync temp files, 32.5 GiB, under the
 # share, because an 844 MB transcript was re-copied whole every pass and each pass, failing once the disk was full,
 # left its temp file behind). On every pass, in this order:
 #   1. stale rsync temp files at the destination (`.<name>.jsonl.XXXXXX`, regular files, older than 10 minutes)
-#      are deleted, and only those; the line counts them;
+#      are deleted, and only those; the line counts them; a sweep that did not finish is said (warn);
 #   2. the destination's free space is measured (df there): under TRANSCRIPTS_MIN_FREE_GB (15) NOTHING is sent and
-#      the line is a warn; a free space that cannot be measured is a fail, never read as plenty;
-#   3. a transcript over TRANSCRIPTS_MAX_MB (300) is not copied: it is named in the line as a token item (a
-#      session that large is a token-use finding, not a file to ship every ten minutes); rsync's own --max-size
-#      holds the same limit for a file that grows past it mid-pass;
-#   4. rsync runs --inplace (no temp file beside the destination, ever: a pass that stops leaves the file it was
-#      writing, and the next pass continues it) and --timeout=120 (a stalled share ends the transfer instead of
-#      leaving an rsync behind the unit).
-#   Why not --append-verify, which would send only the new tail of an append-only file: it checksums the WHOLE file
-#   on both ends on every change (the old data is part of its verification), which is the cost the size-and-time
-#   comparison above was chosen to avoid, on a share that had just filled; and a transcript that is rewritten
-#   rather than appended to (a compaction) would fail that check and be sent whole anyway. --inplace keeps the
-#   transfer simple and leaves no second copy. Revisit if pass time on large transcripts becomes the problem.
+#      the line is a warn; a free space that is not KNOWN (df failed, was cut off, or answered no number) is the
+#      same: nothing sent, warn, never read as plenty;
+#   3. a transcript over TRANSCRIPTS_MAX_MB (300) is not copied: EVERY such file is named in the line with its
+#      size as a token item (a session that large is a token-use finding, not a file to ship every ten minutes);
+#      rsync's own --max-size holds the same limit for a file that grows past it after the walk, and rsync's
+#      report of that file puts it in the same list;
+#   4. rsync runs --inplace (no temp file beside the destination, ever), --no-whole-file (the delta transfer also
+#      to a local destination: a pass that stops leaves the file it was writing, and the next pass sends only
+#      what differs) and --timeout=120 (a stalled share ends the transfer instead of leaving an rsync behind the
+#      unit). "K copied this pass" is counted from rsync's own itemized lines, not from the list it was given.
+#   Every command run AT the destination (the sweep's find, df) is bounded by TRANSCRIPTS_DEST_TIMEOUT (60 s), and
+#   over ssh each argument is quoted for the remote shell.
+#   Why not --append-verify: it sends only the new tail of an append-only file, but a transcript that is rewritten
+#   rather than appended to (a compaction) fails its check and is sent whole. The delta transfer above reads both
+#   copies as --append-verify does, sends only what differs, and has no such case. Its cost is that read on every
+#   changed transcript under the size limit; revisit if pass time becomes the problem.
 # Environment: TRANSCRIPTS_SRC (default ~/.claude/projects), TRANSCRIPTS_MOUNT, TRANSCRIPTS_MAX_MB (300),
-#   TRANSCRIPTS_MIN_FREE_GB (15). Test seams: TRANSCRIPTS_MOUNTPOINT_CMD,
+#   TRANSCRIPTS_MIN_FREE_GB (15), TRANSCRIPTS_DEST_TIMEOUT (60). Test seams: TRANSCRIPTS_MOUNTPOINT_CMD,
 #   TRANSCRIPTS_SSH. State: ${XDG_STATE_HOME:-~/.local/state}/dreamteam/transcripts-push.{dest,cut,lock}.
 # Exit: 0 line published (any status) / init done · 1 line not published · 22 bad arguments · 75 lock held.
 set -uo pipefail
@@ -138,46 +144,76 @@ esac
 MAXMB="${TRANSCRIPTS_MAX_MB:-300}"; MINGB="${TRANSCRIPTS_MIN_FREE_GB:-15}"
 [[ "$MAXMB" =~ ^[0-9]{1,6}$ ]] && [ "$MAXMB" -ge 1 ] || { check_line "$CHECK" fail "TRANSCRIPTS_MAX_MB must be a whole number of MB, 1-999999 (got '$MAXMB')" "$OWNER"; exit $?; }
 [[ "$MINGB" =~ ^[0-9]{1,6}$ ]] || { check_line "$CHECK" fail "TRANSCRIPTS_MIN_FREE_GB must be a whole number of GB (got '$MINGB')" "$OWNER"; exit $?; }
-# where to run a command against the destination: here, or over ssh on the destination's host
-at_dest() { case "$DEST" in /*) "$@" ;; *) "$SSH" -o BatchMode=yes -o ConnectTimeout=15 -- "${DEST%%:*}" "$@" </dev/null ;; esac; }
+DTO="${TRANSCRIPTS_DEST_TIMEOUT:-60}"
+[[ "$DTO" =~ ^[0-9]{1,4}$ ]] && [ "$DTO" -ge 1 ] || { check_line "$CHECK" fail "TRANSCRIPTS_DEST_TIMEOUT must be a whole number of seconds, 1-9999 (got '$DTO')" "$OWNER"; exit $?; }
+# Where to run a command against the destination: here, or over ssh on the destination's host. Two rules:
+#   - it is BOUNDED (ConnectTimeout covers only the connection, not a df or find that hangs on a dead share);
+#   - over ssh every argument is quoted: sshd joins the arguments into ONE string and the remote shell parses it,
+#     so an unquoted pattern would be expanded there against the login directory.
+at_dest() {
+  case "$DEST" in
+    /*) timeout -k 5 "$DTO" "$@" ;;
+    *)  local q; q=$(printf '%q ' "$@")
+        timeout -k 5 "$DTO" "$SSH" -o BatchMode=yes -o ConnectTimeout=15 -- "${DEST%%:*}" "$q" </dev/null ;;
+  esac
+}
 DPATH="$DEST"; case "$DEST" in /*) ;; *) DPATH="${DEST#*:}" ;; esac
 # 1. the sweep: before the free-space check, because it is what frees the space. find does not follow symlinks;
 #    -type f keeps directories and symlinks of that name; the name pattern is rsync's temp name for a transcript.
-swept=$(at_dest find "$DPATH" -type f -name '.*.jsonl.??????' -mmin +10 -delete -print 2>/dev/null | wc -l)
+#    A sweep that did not finish is said in the line and makes it a warn.
+sw_out=$(at_dest find "$DPATH" -type f -name '.*.jsonl.??????' -mmin +10 -delete -print 2>/dev/null); swrc=$?
+swept=$(printf '%s' "$sw_out" | grep -c .)
 [[ "$swept" =~ ^[0-9]+$ ]] || swept=0
 SW=""; [ "$swept" -gt 0 ] && SW="; swept $swept stale rsync temp file(s)"
-# 2. the free space at the destination, in KiB, from df -P's fourth column
-free=$(at_dest df -Pk "$DPATH" 2>/dev/null | awk 'NR == 2 {print $4}')
-[[ "$free" =~ ^[0-9]{1,15}$ ]] || { check_line "$CHECK" fail "cannot measure the free space at $DEST: nothing sent$SW" "$OWNER"; exit $?; }
+SWBAD=""; [ "$swrc" -eq 0 ] || SWBAD="; the sweep of stale temp files did not finish (find exit $swrc)"
+# 2. the free space at the destination, in KiB, from df -P's fourth column. Known only when df SUCCEEDED and
+#    answered a number; anything else (failed, cut off, garbage) is unknown: nothing sent, warn.
+df_out=$(at_dest df -Pk "$DPATH" 2>/dev/null); dfrc=$?
+free=$(printf '%s\n' "$df_out" | awk 'NR == 2 {print $4}')
+if [ "$dfrc" -ne 0 ] || ! [[ "$free" =~ ^[0-9]{1,15}$ ]]; then
+  why="unreadable answer"; [ "$dfrc" -eq 0 ] || why="df exit $dfrc"; [ "$dfrc" -ne 124 ] || why="no answer in $DTO s"
+  check_line "$CHECK" warn "free space at $DEST unknown ($why): nothing sent this pass$SW$SWBAD" "$OWNER"; exit $?
+fi
 freegb=$(( free / 1048576 ))
 if [ "$free" -lt $(( MINGB * 1048576 )) ]; then
-  check_line "$CHECK" warn "$DEST has $freegb GB free, under $MINGB GB: nothing sent this pass$SW" "$OWNER"; exit $?
+  check_line "$CHECK" warn "$DEST has $freegb GB free, under $MINGB GB: nothing sent this pass$SW$SWBAD" "$OWNER"; exit $?
 fi
 
 list="$(mktemp "$STATE/.transcripts-push.list.XXXXXX")" || { check_line "$CHECK" fail "cannot create a temp file" "$OWNER"; exit $?; }
 big="$(mktemp "$STATE/.transcripts-push.big.XXXXXX")" || { rm -f -- "$list"; check_line "$CHECK" fail "cannot create a temp file" "$OWNER"; exit $?; }
-trap 'rm -f -- "$list" "$big"' EXIT
+rout="$(mktemp "$STATE/.transcripts-push.out.XXXXXX")" || { rm -f -- "$list" "$big"; check_line "$CHECK" fail "cannot create a temp file" "$OWNER"; exit $?; }
+trap 'rm -f -- "$list" "$big" "$rout"' EXIT
 # regular files only, changed since the cut; a walk that could not read a directory is not a complete list.
-# 3. over the limit: listed apart (size and path), never handed to rsync
+# 3. over the limit: listed apart (size and path, NUL-ended: a path may hold a space), never handed to rsync
 KMAX=$(( MAXMB * 1024 ))
 if ! ( cd "$SRC" && find . -type f -name '*.jsonl' -newer "$CUT" ! -size +"${KMAX}"k -print0 ) > "$list" 2>/dev/null \
-   || ! ( cd "$SRC" && find . -type f -name '*.jsonl' -newer "$CUT" -size +"${KMAX}"k -printf '%s %P\n' ) > "$big" 2>/dev/null; then
+   || ! ( cd "$SRC" && find . -type f -name '*.jsonl' -newer "$CUT" -size +"${KMAX}"k -printf '%s %P\0' ) > "$big" 2>/dev/null; then
   check_line "$CHECK" fail "the walk of the source was incomplete" "$OWNER"; exit $?
 fi
-nbig=$(grep -c . "$big"); BIG=""
-if [ "$nbig" -gt 0 ]; then
-  BIG="; $nbig over $MAXMB MB not copied (token item): $(sort -rn "$big" | head -n 3 | awk '{printf "%s%s (%d MB)", (NR > 1 ? ", " : ""), $2, ($1 + 524288) / 1048576}')"
-  [ "$nbig" -gt 3 ] && BIG="$BIG and $((nbig - 3)) more"
-fi
+# a name as one safe word: plain when it is plain, shell-quoted (one line, nothing lost) when it is not
+enc() { case "$1" in *[!A-Za-z0-9._/-]*) printf '%q' "$1" ;; *) printf '%s' "$1" ;; esac; }
+nover=0; NAMES=""
+over() { nover=$((nover + 1)); NAMES="$NAMES${NAMES:+, }$(enc "$2") ($(( ($1 + 524288) / 1048576 )) MB)"; }   # over <bytes> <path>
+while IFS= read -r -d '' rec; do over "${rec%% *}" "${rec#* }"; done < <(sort -z -rn "$big")
 n=$(tr -cd '\0' < "$list" | wc -c) && [[ "$n" =~ ^[0-9]+$ ]] || { check_line "$CHECK" fail "cannot count the list" "$OWNER"; exit $?; }
 
-rc=0
+# 4. the copy. rsync itself says what it did: one itemized line per file it transferred (that is the count of
+#    "copied this pass"), and one "<path> is over max-size" line per file it held back because it had grown past
+#    the limit since the walk above (named with the others, never counted as copied).
+#    --no-whole-file: a local destination (the share) gets the delta transfer too, so a pass that was stopped is
+#    continued from the blocks already there instead of written again from the start.
+rc=0; sent=0
 if [ "$n" -gt 0 ]; then
-  rsync -a --no-owner --no-group --inplace --max-size="${MAXMB}M" --timeout=120 --from0 --files-from="$list" -e "$SSH -o BatchMode=yes -o ConnectTimeout=15" -- "$SRC/" "$DEST/" >/dev/null 2>&1; rc=$?
+  rsync -a --no-owner --no-group --inplace --no-whole-file --max-size="${MAXMB}M" --timeout=120 --info=skip1 --out-format='%i %n' --from0 --files-from="$list" -e "$SSH -o BatchMode=yes -o ConnectTimeout=15" -- "$SRC/" "$DEST/" > "$rout" 2>/dev/null; rc=$?
+  sent=$(grep -cE '^[<>]f[^ ]{9} ' "$rout")
+  while IFS= read -r late; do
+    late="${late% is over max-size}"; over "$(stat -c %s -- "$SRC/$late" 2>/dev/null || echo 0)" "$late"
+  done < <(grep -vE '^[<>]f[^ ]{9} ' "$rout" | grep ' is over max-size$')
 fi
+BIG=""; [ "$nover" -eq 0 ] || BIG="; $nover over $MAXMB MB not copied (token item): $NAMES"
 case "$rc" in
-  0)  if [ "$nbig" -gt 0 ]; then check_line "$CHECK" warn "$n transcripts changed since the cut sent to $DEST$BIG$SW" "$OWNER"
-      else check_line "$CHECK" ok "$n transcripts changed since the cut, all sent to $DEST$SW" "$OWNER"; fi ;;
-  24) check_line "$CHECK" warn "$n listed for $DEST, some vanished mid-pass (next pass retries)$BIG$SW" "$OWNER" ;;   # a session file rotated away while it was read
-  *)  check_line "$CHECK" fail "rsync exit $rc to $DEST ($n listed)$BIG$SW" "$OWNER" ;;
+  0)  if [ "$nover" -gt 0 ] || [ -n "$SWBAD" ]; then check_line "$CHECK" warn "$n transcripts changed since the cut, $sent copied this pass to $DEST$BIG$SW$SWBAD" "$OWNER"
+      else check_line "$CHECK" ok "$n transcripts changed since the cut, all at $DEST ($sent copied this pass)$SW" "$OWNER"; fi ;;
+  24) check_line "$CHECK" warn "$n listed for $DEST, some vanished mid-pass (next pass retries)$BIG$SW$SWBAD" "$OWNER" ;;   # a session file rotated away while it was read
+  *)  check_line "$CHECK" fail "rsync exit $rc to $DEST ($n listed, $sent copied)$BIG$SW$SWBAD" "$OWNER" ;;
 esac

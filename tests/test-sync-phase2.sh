@@ -235,7 +235,7 @@ sleep 1.1
 echo new1 > "$SRC/projA/s1.jsonl"; echo sub > "$SRC/projA/sess1/subagents/agent.jsonl"; echo new2 > "$SRC/projB/s2.jsonl"
 echo memory > "$SRC/projA/memory/MEMORY.md"; echo notes > "$SRC/projB/notes.txt"
 out=$(bash "$TP"); rc=$?
-[ "$rc" = 0 ] && [ "$out" = "CHECK transcripts-push ok · 3 transcripts changed since the cut, all sent to $DEST · every 10 min, owner Sen" ] && ok "3 new transcripts sent: ok line, exact shape" || bad "first pass: rc=$rc '$out'"
+[ "$rc" = 0 ] && [ "$out" = "CHECK transcripts-push ok · 3 transcripts changed since the cut, all at $DEST (3 copied this pass) · every 10 min, owner Sen" ] && ok "3 new transcripts sent: ok line, exact shape" || bad "first pass: rc=$rc '$out'"
 [ "$(cat "$DEST/projA/s1.jsonl")" = new1 ] && [ "$(cat "$DEST/projA/sess1/subagents/agent.jsonl")" = sub ] && [ "$(cat "$DEST/projB/s2.jsonl")" = new2 ] && ok "paths below the source are kept (a subagent file too)" || bad "copied files"
 [ ! -e "$DEST/projA/old.jsonl" ] && ok "a transcript older than the cut is not sent" || bad "old transcript sent"
 [ ! -e "$DEST/projA/memory" ] && [ ! -e "$DEST/projB/notes.txt" ] && ok "memory and non-jsonl files are not sent" || bad "non-transcript sent"
@@ -271,7 +271,7 @@ find "$SRC" -name '*.jsonl' -exec touch -d '3 hours ago' {} +                 # 
 touch "$TMP/remote.down"
 out=$(TRANSCRIPTS_SSH="$TMP/bin/fakessh" bash "$TP"); case "$out" in "CHECK transcripts-push fail · destination far:/data/t unreachable or not a writable directory · "*) ok "remote down with nothing to send: fail, not 'all sent'" ;; *) bad "remote down, empty list: '$out'" ;; esac
 rm -f "$TMP/remote.down"
-out=$(TRANSCRIPTS_SSH="$TMP/bin/fakessh" bash "$TP"); case "$out" in "CHECK transcripts-push ok · 0 transcripts changed since the cut, all sent to far:/data/t · "*) ok "remote up with nothing to send: ok after a real probe" ;; *) bad "remote up, empty list: '$out'" ;; esac
+out=$(TRANSCRIPTS_SSH="$TMP/bin/fakessh" bash "$TP"); case "$out" in "CHECK transcripts-push ok · 0 transcripts changed since the cut, all at far:/data/t (0 copied this pass) · "*) ok "remote up with nothing to send: ok after a real probe" ;; *) bad "remote up, empty list: '$out'" ;; esac
 grep -q -- "-- far test -d /data/t -a -w /data/t" "$TMP/ssh.log" && ok "the probe asks the remote for a writable directory" || bad "probe args: $(tail -1 "$TMP/ssh.log")"
 # a pass stopped while the ssh probe hangs replaces the earlier ok with fail (the trap is set before any probe)
 grep -q "^CHECK transcripts-push ok" "$TMP/checks/transcripts-push.line" || bad "precondition: an earlier ok line"
@@ -334,9 +334,9 @@ echo after-low > "$H/low.jsonl"; out=$(TRANSCRIPTS_MIN_FREE_GB=999999 bash "$TP"
 [ "$rc" = 0 ] && [ ! -e "$HD/low.jsonl" ] && case "$out" in "CHECK transcripts-push warn · $DEST has "*" GB free, under 999999 GB: nothing sent this pass"*) true ;; *) false ;; esac && ok "under the free-space floor: NOTHING is sent, warn naming the free space" || bad "low space: rc=$rc '$out' $(ls "$HD")"
 out=$(TRANSCRIPTS_MIN_FREE_GB=0 bash "$TP"); [ -e "$HD/low.jsonl" ] && case "$out" in "CHECK transcripts-push ok · "*) true ;; *) false ;; esac && ok "above it the pass runs (ok)" || bad "space ok: '$out'"
 mkdir -p "$TMP/nodf"; printf '#!/bin/sh\nexit 1\n' > "$TMP/nodf/df"; chmod +x "$TMP/nodf/df"; echo x > "$H/nodf.jsonl"
-out=$(PATH="$TMP/nodf:$PATH" bash "$TP"); [ ! -e "$HD/nodf.jsonl" ] && case "$out" in "CHECK transcripts-push fail · cannot measure the free space at $DEST"*) true ;; *) false ;; esac && ok "free space that cannot be measured: fail, nothing sent (never read as plenty)" || bad "no df: '$out'"
+out=$(PATH="$TMP/nodf:$PATH" bash "$TP"); [ ! -e "$HD/nodf.jsonl" ] && case "$out" in "CHECK transcripts-push warn · free space at $DEST unknown (df exit 1): nothing sent this pass"*) true ;; *) false ;; esac && ok "free space that cannot be measured: unknown, warn, nothing sent (never read as plenty)" || bad "no df: '$out'"
 printf '#!/bin/sh\necho "Filesystem 1024-blocks Used Available Capacity Mounted"\necho "x 100 100 garbage 100%% /"\n' > "$TMP/nodf/df"
-out=$(PATH="$TMP/nodf:$PATH" bash "$TP"); [ ! -e "$HD/nodf.jsonl" ] && case "$out" in "CHECK transcripts-push fail · cannot measure the free space at $DEST"*) true ;; *) false ;; esac && ok "a df answer that is not a number: fail, nothing sent" || bad "garbage df: '$out'"
+out=$(PATH="$TMP/nodf:$PATH" bash "$TP"); [ ! -e "$HD/nodf.jsonl" ] && case "$out" in "CHECK transcripts-push warn · free space at $DEST unknown (unreadable answer): nothing sent this pass"*) true ;; *) false ;; esac && ok "a df answer that is not a number: unknown, warn, nothing sent" || bad "garbage df: '$out'"
 for badv in abc -1; do out=$(TRANSCRIPTS_MIN_FREE_GB=$badv bash "$TP"); case "$out" in "CHECK transcripts-push fail · TRANSCRIPTS_MIN_FREE_GB "*) ok "TRANSCRIPTS_MIN_FREE_GB=$badv is refused" ;; *) bad "min free $badv: '$out'" ;; esac; done
 # 4. the sweep: rsync temp files (.<name>.jsonl.XXXXXX) older than 10 minutes, under the destination only
 mkdir -p "$HD/sub" "$TMP/outside"
@@ -358,10 +358,63 @@ printf 'far:/data/t\n' > "$ST/transcripts-push.dest"; : > "$TMP/ssh.log"
 printf '#!/bin/sh\necho "$*" >> "%s/ssh.log"\ncase "$*" in *df*) echo "Filesystem 1024-blocks Used Available Capacity Mounted"; echo "x 100 1 %s 1%% /data" ;; esac\nexit 0\n' "$TMP" 4194304 > "$TMP/bin/fakessh2"; chmod +x "$TMP/bin/fakessh2"
 find "$SRC" -name '*.jsonl' -exec touch -d '3 hours ago' {} +
 out=$(TRANSCRIPTS_SSH="$TMP/bin/fakessh2" TRANSCRIPTS_MIN_FREE_GB=15 bash "$TP")
-grep -qF -- "-- far find /data/t -type f -name .*.jsonl.?????? -mmin +10 -delete" "$TMP/ssh.log" && ok "remote: the sweep runs there, with the same pattern" || bad "remote sweep: $(cat "$TMP/ssh.log")"
+grep -qF -- '-- far find /data/t -type f -name .\*.jsonl.\?\?\?\?\?\? -mmin +10 -delete' "$TMP/ssh.log" && ok "remote: the sweep runs there, with the same pattern" || bad "remote sweep: $(cat "$TMP/ssh.log")"
 grep -q -- "-- far df -Pk /data/t" "$TMP/ssh.log" && case "$out" in "CHECK transcripts-push warn · far:/data/t has 4 GB free, under 15 GB: nothing sent this pass"*) true ;; *) false ;; esac && ok "remote: free space measured there (4 GB < 15: nothing sent, warn)" || bad "remote df: '$out' $(cat "$TMP/ssh.log")"
 printf '%s\n' "$DEST" > "$ST/transcripts-push.dest"
 grep -q '^TimeoutStartSec=' "$ROOT/systemd/dreamteam-transcripts-push.service" && ok "the unit keeps its start timeout" || bad "unit timeout"
+
+# ----- round 2 (review comment 7224737892 on #295) --------------------------------------------------------------
+#   a. what reaches the remote shell is quoted: sshd joins the arguments into ONE string and a shell parses it, so
+#      the fake ssh below does exactly that, in a login directory holding a file the sweep's pattern would match;
+#   b. every command at the destination is bounded (TRANSCRIPTS_DEST_TIMEOUT), local and remote;
+#   c. a free space that is not KNOWN (df failed, timed out, or answered garbage) is: nothing sent, warn;
+#   d. every transcript over the limit is named, whole, also with a space in its path;
+#   e. "copied this pass" is counted from what rsync says it transferred;
+#   f. a transcript that grows past the limit between the walk and the transfer is named too, never counted as sent.
+R="$TMP/r2"; mkdir -p "$R/login" "$R/remote/t" "$R/bin"; REALFIND="$(command -v find)"
+find "$SRC" -name '*.jsonl' -exec touch -d '3 hours ago' {} +
+printf '#!/bin/sh\nwhile [ "$1" = -o ]; do shift 2; done\n[ "$1" = -- ] && shift\nshift\ncd "%s/login" && exec sh -c "$*"\n' "$R" > "$R/bin/shssh"; chmod +x "$R/bin/shssh"
+echo trap > "$R/login/.zz.jsonl.AAAAAA"; touch -d '20 minutes ago' "$R/login/.zz.jsonl.AAAAAA"
+echo junk > "$R/remote/t/.s.jsonl.Ab12Cd"; touch -d '20 minutes ago' "$R/remote/t/.s.jsonl.Ab12Cd"
+printf 'far:%s/remote/t\n' "$R" > "$ST/transcripts-push.dest"; echo r2a > "$H/r2a.jsonl"
+out=$(TRANSCRIPTS_SSH="$R/bin/shssh" TRANSCRIPTS_MIN_FREE_GB=0 bash "$TP")
+[ ! -e "$R/remote/t/.s.jsonl.Ab12Cd" ] && [ -e "$R/login/.zz.jsonl.AAAAAA" ] && ok "remote, through a real shell: the sweep's pattern is not expanded by the remote shell (the stale temp is swept, the look-alike in the login directory is not what find was given)" || bad "remote quoting: stale temp $(ls -A "$R/remote/t" | tr '\n' ' ') login $(ls -A "$R/login" | tr '\n' ' ')"
+[ "$(cat "$R/remote/t/projH/r2a.jsonl" 2>/dev/null)" = r2a ] && case "$out" in "CHECK transcripts-push ok · 1 transcripts changed since the cut, all at far:$R/remote/t (1 copied this pass); swept 1 stale rsync temp file(s) · "*) true ;; *) false ;; esac && ok "…and the transfer itself goes through that shell: 1 copied, counted from rsync" || bad "remote transfer: '$out'"
+# b. bounded commands at the destination
+printf '#!/bin/sh\necho "$*" >> "%s/ssh.log"\ncase "$*" in *df*) exec sleep 20 ;; esac\nexit 0\n' "$TMP" > "$R/bin/slowssh"; chmod +x "$R/bin/slowssh"
+printf 'far:/data/t\n' > "$ST/transcripts-push.dest"; t0=$(date +%s)
+out=$(TRANSCRIPTS_SSH="$R/bin/slowssh" TRANSCRIPTS_DEST_TIMEOUT=1 bash "$TP"); el=$(( $(date +%s) - t0 ))
+[ "$el" -le 12 ] && case "$out" in "CHECK transcripts-push warn · free space at far:/data/t unknown (no answer in 1 s): nothing sent this pass"*) true ;; *) false ;; esac && ok "remote: a df that never answers is cut off after TRANSCRIPTS_DEST_TIMEOUT: warn, nothing sent" || bad "remote df hang: ${el}s '$out'"
+printf '%s\n' "$DEST" > "$ST/transcripts-push.dest"
+mkdir -p "$R/slowdf"; printf '#!/bin/sh\nexec sleep 20\n' > "$R/slowdf/df"; chmod +x "$R/slowdf/df"; echo x > "$H/r2b.jsonl"; t0=$(date +%s)
+out=$(PATH="$R/slowdf:$PATH" TRANSCRIPTS_DEST_TIMEOUT=1 bash "$TP"); el=$(( $(date +%s) - t0 ))
+[ "$el" -le 12 ] && [ ! -e "$HD/r2b.jsonl" ] && case "$out" in "CHECK transcripts-push warn · free space at $DEST unknown (no answer in 1 s): nothing sent this pass"*) true ;; *) false ;; esac && ok "local: the same bound on the share's df" || bad "local df hang: ${el}s '$out'"
+for badv in 0 abc -3; do out=$(TRANSCRIPTS_DEST_TIMEOUT=$badv bash "$TP"); case "$out" in "CHECK transcripts-push fail · TRANSCRIPTS_DEST_TIMEOUT "*) ok "TRANSCRIPTS_DEST_TIMEOUT=$badv is refused" ;; *) bad "dest timeout $badv: '$out'" ;; esac; done
+# c. a df that prints a believable number and then FAILS is not a measurement
+mkdir -p "$R/liardf"; printf '#!/bin/sh\necho "Filesystem 1024-blocks Used Available Capacity Mounted"\necho "x 100 1 99999999 1%% /"\nexit 1\n' > "$R/liardf/df"; chmod +x "$R/liardf/df"
+out=$(PATH="$R/liardf:$PATH" bash "$TP"); [ ! -e "$HD/r2b.jsonl" ] && case "$out" in "CHECK transcripts-push warn · free space at $DEST unknown (df exit 1): nothing sent this pass"*) true ;; *) false ;; esac && ok "a df that prints a number and exits non-zero: unknown, warn, nothing sent" || bad "liar df: '$out'"
+# d. every transcript over the limit is named, whole
+mkdir -p "$H/sp ace"; for f in "sp ace/big 1" b2 b3 b4; do head -c 2200000 /dev/zero | tr '\0' 'x' > "$H/$f.jsonl"; done
+out=$(TRANSCRIPTS_MAX_MB=1 bash "$TP")
+case "$out" in *"4 over 1 MB not copied (token item): "*) n4=1 ;; *) n4=0 ;; esac
+for want in 'projH/sp\ ace/big\ 1.jsonl (2 MB)' 'projH/b2.jsonl (2 MB)' 'projH/b3.jsonl (2 MB)' 'projH/b4.jsonl (2 MB)'; do case "$out" in *"$want"*) ;; *) n4=0 ;; esac; done
+[ "$n4" = 1 ] && case "$out" in *" more"*) false ;; *) true ;; esac && [ ! -e "$HD/sp ace/big 1.jsonl" ] && ok "four transcripts over the limit: ALL four named with their sizes, a path with a space whole and quoted" || bad "oversize names: '$out'"
+rm -rf "$H/sp ace" "$H/b2.jsonl" "$H/b3.jsonl" "$H/b4.jsonl"
+# e. the count of copied files is rsync's, not the list's
+out=$(bash "$TP"); case "$out" in "CHECK transcripts-push ok · 2 transcripts changed since the cut, all at $DEST (0 copied this pass) · "*) ok "a pass with nothing new to copy says 0 copied (the list still holds 2)" ;; *) bad "count, nothing new: '$out'" ;; esac
+echo more >> "$H/r2a.jsonl"; out=$(bash "$TP"); case "$out" in "CHECK transcripts-push ok · 2 transcripts changed since the cut, all at $DEST (1 copied this pass) · "*) ok "…and 1 copied after one of them grew" ;; *) bad "count, one grew: '$out'" ;; esac
+# f. growth between the walk and the transfer: the stand-in rsync makes the file large, then runs the real one
+printf '#!/bin/sh\necho "$*" > "%s/rsync.args"\nhead -c 2200000 /dev/zero >> "%s/late.jsonl"\nexec "%s" "$@"\n' "$TMP" "$H" "$REALRSYNC" > "$R/bin/rsync"; chmod +x "$R/bin/rsync"
+echo late > "$H/late.jsonl"; out=$(PATH="$R/bin:$PATH" TRANSCRIPTS_MAX_MB=1 bash "$TP")
+[ ! -e "$HD/late.jsonl" ] && case "$out" in "CHECK transcripts-push warn · 3 transcripts changed since the cut, 0 copied this pass to $DEST; 1 over 1 MB not copied (token item): projH/late.jsonl (2 MB) · "*) true ;; *) false ;; esac && ok "a transcript that grows past the limit after the walk is not copied, is NAMED, and is not counted as copied" || bad "late growth: '$out' $(ls "$HD")"
+for f in --no-whole-file --info=skip1 --out-format=; do grep -q -- "$f" "$TMP/rsync.args" && ok "rsync is run with $f" || bad "rsync args lack $f: $(cat "$TMP/rsync.args")"; done
+rm -f "$H/late.jsonl"
+# g. a sweep that did not finish is said, and is a warn
+mkdir -p "$R/badfind"; printf '#!/bin/sh\ncase " $* " in *" -delete "*) "%s" "$@"; exit 1 ;; esac\nexec "%s" "$@"\n' "$REALFIND" "$REALFIND" > "$R/badfind/find"; chmod +x "$R/badfind/find"
+out=$(PATH="$R/badfind:$PATH" bash "$TP"); case "$out" in "CHECK transcripts-push warn · "*"the sweep of stale temp files did not finish (find exit 1)"*) ok "a sweep whose find fails is named in the line: warn, not a silent ok" ;; *) bad "sweep failure: '$out'" ;; esac
+grep -qE '^TimeoutStartSec=[0-9]+(s|min)$' "$ROOT/systemd/dreamteam-transcripts-push.service" && ok "the unit's start timeout is a finite number" || bad "unit timeout not finite"
+find "$SRC" -name '*.jsonl' -exec touch -d '3 hours ago' {} +
+printf '%s\n' "$DEST" > "$ST/transcripts-push.dest"
 
 # ================= units =======================================================================================
 if command -v systemd-analyze >/dev/null 2>&1; then
