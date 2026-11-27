@@ -126,7 +126,22 @@ if [ -z "$KEY" ]; then
   exit 0
 fi
 
-URL="${ASK_URL:-http://127.0.0.1:7810}"; URL="${URL%/}"
+# The plan's address (its host move, 2026-11-27, plan-62 row d18b3d4a: nothing answers on familiar's 127.0.0.1:7810
+# since): ASK_URL, else the one https line in ~/.config/plan-realm-watch/plan-url that the move writes (its rollback
+# removes it; the plan's own ask/flow CLIs read the same file), else loopback. Anything but https://host[:port] in the
+# file is ignored, so the key only ever goes to loopback or that one origin (curl runs without -L: no redirects).
+plan_url_file() {
+  local f="${PLAN_URL_FILE:-$HOME/.config/plan-realm-watch/plan-url}" u port
+  [ -f "$f" ] || return 0
+  u="$(timeout -k 1 2 head -c 301 -- "$f" 2>/dev/null)" || return 0
+  [ "${#u}" -le 300 ] || return 0
+  u="${u#"${u%%[![:space:]]*}"}"; u="${u%"${u##*[![:space:]]}"}"
+  [[ "$u" =~ ^https://[A-Za-z0-9.-]+(:([0-9]{1,5}))?$ ]] || return 0
+  port="${BASH_REMATCH[2]}"
+  if [ -n "$port" ] && { [ "$((10#$port))" -lt 1 ] || [ "$((10#$port))" -gt 65535 ]; }; then return 0; fi
+  printf '%s' "$u"
+}
+URL="${ASK_URL:-$(plan_url_file)}"; URL="${URL:-http://127.0.0.1:7810}"; URL="${URL%/}"
 
 # ── (f) ONE budget for the whole stop (xreview #237 r1): every request's timeout is cut to what is left of it, and
 #        when it is spent the remaining rows are reported as unchecked, never silently skipped. Default 9 s inside the
