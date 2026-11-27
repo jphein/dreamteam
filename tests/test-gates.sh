@@ -701,9 +701,20 @@ g DREAMTEAM_CONFIG="$OV/config.json" DREAMTEAM_HOST=trunc FAKE_AVAIL=30000 FAKE_
 [ "$GRC" -eq 2 ] && pass "gate: a truncated overlay with plenty of RAM and no swap still blocks (its swap floor is unknowable)" || fail "gate trunc: exit $GRC"
 # familiar's overlay is host data (untracked; it lives in the synced tree): when present here it carries the accepted
 # numbers (balloon stays the base's); a clean clone has none, and the check says so
+# The check is on the FLOORS. .overnight is a section other features add keys to: on 2026-11-21 familiar's overlay
+# gained prune_quarantine / prune_keep_days / prune_min_free_pct (#255), and the exact comparison that stood here
+# turned CHECK dreamteam-audit red on 11-22 with every floor still as accepted.
+floors_ok() { jq -e '.memory == {"minAvailableMB":3000,"minSwapFreeMB":2048,"perAgentMB":750,"hostReserveMB":2048} and .lane == {"minAvailableMB":6800,"minSwapFreeMB":4096}
+         and (.overnight | type == "object" and .min_available_mb == 5500 and .min_swap_free_mb == 4096) and (.memory | has("balloonReserveMB") | not)' "$1" >/dev/null 2>&1; }
+FL='"memory":{"minAvailableMB":3000,"minSwapFreeMB":2048,"perAgentMB":750,"hostReserveMB":2048},"lane":{"minAvailableMB":6800,"minSwapFreeMB":4096}'
+printf '{%s,"overnight":{"min_available_mb":5500,"min_swap_free_mb":4096,"prune_quarantine":"/srv/q","prune_keep_days":14,"prune_min_free_pct":10}}\n' "$FL" > "$TMP/fl-more.json"
+floors_ok "$TMP/fl-more.json" && pass "overlay floors: other keys in .overnight (the prune settings) do not fail the check" || fail "overlay floors: extra .overnight keys were refused"
+printf '{%s,"overnight":{"min_available_mb":5400,"min_swap_free_mb":4096}}\n' "$FL" > "$TMP/fl-low.json"
+floors_ok "$TMP/fl-low.json" && fail "overlay floors: a lowered overnight floor (5400) passed" || pass "overlay floors: a lowered overnight floor is still refused"
+printf '{%s}\n' "$FL" > "$TMP/fl-none.json"
+floors_ok "$TMP/fl-none.json" && fail "overlay floors: no .overnight section passed" || pass "overlay floors: a missing .overnight section is refused"
 if [ -f "$ROOT/config.familiar.json" ]; then
-  jq -e '.memory == {"minAvailableMB":3000,"minSwapFreeMB":2048,"perAgentMB":750,"hostReserveMB":2048} and .lane == {"minAvailableMB":6800,"minSwapFreeMB":4096}
-         and .overnight == {"min_available_mb":5500,"min_swap_free_mb":4096} and (.memory | has("balloonReserveMB") | not)' "$ROOT/config.familiar.json" >/dev/null \
+  floors_ok "$ROOT/config.familiar.json" \
     && pass "config.familiar.json (synced tree): the accepted floors, balloonReserveMB left to the base" || fail "config.familiar.json content"
 else
   pass "config.familiar.json is not in this tree (host data, untracked): nothing to check"
