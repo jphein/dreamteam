@@ -23,7 +23,26 @@
 #   CHECK transcripts-push[-<host>] ok   · N transcripts changed since the cut, all sent to <dest> · every 10 min, owner Sen
 #   CHECK …                         warn · N listed for <dest>, some vanished mid-pass (next pass retries) · …
 #   CHECK …                         fail · <not initialised | destination … | rsync exit R | …> · owner Sen
-# Environment: TRANSCRIPTS_SRC (default ~/.claude/projects), TRANSCRIPTS_MOUNT. Test seams: TRANSCRIPTS_MOUNTPOINT_CMD,
+# HARDENED 2026-11-25 (Flow row 1de527eb; ubox0's root filled at 03:40: 43 rsync temp files, 32.5 GiB, under the
+# share, because an 844 MB transcript was re-copied whole every pass and each pass, failing once the disk was full,
+# left its temp file behind). On every pass, in this order:
+#   1. stale rsync temp files at the destination (`.<name>.jsonl.XXXXXX`, regular files, older than 10 minutes)
+#      are deleted, and only those; the line counts them;
+#   2. the destination's free space is measured (df there): under TRANSCRIPTS_MIN_FREE_GB (15) NOTHING is sent and
+#      the line is a warn; a free space that cannot be measured is a fail, never read as plenty;
+#   3. a transcript over TRANSCRIPTS_MAX_MB (300) is not copied: it is named in the line as a token item (a
+#      session that large is a token-use finding, not a file to ship every ten minutes); rsync's own --max-size
+#      holds the same limit for a file that grows past it mid-pass;
+#   4. rsync runs --inplace (no temp file beside the destination, ever: a pass that stops leaves the file it was
+#      writing, and the next pass continues it) and --timeout=120 (a stalled share ends the transfer instead of
+#      leaving an rsync behind the unit).
+#   Why not --append-verify, which would send only the new tail of an append-only file: it checksums the WHOLE file
+#   on both ends on every change (the old data is part of its verification), which is the cost the size-and-time
+#   comparison above was chosen to avoid, on a share that had just filled; and a transcript that is rewritten
+#   rather than appended to (a compaction) would fail that check and be sent whole anyway. --inplace keeps the
+#   transfer simple and leaves no second copy. Revisit if pass time on large transcripts becomes the problem.
+# Environment: TRANSCRIPTS_SRC (default ~/.claude/projects), TRANSCRIPTS_MOUNT, TRANSCRIPTS_MAX_MB (300),
+#   TRANSCRIPTS_MIN_FREE_GB (15). Test seams: TRANSCRIPTS_MOUNTPOINT_CMD,
 #   TRANSCRIPTS_SSH. State: ${XDG_STATE_HOME:-~/.local/state}/dreamteam/transcripts-push.{dest,cut,lock}.
 # Exit: 0 line published (any status) / init done · 1 line not published · 22 bad arguments · 75 lock held.
 set -uo pipefail
@@ -116,20 +135,49 @@ case "$DEST" in
     ;;
 esac
 
+MAXMB="${TRANSCRIPTS_MAX_MB:-300}"; MINGB="${TRANSCRIPTS_MIN_FREE_GB:-15}"
+[[ "$MAXMB" =~ ^[0-9]{1,6}$ ]] && [ "$MAXMB" -ge 1 ] || { check_line "$CHECK" fail "TRANSCRIPTS_MAX_MB must be a whole number of MB, 1-999999 (got '$MAXMB')" "$OWNER"; exit $?; }
+[[ "$MINGB" =~ ^[0-9]{1,6}$ ]] || { check_line "$CHECK" fail "TRANSCRIPTS_MIN_FREE_GB must be a whole number of GB (got '$MINGB')" "$OWNER"; exit $?; }
+# where to run a command against the destination: here, or over ssh on the destination's host
+at_dest() { case "$DEST" in /*) "$@" ;; *) "$SSH" -o BatchMode=yes -o ConnectTimeout=15 -- "${DEST%%:*}" "$@" </dev/null ;; esac; }
+DPATH="$DEST"; case "$DEST" in /*) ;; *) DPATH="${DEST#*:}" ;; esac
+# 1. the sweep: before the free-space check, because it is what frees the space. find does not follow symlinks;
+#    -type f keeps directories and symlinks of that name; the name pattern is rsync's temp name for a transcript.
+swept=$(at_dest find "$DPATH" -type f -name '.*.jsonl.??????' -mmin +10 -delete -print 2>/dev/null | wc -l)
+[[ "$swept" =~ ^[0-9]+$ ]] || swept=0
+SW=""; [ "$swept" -gt 0 ] && SW="; swept $swept stale rsync temp file(s)"
+# 2. the free space at the destination, in KiB, from df -P's fourth column
+free=$(at_dest df -Pk "$DPATH" 2>/dev/null | awk 'NR == 2 {print $4}')
+[[ "$free" =~ ^[0-9]{1,15}$ ]] || { check_line "$CHECK" fail "cannot measure the free space at $DEST: nothing sent$SW" "$OWNER"; exit $?; }
+freegb=$(( free / 1048576 ))
+if [ "$free" -lt $(( MINGB * 1048576 )) ]; then
+  check_line "$CHECK" warn "$DEST has $freegb GB free, under $MINGB GB: nothing sent this pass$SW" "$OWNER"; exit $?
+fi
+
 list="$(mktemp "$STATE/.transcripts-push.list.XXXXXX")" || { check_line "$CHECK" fail "cannot create a temp file" "$OWNER"; exit $?; }
-trap 'rm -f -- "$list"' EXIT
-# regular files only, changed since the cut; a walk that could not read a directory is not a complete list
-if ! ( cd "$SRC" && find . -type f -name '*.jsonl' -newer "$CUT" -print0 ) > "$list" 2>/dev/null; then
+big="$(mktemp "$STATE/.transcripts-push.big.XXXXXX")" || { rm -f -- "$list"; check_line "$CHECK" fail "cannot create a temp file" "$OWNER"; exit $?; }
+trap 'rm -f -- "$list" "$big"' EXIT
+# regular files only, changed since the cut; a walk that could not read a directory is not a complete list.
+# 3. over the limit: listed apart (size and path), never handed to rsync
+KMAX=$(( MAXMB * 1024 ))
+if ! ( cd "$SRC" && find . -type f -name '*.jsonl' -newer "$CUT" ! -size +"${KMAX}"k -print0 ) > "$list" 2>/dev/null \
+   || ! ( cd "$SRC" && find . -type f -name '*.jsonl' -newer "$CUT" -size +"${KMAX}"k -printf '%s %P\n' ) > "$big" 2>/dev/null; then
   check_line "$CHECK" fail "the walk of the source was incomplete" "$OWNER"; exit $?
+fi
+nbig=$(grep -c . "$big"); BIG=""
+if [ "$nbig" -gt 0 ]; then
+  BIG="; $nbig over $MAXMB MB not copied (token item): $(sort -rn "$big" | head -n 3 | awk '{printf "%s%s (%d MB)", (NR > 1 ? ", " : ""), $2, ($1 + 524288) / 1048576}')"
+  [ "$nbig" -gt 3 ] && BIG="$BIG and $((nbig - 3)) more"
 fi
 n=$(tr -cd '\0' < "$list" | wc -c) && [[ "$n" =~ ^[0-9]+$ ]] || { check_line "$CHECK" fail "cannot count the list" "$OWNER"; exit $?; }
 
 rc=0
 if [ "$n" -gt 0 ]; then
-  rsync -a --no-owner --no-group --from0 --files-from="$list" -e "$SSH -o BatchMode=yes -o ConnectTimeout=15" -- "$SRC/" "$DEST/" >/dev/null 2>&1; rc=$?
+  rsync -a --no-owner --no-group --inplace --max-size="${MAXMB}M" --timeout=120 --from0 --files-from="$list" -e "$SSH -o BatchMode=yes -o ConnectTimeout=15" -- "$SRC/" "$DEST/" >/dev/null 2>&1; rc=$?
 fi
 case "$rc" in
-  0)  check_line "$CHECK" ok "$n transcripts changed since the cut, all sent to $DEST" "$OWNER" ;;
-  24) check_line "$CHECK" warn "$n listed for $DEST, some vanished mid-pass (next pass retries)" "$OWNER" ;;   # a session file rotated away while it was read
-  *)  check_line "$CHECK" fail "rsync exit $rc to $DEST ($n listed)" "$OWNER" ;;
+  0)  if [ "$nbig" -gt 0 ]; then check_line "$CHECK" warn "$n transcripts changed since the cut sent to $DEST$BIG$SW" "$OWNER"
+      else check_line "$CHECK" ok "$n transcripts changed since the cut, all sent to $DEST$SW" "$OWNER"; fi ;;
+  24) check_line "$CHECK" warn "$n listed for $DEST, some vanished mid-pass (next pass retries)$BIG$SW" "$OWNER" ;;   # a session file rotated away while it was read
+  *)  check_line "$CHECK" fail "rsync exit $rc to $DEST ($n listed)$BIG$SW" "$OWNER" ;;
 esac
