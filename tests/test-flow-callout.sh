@@ -83,7 +83,7 @@ FAKEKEY="k0000000000000000000000000000000000000000"
 run() {
   RC=0; local t0 t0ns; t0=$(date +%s); t0ns=$(date +%s%N)
   printf '%s' "${1:-{\"hook_event_name\":\"Stop\",\"stop_hook_active\":false\}}" \
-    | PATH="${EXTRA_PATH:+$EXTRA_PATH:}$TMP/bin:$PATH" FIX="$FIX" ASK_URL="http://plan.test" ASK_KEY="${ASK_KEY-$FAKEKEY}" DREAMTEAM_ASK_KEY_FILE="${KEYFILE-$TMP/no-such-key}" \
+    | PATH="${EXTRA_PATH:+$EXTRA_PATH:}$TMP/bin:$PATH" FIX="$FIX" ASK_URL="${ASKURL-http://plan.test}" PLAN_URL_FILE="${PLANURLFILE-$TMP/no-plan-url}" ASK_KEY="${ASK_KEY-$FAKEKEY}" DREAMTEAM_ASK_KEY_FILE="${KEYFILE-$TMP/no-such-key}" \
       ASK_WHO="${ASK_WHO-example-lane}" DREAMTEAM_AGENT_ID="${DREAMTEAM_AGENT_ID-}" DREAMTEAM_CONFIG="${CFG:-$TMP/on.json}" \
       TMUX="${TMUXV-/stub/tmux-socket,1,0}" DREAMTEAM_FLOW_BUDGET="${BUDGET-9}" DREAMTEAM_FLOW_MAX_LOGS="${MAXLOGS-8}" DREAMTEAM_FLOW_MAX_ROWS="${MAXROWS-200}" \
       DREAMTEAM_FLOW_LOG="${LOGV-$TMP/callout.log}" bash "$HOOK" >"$TMP/out" 2>"$TMP/err" || RC=$?
@@ -398,6 +398,19 @@ reset; run 'not json'; allowed && pass "malformed stdin → allowed" || fail "ma
 reset; list "$(row ffff0016 example-lane ordered $T0 null)"; run
 grep -q 'flow checkpoint ffff0016' "$TMP/err" && grep -q 'flow block ffff0016' "$TMP/err" && grep -q 'flow done ffff0016 --evidence' "$TMP/err" \
   && pass "the block names checkpoint, block and done --evidence" || fail "verbs: $(cat "$TMP/err")"
+
+# 14) the plan's address after its host move (2026-11-27, plan-62 row d18b3d4a): ASK_URL, else the one https line in
+#     ~/.config/plan-realm-watch/plan-url (PLAN_URL_FILE seam), else loopback; anything else in the file is ignored
+printf 'https://plan.realm.watch\n' > "$TMP/plan-url"
+reset; list "$(row ffff0018 example-lane ordered $T0 null)"; ASKURL="" PLANURLFILE="$TMP/plan-url" run
+case "$(urls)" in https://plan.realm.watch/api/flow\?*) pass "no ASK_URL → the move's plan-url file" ;; *) fail "plan-url file: $(urls)" ;; esac
+reset; list "$(row ffff0018 example-lane ordered $T0 null)"; ASKURL="http://plan.test" PLANURLFILE="$TMP/plan-url" run
+case "$(urls)" in http://plan.test/api/flow\?*) pass "ASK_URL wins over the plan-url file" ;; *) fail "env over file: $(urls)" ;; esac
+for bad in 'http://plan.realm.watch' 'https://plan.realm.watch/api' 'https://evil.test?x=1' 'https://a.test:99999'; do
+  printf '%s\n' "$bad" > "$TMP/bad-url"
+  reset; list "$(row ffff0018 example-lane ordered $T0 null)"; ASKURL="" PLANURLFILE="$TMP/bad-url" run
+  case "$(urls)" in http://127.0.0.1:7810/api/flow\?*) pass "a bad plan-url file ($bad) → loopback" ;; *) fail "bad file $bad: $(urls)" ;; esac
+done
 
 echo ""
 echo "flow-callout: $PASS passed, $FAIL failed"
