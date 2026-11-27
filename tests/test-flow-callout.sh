@@ -276,12 +276,17 @@ blocked && one_line && grep -q 'NOT CHECKED' "$TMP/callout.log" && pass "a silen
 #      (D) STILL ALIVE: the table the hook reads is a FROZEN copy (a mirror that adds every process it sees and
 #          never removes one), so what the hook signalled still shows after KILL: exit 1, one line naming it
 FP="$TMP/fproc"; mkdir -p "$FP"; rm -f "$TMP/mirror.stop" "$TMP/mirror.ready"
-( while [ ! -e "$TMP/mirror.stop" ]; do for d in /proc/[0-9]*; do q=${d##*/}; [ -e "$FP/$q/stat" ] || { mkdir -p "$FP/$q" && cp "$d/stat" "$FP/$q/stat"; } 2>/dev/null; done; : > "$TMP/mirror.ready"; done ) & MIRROR=$!
+( while [ ! -e "$TMP/mirror.stop" ]; do for d in /proc/[0-9]*; do q=${d##*/}; [ -e "$FP/$q/stat" ] || { mkdir -p "$FP/$q" && cp "$d/stat" "$FP/$q/stat"; } 2>/dev/null; done; : > "$TMP/mirror.ready"; "$REALSLEEP" 0.02; done ) & MIRROR=$!
 for _ in $(seq 100); do [ -e "$TMP/mirror.ready" ] && break; "$REALSLEEP" 0.1; done
 reset; printf '#!/usr/bin/env bash\nexec "%s" 6\n' "$REALSLEEP" > "$TMP/bin/tmux"; list "$(row ffff002d example-lane ordered $T0 null)"
 PROCV="$FP" ASK_WHO="" BUDGET=2 run
-: > "$TMP/mirror.stop"; wait "$MIRROR" 2>/dev/null
 [ "$RC" -eq 1 ] && one_line && grep -q 'tmux fallback overran its bound: 1 process(es) of its pid tree (root [0-9]*) signalled (TERM, then KILL after [0-9]* ms); STILL ALIVE: [0-9]' "$TMP/callout.log" && grep -q 'could not be cleaned up or checked' "$TMP/err" && pass "a process the table still shows after KILL: STILL ALIVE, exit 1, exactly one outcome line" || fail "still alive: rc=$RC log=[$(cat "$TMP/callout.log")] err=[$(head -c 120 "$TMP/err")]"
+#          …and on the same frozen table with the budget SPENT before TERM (the slow sleep of (B)): nothing is waited
+#          for after KILL either. One sleep in all; with a wait that ignored the budget there would be a second.
+reset; rm -f "$TMP/sleep.calls"; printf '#!/usr/bin/env bash\n(trap "" TERM; exec "%s" 20) &\n"%s" 0.1\necho example-lane\nwait\n' "$REALSLEEP" "$REALSLEEP" > "$TMP/bin/tmux"; list "$(row ffff002e example-lane ordered $T0 null)"
+EXTRA_PATH="$TMP/slowsleep" PROCV="$FP" ASK_WHO="" BUDGET=2 run
+one_line && grep -q 'signalled (TERM, then KILL after 0 ms); STILL ALIVE: [0-9]' "$TMP/callout.log" && [ "$(grep -c x "$TMP/sleep.calls" 2>/dev/null)" = 1 ] && [ "$RC" -ne 0 ] && pass "budget spent and the table still showing the tree after KILL: no confirmation wait (one sleep in all), STILL ALIVE, a non-zero exit" || fail "spent budget on the frozen table: rc=$RC sleeps=$(grep -c x "$TMP/sleep.calls" 2>/dev/null) log=[$(cat "$TMP/callout.log")]"
+: > "$TMP/mirror.stop"; wait "$MIRROR" 2>/dev/null
 #      (E) a STALE SESSION ID: the id the call prints belongs to a process outside the tree the hook started (a
 #          session leader of its own). It is never signalled; the hook's own child is. The stand-in setsid prints
 #          the bystander's id and then lingers without a name.

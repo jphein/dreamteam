@@ -11,6 +11,9 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HOOK="$ROOT/scripts/flow-callout.sh"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
+# NOT in this list, because no test can reach it: the start-time check immediately before each kill (sig). It
+# guards the instant between the reading of the table and the signal; a table that changes inside that instant
+# cannot be staged. The reading itself (live) drops a reused pid, and that IS pinned by the stale-id case.
 # name|sed expression (applied once, must change the copy)
 MUTATIONS=(
   'detail-read-as-silence|s/then "unreadable"/then "silent"/'
@@ -29,7 +32,6 @@ MUTATIONS=(
   'unread-table-is-no-failure|s/unread() { REAPFAIL=1; note/unread() { note/'
   'unread-table-reads-as-empty|s/^  \[ -n "\${PS\[\$\$\]:-}" \]$/  true/'
   'kill-set-by-printed-session-id|s/^      reap_tree "\$tpid" "\$tpst" "\$tgot" || true$/      reap_tree "${tsid:-$tpid}" "$(start_of "${tsid:-$tpid}")" "$tgot" || true/'
-  'member-identity-unchecked|s/\[ "\$(start_of "\$q")" = "\${K\[\$q\]}" \] \&\& kill/kill/'
   'descendants-not-in-the-tree|s/if \[ -z "\${K\[\$q\]:-}" \] \&\& \[ -n "\${K\[\${PP\[\$q\]}\]:-}" \]; then/if false; then/'
   'grace-has-a-floor|s/\[ "\$g" -gt 1000 \] \&\& g=1000; \[ "\$g" -lt 0 \] \&\& g=0/[ "$g" -gt 1000 ] \&\& g=1000; [ "$g" -lt 100 ] \&\& g=100/'
   'wait-ignores-a-spent-budget|s/^    local dl r l; l=\$(left); r=\$1; \[ "\$l" -lt "\$r" \] \&\& r=\$l; dl=/    local dl r l; r=$1; dl=/;s/^      r=\$(( dl - \$(now_ms) )); l=\$(left); \[ "\$l" -lt "\$r" \] \&\& r=\$l$/      r=$(( dl - $(now_ms) ))/'
