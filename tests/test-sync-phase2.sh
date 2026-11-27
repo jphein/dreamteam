@@ -305,21 +305,21 @@ case "$(cat "$LINE")" in "CHECK config-pull fail · stopped before it finished (
 # ================= transcripts-push hardening (Flow row 1de527eb; ubox0 root 100 % on 2026-11-25 03:40) ==========
 # 43 rsync temp files (32.5 GiB) were left under the share: an 844 MB transcript re-copied whole every pass, each
 # pass failing once the disk was full and leaving its temp behind. Four rules, each tested on its own:
-#   1. no temp file at the destination, ever (--inplace): a retry continues the file it was writing;
+#   1. a copy that is stopped is kept in .rsync-partial beside its destination and CONTINUED by the next pass
+#      (--partial-dir; round 3 of #295: --inplace cannot be combined with it and is gone);
 #   2. a transcript over TRANSCRIPTS_MAX_MB (300) is not copied: named in the line as a token item;
 #   3. the destination's free space is measured before anything is sent: under TRANSCRIPTS_MIN_FREE_GB (15) the
 #      pass sends nothing and warns;
 #   4. rsync temp files older than 10 minutes at the destination are swept, and only those.
 printf '%s\n' "$DEST" > "$ST/transcripts-push.dest"; rm -f "$ST/transcripts-push.cut"; : > "$ST/transcripts-push.cut"; touch -d '1 hour ago' "$ST/transcripts-push.cut"
 H="$SRC/projH"; HD="$DEST/projH"; mkdir -p "$H"
-# 1. in place: the destination file keeps its inode when it is updated (a temp-then-rename would give a new one)
-echo one > "$H/grow.jsonl"; out=$(bash "$TP")
-i1=$(stat -c %i "$HD/grow.jsonl" 2>/dev/null); echo two >> "$H/grow.jsonl"; out=$(bash "$TP"); i2=$(stat -c %i "$HD/grow.jsonl" 2>/dev/null)
-[ -n "$i1" ] && [ "$i1" = "$i2" ] && [ "$(cat "$HD/grow.jsonl")" = "$(printf 'one\ntwo')" ] && ok "a grown transcript is updated IN PLACE (same inode): rsync writes no temp file beside it" || bad "not in place: inode $i1 -> $i2"
+# 1. a grown transcript is updated at the destination (the interrupted-copy case is in the round-3 block below)
+echo one > "$H/grow.jsonl"; out=$(bash "$TP"); echo two >> "$H/grow.jsonl"; out=$(bash "$TP")
+[ "$(cat "$HD/grow.jsonl")" = "$(printf 'one\ntwo')" ] && ok "a grown transcript is updated at the destination" || bad "grown transcript: $(cat "$HD/grow.jsonl" 2>&1)"
 mkdir -p "$TMP/spy"; REALRSYNC="$(command -v rsync)"
 printf '#!/bin/sh\necho "$*" > "%s/rsync.args"\nexec "%s" "$@"\n' "$TMP" "$REALRSYNC" > "$TMP/spy/rsync"; chmod +x "$TMP/spy/rsync"
 echo three >> "$H/grow.jsonl"; PATH="$TMP/spy:$PATH" bash "$TP" >/dev/null
-for f in --inplace --max-size= --timeout=; do grep -q -- "$f" "$TMP/rsync.args" && ok "rsync is run with $f" || bad "rsync args lack $f: $(cat "$TMP/rsync.args")"; done
+for f in --partial-dir=.rsync-partial --max-size= --timeout=; do grep -q -- "$f" "$TMP/rsync.args" && ok "rsync is run with $f" || bad "rsync args lack $f: $(cat "$TMP/rsync.args")"; done
 # 2. too large: not copied, named as a token item, the rest still sent
 head -c 2200000 /dev/zero | tr '\0' 'x' > "$H/huge.jsonl"; echo small > "$H/small.jsonl"
 out=$(TRANSCRIPTS_MAX_MB=1 bash "$TP"); rc=$?
@@ -403,12 +403,35 @@ rm -rf "$H/sp ace" "$H/b2.jsonl" "$H/b3.jsonl" "$H/b4.jsonl"
 # e. the count of copied files is rsync's, not the list's
 out=$(bash "$TP"); case "$out" in "CHECK transcripts-push ok · 2 transcripts changed since the cut, all at $DEST (0 copied this pass) · "*) ok "a pass with nothing new to copy says 0 copied (the list still holds 2)" ;; *) bad "count, nothing new: '$out'" ;; esac
 echo more >> "$H/r2a.jsonl"; out=$(bash "$TP"); case "$out" in "CHECK transcripts-push ok · 2 transcripts changed since the cut, all at $DEST (1 copied this pass) · "*) ok "…and 1 copied after one of them grew" ;; *) bad "count, one grew: '$out'" ;; esac
-# f. growth between the walk and the transfer: the stand-in rsync makes the file large, then runs the real one
-printf '#!/bin/sh\necho "$*" > "%s/rsync.args"\nhead -c 2200000 /dev/zero >> "%s/late.jsonl"\nexec "%s" "$@"\n' "$TMP" "$H" "$REALRSYNC" > "$R/bin/rsync"; chmod +x "$R/bin/rsync"
-echo late > "$H/late.jsonl"; out=$(PATH="$R/bin:$PATH" TRANSCRIPTS_MAX_MB=1 bash "$TP")
-[ ! -e "$HD/late.jsonl" ] && case "$out" in "CHECK transcripts-push warn · 3 transcripts changed since the cut, 0 copied this pass to $DEST; 1 over 1 MB not copied (token item): projH/late.jsonl (2 MB) · "*) true ;; *) false ;; esac && ok "a transcript that grows past the limit after the walk is not copied, is NAMED, and is not counted as copied" || bad "late growth: '$out' $(ls "$HD")"
-for f in --no-whole-file --info=skip1 --out-format=; do grep -q -- "$f" "$TMP/rsync.args" && ok "rsync is run with $f" || bad "rsync args lack $f: $(cat "$TMP/rsync.args")"; done
-rm -f "$H/late.jsonl"
+# f. growth between the walk and the transfer: the stand-in rsync makes two files large, then runs the real one.
+#    They are named from this script's OWN second walk (find), not from rsync's text: rsync escapes a name it
+#    prints (a tab becomes \#011), so the name with a tab below can only come out whole from find.
+TABN="$(printf 'la\tte.jsonl')"
+printf '#!/bin/sh\necho "$*" > "%s/rsync.args"\nhead -c 2200000 /dev/zero >> "%s/late.jsonl"\nhead -c 2200000 /dev/zero >> "%s/%s"\nexec "%s" "$@"\n' "$TMP" "$H" "$H" "$TABN" "$REALRSYNC" > "$R/bin/rsync"; chmod +x "$R/bin/rsync"
+echo late > "$H/late.jsonl"; echo tab > "$H/$TABN"; out=$(PATH="$R/bin:$PATH" TRANSCRIPTS_MAX_MB=1 bash "$TP")
+want_tab="\$'projH/la\\tte.jsonl' (2 MB)"
+[ ! -e "$HD/late.jsonl" ] && [ ! -e "$HD/$TABN" ] && case "$out" in "CHECK transcripts-push warn · 4 transcripts changed since the cut, 0 copied this pass to $DEST; 2 over 1 MB not copied (token item): "*) true ;; *) false ;; esac \
+  && case "$out" in *"projH/late.jsonl (2 MB)"*) true ;; *) false ;; esac && case "$out" in *"$want_tab"*) true ;; *) false ;; esac \
+  && ok "transcripts that grow past the limit after the walk are not copied, are NAMED whole (a tab in a name too), and are not counted as copied" || bad "late growth: '$out' $(ls "$HD")"
+grep -q -- '--no-whole-file' "$TMP/rsync.args" && grep -qF -- '--out-format=%i %b %n' "$TMP/rsync.args" && ok "rsync is run with --no-whole-file and an out-format that holds the bytes sent (%b: the line is written when a file is FINISHED)" || bad "rsync args: $(cat "$TMP/rsync.args")"
+! grep -q -- '--inplace' "$TMP/rsync.args" && ok "…and without --inplace (rsync refuses it beside --partial-dir)" || bad "--inplace still there"
+rm -f "$H/late.jsonl" "$H/$TABN"
+# h. a copy that is stopped: the stand-in runs the real rsync slowly and ends it with TERM after 2 s
+mkdir -p "$R/cut" "$R/e23"; head -c 4000000 /dev/urandom | base64 > "$H/slow.jsonl"
+printf '#!/bin/sh\n"%s" --bwlimit=500 "$@" &\np=$!\nsleep 2\nkill -TERM $p\nwait $p\nexit $?\n' "$REALRSYNC" > "$R/cut/rsync"; chmod +x "$R/cut/rsync"
+out=$(PATH="$R/cut:$PATH" TRANSCRIPTS_MAX_MB=50 bash "$TP")
+[ -s "$HD/.rsync-partial/slow.jsonl" ] && [ ! -e "$HD/slow.jsonl" ] && ok "a stopped copy: what arrived is kept in .rsync-partial beside the destination, the transcript itself is not there half-written" || bad "stopped copy: $(ls -A "$HD" | tr '\n' ' ') partial: $(ls -la "$HD/.rsync-partial" 2>&1 | tail -1)"
+case "$out" in "CHECK transcripts-push fail · rsync exit 20 to $DEST (3 listed; 0 transfers finished before it)"*) ok "…and the line is a fail that counts NO file as copied (the transfer had started, it had not finished)" ;; *) bad "stopped copy line: '$out'" ;; esac
+# the stopped rsync's own children hold the run lock until they are gone (they inherited it: a pass never overlaps them)
+flock -w 20 "$ST/transcripts-push.lock" true 2>/dev/null
+psz=$(stat -c %s "$HD/.rsync-partial/slow.jsonl" 2>/dev/null || echo 0); out=$(TRANSCRIPTS_MAX_MB=50 bash "$TP")
+cmp -s "$H/slow.jsonl" "$HD/slow.jsonl" && [ ! -e "$HD/.rsync-partial" ] && [ -z "$(find "$HD" -maxdepth 1 -name '.slow.jsonl.*')" ] && [ "$psz" -gt 0 ] && case "$out" in "CHECK transcripts-push ok · 3 transcripts changed since the cut, all at $DEST (1 copied this pass) · "*) true ;; *) false ;; esac \
+  && ok "the next pass continues it: the transcript is whole and identical, the partial ($psz bytes) is used up and gone, 1 copied" || bad "retry: '$out' $(ls -A "$HD" | tr '\n' ' ')"
+# i. rsync's exit decides: a pass whose rsync fails AFTER finishing a file says so, and never "copied this pass"
+printf '#!/bin/sh\n"%s" "$@"\nexit 23\n' "$REALRSYNC" > "$R/e23/rsync"; chmod +x "$R/e23/rsync"; echo again >> "$H/r2b.jsonl"
+out=$(PATH="$R/e23:$PATH" TRANSCRIPTS_MAX_MB=50 bash "$TP")
+case "$out" in "CHECK transcripts-push fail · rsync exit 23 to $DEST (3 listed; 1 transfers finished before it)"*) ok "an rsync that fails after one file: fail, '1 transfers finished before it', nothing called copied" ;; *) bad "exit 23 line: '$out'" ;; esac
+rm -f "$H/slow.jsonl"
 # g. a sweep that did not finish is said, and is a warn
 mkdir -p "$R/badfind"; printf '#!/bin/sh\ncase " $* " in *" -delete "*) "%s" "$@"; exit 1 ;; esac\nexec "%s" "$@"\n' "$REALFIND" "$REALFIND" > "$R/badfind/find"; chmod +x "$R/badfind/find"
 out=$(PATH="$R/badfind:$PATH" bash "$TP"); case "$out" in "CHECK transcripts-push warn · "*"the sweep of stale temp files did not finish (find exit 1)"*) ok "a sweep whose find fails is named in the line: warn, not a silent ok" ;; *) bad "sweep failure: '$out'" ;; esac

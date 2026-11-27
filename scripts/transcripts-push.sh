@@ -37,16 +37,18 @@
 #      size as a token item (a session that large is a token-use finding, not a file to ship every ten minutes);
 #      rsync's own --max-size holds the same limit for a file that grows past it after the walk, and rsync's
 #      report of that file puts it in the same list;
-#   4. rsync runs --inplace (no temp file beside the destination, ever), --no-whole-file (the delta transfer also
-#      to a local destination: a pass that stops leaves the file it was writing, and the next pass sends only
-#      what differs) and --timeout=120 (a stalled share ends the transfer instead of leaving an rsync behind the
-#      unit). "K copied this pass" is counted from rsync's own itemized lines, not from the list it was given.
+#   4. rsync runs --partial-dir=.rsync-partial (a copy that is stopped keeps what arrived, beside its
+#      destination; the next pass continues from it and removes it), --no-whole-file (the delta transfer also
+#      to a local destination) and --timeout=120 (a stalled share ends the transfer instead of leaving an rsync
+#      behind the unit). While a file is being written rsync's temp file exists beside it; one left behind by
+#      a killed pass is what step 1 sweeps. "K copied this pass" counts the files rsync FINISHED, and only
+#      when rsync exited 0.
 #   Every command run AT the destination (the sweep's find, df) is bounded by TRANSCRIPTS_DEST_TIMEOUT (60 s), and
 #   over ssh each argument is quoted for the remote shell.
-#   Why not --append-verify: it sends only the new tail of an append-only file, but a transcript that is rewritten
-#   rather than appended to (a compaction) fails its check and is sent whole. The delta transfer above reads both
-#   copies as --append-verify does, sends only what differs, and has no such case. Its cost is that read on every
-#   changed transcript under the size limit; revisit if pass time becomes the problem.
+#   Why --partial-dir and not --append-verify or --inplace: --append-verify sends only the new tail of an
+#   append-only file, but a transcript that is rewritten (a compaction) fails its check and is sent whole;
+#   --inplace leaves a half-written transcript under its real name when a pass stops, and rsync refuses it
+#   beside --partial-dir. A partial is at most one per transcript and at most TRANSCRIPTS_MAX_MB.
 # Environment: TRANSCRIPTS_SRC (default ~/.claude/projects), TRANSCRIPTS_MOUNT, TRANSCRIPTS_MAX_MB (300),
 #   TRANSCRIPTS_MIN_FREE_GB (15), TRANSCRIPTS_DEST_TIMEOUT (60). Test seams: TRANSCRIPTS_MOUNTPOINT_CMD,
 #   TRANSCRIPTS_SSH. State: ${XDG_STATE_HOME:-~/.local/state}/dreamteam/transcripts-push.{dest,cut,lock}.
@@ -197,23 +199,32 @@ over() { nover=$((nover + 1)); NAMES="$NAMES${NAMES:+, }$(enc "$2") ($(( ($1 + 5
 while IFS= read -r -d '' rec; do over "${rec%% *}" "${rec#* }"; done < <(sort -z -rn "$big")
 n=$(tr -cd '\0' < "$list" | wc -c) && [[ "$n" =~ ^[0-9]+$ ]] || { check_line "$CHECK" fail "cannot count the list" "$OWNER"; exit $?; }
 
-# 4. the copy. rsync itself says what it did: one itemized line per file it transferred (that is the count of
-#    "copied this pass"), and one "<path> is over max-size" line per file it held back because it had grown past
-#    the limit since the walk above (named with the others, never counted as copied).
-#    --no-whole-file: a local destination (the share) gets the delta transfer too, so a pass that was stopped is
-#    continued from the blocks already there instead of written again from the start.
+# 4. the copy.
+#    --partial-dir=.rsync-partial: a copy that is stopped leaves what arrived in <dir>/.rsync-partial/<name> beside
+#    its destination; the next pass takes it as the basis, sends the rest, and removes it. (--inplace is gone:
+#    rsync refuses it beside --partial-dir.) --no-whole-file: the delta transfer also to a local destination.
+#    WHAT COUNTS AS COPIED: --out-format holds %b (bytes sent), which makes rsync write a file's line when that
+#    file is FINISHED, not when it starts; and the count is called "copied" only when rsync exited 0. On any
+#    other exit the line says how many transfers had finished before it.
+#    OVER THE LIMIT AFTER THE WALK: rsync's --max-size holds back a file that grew past the limit since the walk
+#    above. Such files are found by this script's own second walk (find, NUL-ended names), never read from
+#    rsync's text, which escapes the names it prints.
 rc=0; sent=0
 if [ "$n" -gt 0 ]; then
-  rsync -a --no-owner --no-group --inplace --no-whole-file --max-size="${MAXMB}M" --timeout=120 --info=skip1 --out-format='%i %n' --from0 --files-from="$list" -e "$SSH -o BatchMode=yes -o ConnectTimeout=15" -- "$SRC/" "$DEST/" > "$rout" 2>/dev/null; rc=$?
-  sent=$(grep -cE '^[<>]f[^ ]{9} ' "$rout")
-  while IFS= read -r late; do
-    late="${late% is over max-size}"; over "$(stat -c %s -- "$SRC/$late" 2>/dev/null || echo 0)" "$late"
-  done < <(grep -vE '^[<>]f[^ ]{9} ' "$rout" | grep ' is over max-size$')
+  rsync -a --no-owner --no-group --partial-dir=.rsync-partial --no-whole-file --max-size="${MAXMB}M" --timeout=120 --out-format='%i %b %n' --from0 --files-from="$list" -e "$SSH -o BatchMode=yes -o ConnectTimeout=15" -- "$SRC/" "$DEST/" > "$rout" 2>/dev/null; rc=$?
+  sent=$(grep -cE '^[<>]f[^ ]{9} [0-9]+ ' "$rout")
+  declare -A seen=()
+  while IFS= read -r -d '' rec; do seen["${rec#* }"]=1; done < "$big"
+  if ( cd "$SRC" && find . -type f -name '*.jsonl' -newer "$CUT" -size +"${KMAX}"k -printf '%s %P\0' ) > "$rout" 2>/dev/null; then
+    while IFS= read -r -d '' rec; do [ -n "${seen["${rec#* }"]:-}" ] || over "${rec%% *}" "${rec#* }"; done < <(sort -z -rn "$rout")
+  else
+    SWBAD="$SWBAD; the second walk for transcripts that grew past the limit was incomplete"
+  fi
 fi
 BIG=""; [ "$nover" -eq 0 ] || BIG="; $nover over $MAXMB MB not copied (token item): $NAMES"
 case "$rc" in
   0)  if [ "$nover" -gt 0 ] || [ -n "$SWBAD" ]; then check_line "$CHECK" warn "$n transcripts changed since the cut, $sent copied this pass to $DEST$BIG$SW$SWBAD" "$OWNER"
       else check_line "$CHECK" ok "$n transcripts changed since the cut, all at $DEST ($sent copied this pass)$SW" "$OWNER"; fi ;;
   24) check_line "$CHECK" warn "$n listed for $DEST, some vanished mid-pass (next pass retries)$BIG$SW$SWBAD" "$OWNER" ;;   # a session file rotated away while it was read
-  *)  check_line "$CHECK" fail "rsync exit $rc to $DEST ($n listed, $sent copied)$BIG$SW$SWBAD" "$OWNER" ;;
+  *)  check_line "$CHECK" fail "rsync exit $rc to $DEST ($n listed; $sent transfers finished before it)$BIG$SW$SWBAD" "$OWNER" ;;
 esac
