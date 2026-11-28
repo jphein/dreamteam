@@ -342,7 +342,8 @@ python3 -I "$ROOT/scripts/lib/io_probe.py" "$T/probe" 0 > /dev/null 2>&1; ok "io
 echo "── units ────────────────────────────────────────────────────────"
 ok "the probe's unit is at normal priority and outside the lanes slice" '! grep -qE "^(Nice|IOSchedulingClass|Slice)=" "$ROOT/systemd/dreamteam-host-io.service"'
 ok "each timer has its service and a CHECKS.md row" 'for u in dreamteam-host-io dreamteam-lane-slice; do [ -f "$ROOT/systemd/$u.service" ] && [ -f "$ROOT/systemd/$u.timer" ] || exit 1; done; grep -q "dreamteam-host-io.timer" "$ROOT/docs/CHECKS.md" && grep -q "dreamteam-lane-slice.timer" "$ROOT/docs/CHECKS.md"'
-ok "NO root helper ships with this change: no scripts/host/io-shield*, no io-shield system unit, no user@ drop-in" '[ -z "$(ls "$ROOT"/scripts/host/io-shield* "$ROOT"/systemd/system/dreamteam-io-shield.* "$ROOT"/systemd/system/user@.service.d/* 2>/dev/null)" ]'
+# (PR A, #288, pinned here that no root helper shipped with it. PR B, #291, ships one; what stays true is below.)
+ok "the slice tool itself stays unprivileged: it never names the root helper or sudo" '! grep -qE "io-shield|sudo" "$ROOT/scripts/lane-slice.sh"'
 ok "…and neither script calls sudo, writes under /etc or /sys, or sets a SYSTEM unit's property" '! grep -nE "(^|[^[:alnum:]_])sudo |> */etc/|> */sys/|systemctl set-property|systemctl +(start|enable|daemon-reload)" "$LS" "$HC" | grep -v "^[^:]*:[0-9]*:[[:space:]]*#"'
 if command -v systemd-analyze > /dev/null 2>&1; then
   V="$T/v"; mkdir -p "$V"
