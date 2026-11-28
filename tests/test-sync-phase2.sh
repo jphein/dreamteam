@@ -376,7 +376,7 @@ grep -q '^TimeoutStartSec=' "$ROOT/systemd/dreamteam-transcripts-push.service" &
 #   f. a transcript that grows past the limit between the walk and the transfer is named too, never counted as sent.
 R="$TMP/r2"; mkdir -p "$R/login" "$R/remote/t" "$R/bin"; REALFIND="$(command -v find)"
 find "$SRC" -name '*.jsonl' -exec touch -d '3 hours ago' {} +
-printf '#!/bin/sh\nwhile [ "$1" = -o ]; do shift 2; done\n[ "$1" = -- ] && shift\nshift\ncd "%s/login" && exec sh -c "$*"\n' "$R" > "$R/bin/shssh"; chmod +x "$R/bin/shssh"
+printf '#!/bin/sh\nwhile [ "$1" = -o ]; do shift 2; done\n[ "$1" = -- ] && shift\nshift\nPATH=/usr/bin:/bin; export PATH\ncd "%s/login" && exec sh -c "$*"\n' "$R" > "$R/bin/shssh"; chmod +x "$R/bin/shssh"
 echo trap > "$R/login/.zz.jsonl.AAAAAA"; touch -d '20 minutes ago' "$R/login/.zz.jsonl.AAAAAA"
 echo junk > "$R/remote/t/.s.jsonl.Ab12Cd"; touch -d '20 minutes ago' "$R/remote/t/.s.jsonl.Ab12Cd"
 printf 'far:%s/remote/t\n' "$R" > "$ST/transcripts-push.dest"; echo r2a > "$H/r2a.jsonl"
@@ -463,6 +463,45 @@ out=$(PATH="$R/badfind:$PATH" bash "$TP"); case "$out" in "CHECK transcripts-pus
 grep -qE '^TimeoutStartSec=[0-9]+(s|min)$' "$ROOT/systemd/dreamteam-transcripts-push.service" && ok "the unit's start timeout is a finite number" || bad "unit timeout not finite"
 find "$SRC" -name '*.jsonl' -exec touch -d '3 hours ago' {} +
 printf '%s\n' "$DEST" > "$ST/transcripts-push.dest"
+
+# ----- the lead's ruling of 2026-11-27 20:15 (row 1de527eb): the share's NFS wrote at 1.1 MB/s with most writes timing
+#   out, and four real passes on serialhub ended at the unit's limit or in rsync's I/O timeout. Until the share is
+#   fixed the push goes over ssh to the host that exports it. Three things, each red first:
+#   k1. --set-dest moves the destination and KEEPS the cut (a second --init is refused, by design);
+#   k2. over ssh a stopped copy is kept on the destination HOST, outside the destination, and reused;
+#   k3. a pass budget: once it is spent no further file is STARTED; nothing that runs is killed.
+find "$SRC" -name '*.jsonl' -exec touch -d '3 hours ago' {} +
+cutid=$(stat -c '%i %Y' "$ST/transcripts-push.cut")
+bash "$TP" --set-dest "far:$R/remote/t" >/dev/null 2>&1; rc=$?
+[ "$rc" = 0 ] && [ "$(cat "$ST/transcripts-push.dest")" = "far:$R/remote/t" ] && [ "$(stat -c '%i %Y' "$ST/transcripts-push.cut")" = "$cutid" ] && ok "--set-dest records the new destination and leaves the cut as it is (same file, same time)" || bad "--set-dest rc=$rc dest=$(cat "$ST/transcripts-push.dest") cut $cutid -> $(stat -c '%i %Y' "$ST/transcripts-push.cut")"
+for badd in "relative/x" "far:rel" "/a/../b" "--x"; do bash "$TP" --set-dest "$badd" >/dev/null 2>&1; [ $? = 22 ] && [ "$(cat "$ST/transcripts-push.dest")" = "far:$R/remote/t" ] && ok "--set-dest refuses '$badd' and changes nothing" || bad "--set-dest '$badd'"; done
+mkdir -p "$R/st2"; XDG_STATE_HOME="$R/st2" bash "$TP" --set-dest "far:/data/t" >/dev/null 2>&1; [ $? = 22 ] && [ ! -e "$R/st2/dreamteam/transcripts-push.dest" ] && ok "--set-dest before --init is refused (there is no cut to keep)" || bad "--set-dest uninitialised"
+# k2. a stopped copy over ssh (the fake ssh runs the remote side through a real shell)
+head -c 4000000 /dev/urandom | base64 > "$H/rslow.jsonl"; RSZ=$(stat -c %s "$H/rslow.jsonl")
+out=$(PATH="$R/cut:$PATH" TRANSCRIPTS_SSH="$R/bin/shssh" TRANSCRIPTS_MIN_FREE_GB=0 TRANSCRIPTS_MAX_MB=50 bash "$TP")
+RPART=$(find "$R/remote/.transcripts-push-partial" -type f -name rslow.jsonl 2>/dev/null | head -n 1)
+[ -n "$RPART" ] && [ -s "$RPART" ] && [ -z "$(find "$R/remote/t" -name '*rslow.jsonl*' 2>/dev/null)" ] && ok "over ssh a stopped copy is kept on the destination host, beside the destination and not under it" || bad "ssh stopped copy: partial '${RPART:-none}', under dest: $(find "$R/remote/t" -name '*rslow.jsonl*' | tr '\n' ' ')"
+case "$out" in "CHECK transcripts-push fail · FAILED: rsync exit 20 to far:$R/remote/t: 0 transfers finished before it, not counted as copied (1 listed)"*) ok "…and the line says FAILED with the exit code" ;; *) bad "ssh stopped copy line: '$out'" ;; esac
+flock -w 20 "$ST/transcripts-push.lock" true 2>/dev/null; rpsz=$(stat -c %s "$RPART" 2>/dev/null || echo 0)
+out=$(PATH="$R/stats:$PATH" TRANSCRIPTS_SSH="$R/bin/shssh" TRANSCRIPTS_MIN_FREE_GB=0 TRANSCRIPTS_MAX_MB=50 bash "$TP")
+lit=$(sed -n 's/^Literal data: \([0-9,]*\) bytes.*/\1/p' "$TMP/rsync.stats" | tr -d ,); mat=$(sed -n 's/^Matched data: \([0-9,]*\) bytes.*/\1/p' "$TMP/rsync.stats" | tr -d ,)
+[ "$rpsz" -gt 0 ] && [ -n "$lit" ] && [ "$lit" -lt "$RSZ" ] && [ "${mat:-0}" -ge "$rpsz" ] && cmp -s "$H/rslow.jsonl" "$R/remote/t/projH/rslow.jsonl" && [ ! -e "$RPART" ] && ok "…and the retry over ssh reuses it: literal $lit of $RSZ bytes, $mat matched; the transcript whole, the partial gone" || bad "ssh retry: literal=${lit:-?} matched=${mat:-?} size=$RSZ partial=$rpsz '$out'"
+rm -f "$H/rslow.jsonl"; bash "$TP" --set-dest "$DEST" >/dev/null 2>&1
+# k3. the pass budget
+mkdir -p "$R/slowr" "$R/count"; rm -f "$TMP/rsync.calls"
+printf '#!/bin/sh\necho x >> "%s/rsync.calls"\nsleep 2\nexec "%s" "$@"\n' "$TMP" "$REALRSYNC" > "$R/slowr/rsync"; chmod +x "$R/slowr/rsync"
+printf '#!/bin/sh\necho x >> "%s/rsync.calls"\nexec "%s" "$@"\n' "$TMP" "$REALRSYNC" > "$R/count/rsync"; chmod +x "$R/count/rsync"
+for f in a1 a2 a3; do echo "$f" > "$H/$f.jsonl"; done
+out=$(PATH="$R/slowr:$PATH" TRANSCRIPTS_PASS_BUDGET_S=1 TRANSCRIPTS_BATCH_MB=0 bash "$TP"); there=$(ls "$HD"/a[123].jsonl 2>/dev/null | wc -l)
+[ "$(grep -c x "$TMP/rsync.calls")" = 1 ] && [ "$there" = 1 ] && case "$out" in "CHECK transcripts-push warn · 3 transcripts changed since the cut, 1 copied this pass to $DEST; 2 not started, left for the next pass (the pass budget of 1 s was spent) · "*) true ;; *) false ;; esac \
+  && ok "the pass budget: once it is spent no further file is started (one rsync ran, to its end; 2 left and said so: warn)" || bad "pass budget: calls=$(grep -c x "$TMP/rsync.calls" 2>/dev/null) at dest=$there '$out'"
+rm -f "$TMP/rsync.calls"; out=$(PATH="$R/count:$PATH" bash "$TP")
+[ "$(grep -c x "$TMP/rsync.calls")" = 1 ] && [ "$(ls "$HD"/a[123].jsonl | wc -l)" = 3 ] && case "$out" in "CHECK transcripts-push ok · 3 transcripts changed since the cut, all at $DEST (2 copied this pass) · "*) true ;; *) false ;; esac && ok "the next pass takes the rest, small files in ONE rsync (one connection)" || bad "after the budget: calls=$(grep -c x "$TMP/rsync.calls") '$out'"
+for badv in 0 abc -5; do out=$(TRANSCRIPTS_PASS_BUDGET_S=$badv bash "$TP"); case "$out" in "CHECK transcripts-push fail · TRANSCRIPTS_PASS_BUDGET_S "*) ok "TRANSCRIPTS_PASS_BUDGET_S=$badv is refused" ;; *) bad "budget $badv: '$out'" ;; esac; done
+out=$(TRANSCRIPTS_BATCH_MB=abc bash "$TP"); case "$out" in "CHECK transcripts-push fail · TRANSCRIPTS_BATCH_MB "*) ok "TRANSCRIPTS_BATCH_MB=abc is refused" ;; *) bad "batch abc: '$out'" ;; esac
+t=$(sed -n 's/^TimeoutStartSec=\([0-9]*\)min$/\1/p' "$ROOT/systemd/dreamteam-transcripts-push.service")
+[ -n "$t" ] && [ "$t" -ge 30 ] && ok "the unit's limit ($t min) is far above the pass budget: the unit is the last resort, not what ends a normal pass" || bad "unit limit '${t:-?}' min"
+find "$SRC" -name '*.jsonl' -exec touch -d '3 hours ago' {} +
 
 # ================= units =======================================================================================
 if command -v systemd-analyze >/dev/null 2>&1; then

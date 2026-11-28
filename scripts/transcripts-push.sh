@@ -46,7 +46,13 @@
 #      rsync exited 0; any other exit reads "FAILED: rsync exit R …, N transfers finished before it, not counted
 #      as copied";
 #   5. a transcript changed within the last TRANSCRIPTS_QUIET_S (120 s) is still being written: it is left for
-#      the next pass and named in the line, which stays ok (some session is always writing).
+#      the next pass and named in the line, which stays ok (some session is always writing);
+#   6. a pass budget (TRANSCRIPTS_PASS_BUDGET_S, 360): files go smallest first in batches; once the budget is
+#      spent no further batch is STARTED and the rest waits for the next pass (warn). Nothing in flight is ended
+#      by this script. The unit's own limit (45 min) is the last resort, not what ends a normal pass.
+#   DESTINATION OVER SSH (2026-11-27): when the share's NFS is slow or stalls (1.1 MB/s, most writes timing out,
+#   an rsync blocked in a flush that could not even keep its partial), point the host at the machine that
+#   exports the share: `--set-dest host:/path/of/the/export/...` keeps the cut. Readers keep using the mount.
 #   Every command run AT the destination (the sweep's find, df) is bounded by TRANSCRIPTS_DEST_TIMEOUT (60 s), and
 #   over ssh each argument is quoted for the remote shell.
 #   Why --partial-dir and not --append-verify or --inplace: --append-verify sends only the new tail of an
@@ -54,7 +60,7 @@
 #   --inplace leaves a half-written transcript under its real name when a pass stops, and rsync refuses it
 #   beside --partial-dir. A partial is at most one per transcript and at most TRANSCRIPTS_MAX_MB.
 # Environment: TRANSCRIPTS_SRC (default ~/.claude/projects), TRANSCRIPTS_MOUNT, TRANSCRIPTS_MAX_MB (300),
-#   TRANSCRIPTS_MIN_FREE_GB (15), TRANSCRIPTS_DEST_TIMEOUT (60), TRANSCRIPTS_QUIET_S (120). Test seams: TRANSCRIPTS_MOUNTPOINT_CMD,
+#   TRANSCRIPTS_MIN_FREE_GB (15), TRANSCRIPTS_DEST_TIMEOUT (60), TRANSCRIPTS_QUIET_S (120), TRANSCRIPTS_PASS_BUDGET_S (360), TRANSCRIPTS_BATCH_MB (32), TRANSCRIPTS_PARTIAL_DIR (a remote destination only). Test seams: TRANSCRIPTS_MOUNTPOINT_CMD,
 #   TRANSCRIPTS_SSH. State: ${XDG_STATE_HOME:-~/.local/state}/dreamteam/transcripts-push.{dest,cut,lock}.
 # Exit: 0 line published (any status) / init done · 1 line not published · 22 bad arguments · 75 lock held.
 set -uo pipefail
@@ -117,7 +123,20 @@ if [ "${1:-}" = --init ]; then
   echo "transcripts-push: destination $2; cut set at $(date -r "$CUT" '+%F %T %Z'): only transcripts changed after it are sent"
   exit 0
 fi
-[ "$#" -eq 0 ] || { echo "usage: transcripts-push.sh [--init <dest>]" >&2; exit 22; }
+# --set-dest <dest>: move the destination and KEEP the cut (a second --init is refused so that the cut is never
+# moved by accident; this is the deliberate way to point an initialised host somewhere else, e.g. from the share's
+# mount to host:/path on the machine that exports it). Under the run lock; the new file replaces the old in one rename.
+if [ "${1:-}" = --set-dest ]; then
+  envcheck || { echo "transcripts-push: TRANSCRIPTS_SRC must be an absolute plain path and TRANSCRIPTS_SSH 'ssh' or an absolute plain path" >&2; exit 22; }
+  [ "$#" -eq 2 ] && valid_dest "$2" || { echo "usage: transcripts-push.sh --set-dest </abs/dir on the share | host:/abs/dir>" >&2; exit 22; }
+  [ -f "$CUT" ] && [ ! -L "$CUT" ] && [ -f "$DESTF" ] && [ ! -L "$DESTF" ] || { echo "transcripts-push: not initialised (run --init <dest> once); --set-dest only moves an existing destination" >&2; exit 22; }
+  lock || { echo "transcripts-push: cannot take the lock in $STATE" >&2; exit 1; }
+  nd="$(mktemp "$STATE/.transcripts-push.dest.XXXXXX")" && printf '%s\n' "$2" > "$nd" && mv -fT -- "$nd" "$DESTF" \
+    || { rm -f -- "${nd:-}"; echo "transcripts-push: could not write $DESTF; nothing changed" >&2; exit 1; }
+  echo "transcripts-push: destination now $2; the cut stays at $(date -r "$CUT" '+%F %T %Z')"
+  exit 0
+fi
+[ "$#" -eq 0 ] || { echo "usage: transcripts-push.sh [--init <dest> | --set-dest <dest>]" >&2; exit 22; }
 
 envcheck || { check_line "$CHECK" fail "TRANSCRIPTS_SRC or TRANSCRIPTS_SSH is not an absolute plain path" "$OWNER"; exit $?; }
 lock || { check_line "$CHECK" fail "cannot take the lock (state dir or lock file not usable)" "$OWNER"; exit $?; }
@@ -152,6 +171,9 @@ MAXMB="${TRANSCRIPTS_MAX_MB:-300}"; MINGB="${TRANSCRIPTS_MIN_FREE_GB:-15}"
 [[ "$MINGB" =~ ^[0-9]{1,6}$ ]] || { check_line "$CHECK" fail "TRANSCRIPTS_MIN_FREE_GB must be a whole number of GB (got '$MINGB')" "$OWNER"; exit $?; }
 QUIET="${TRANSCRIPTS_QUIET_S:-120}"
 [[ "$QUIET" =~ ^[0-9]{1,5}$ ]] && [ "$QUIET" -le 86400 ] || { check_line "$CHECK" fail "TRANSCRIPTS_QUIET_S must be a whole number of seconds, 0-86400 (got '$QUIET')" "$OWNER"; exit $?; }
+BUDGET="${TRANSCRIPTS_PASS_BUDGET_S:-360}"; BATCHMB="${TRANSCRIPTS_BATCH_MB:-32}"
+[[ "$BUDGET" =~ ^[0-9]{1,5}$ ]] && [ "$BUDGET" -ge 1 ] || { check_line "$CHECK" fail "TRANSCRIPTS_PASS_BUDGET_S must be a whole number of seconds, 1-99999 (got '$BUDGET')" "$OWNER"; exit $?; }
+[[ "$BATCHMB" =~ ^[0-9]{1,5}$ ]] || { check_line "$CHECK" fail "TRANSCRIPTS_BATCH_MB must be a whole number of MB (got '$BATCHMB')" "$OWNER"; exit $?; }
 DTO="${TRANSCRIPTS_DEST_TIMEOUT:-60}"
 [[ "$DTO" =~ ^[0-9]{1,4}$ ]] && [ "$DTO" -ge 1 ] || { check_line "$CHECK" fail "TRANSCRIPTS_DEST_TIMEOUT must be a whole number of seconds, 1-9999 (got '$DTO')" "$OWNER"; exit $?; }
 # Where to run a command against the destination: here, or over ssh on the destination's host. Two rules:
@@ -175,7 +197,13 @@ DPATH="$DEST"; case "$DEST" in /*) ;; *) DPATH="${DEST#*:}" ;; esac
 # file before it publishes it).
 case "$DEST" in
   /*) PDIR="$MNT/.transcripts-push-partial/$(printf '%s' "$rd" | sha256sum | cut -c1-16)" ;;
-  *)  PDIR="${DPATH%/*}/.transcripts-push-partial/${DPATH##*/}" ;;
+  *)  PDIR="${DPATH%/*}/.transcripts-push-partial/${DPATH##*/}"
+      # the host that exports a share: beside the destination is still inside what a walk of the share's whole
+      # transcripts directory would see, so the partials can be put elsewhere on that host
+      if [ -n "${TRANSCRIPTS_PARTIAL_DIR:-}" ]; then
+        valid_dest "$TRANSCRIPTS_PARTIAL_DIR" && [ "${TRANSCRIPTS_PARTIAL_DIR#/}" != "$TRANSCRIPTS_PARTIAL_DIR" ] || { check_line "$CHECK" fail "TRANSCRIPTS_PARTIAL_DIR is not an absolute plain path" "$OWNER"; exit $?; }
+        PDIR="$TRANSCRIPTS_PARTIAL_DIR"
+      fi ;;
 esac
 case "$PDIR/" in "$DPATH"/*) check_line "$CHECK" fail "the partial directory would be inside the destination" "$OWNER"; exit $? ;; esac
 at_dest mkdir -p -- "$PDIR" >/dev/null 2>&1 || { check_line "$CHECK" fail "cannot create the partial directory for $DEST" "$OWNER"; exit $?; }
@@ -211,7 +239,7 @@ trap 'rm -f -- "$list" "$big" "$rout" "$act"' EXIT
 #   transcript record by record, so a copy taken mid-session can end inside a record: the share never gets one.
 # 3. over the limit: listed apart (size and path, NUL-ended: a path may hold a space), never handed to rsync
 KMAX=$(( MAXMB * 1024 )); QT=(); [ "$QUIET" -eq 0 ] || QT=(! -newermt "$QUIET seconds ago")
-if ! ( cd "$SRC" && find . -type f -name '*.jsonl' -newer "$CUT" "${QT[@]}" ! -size +"${KMAX}"k -print0 ) > "$list" 2>/dev/null \
+if ! ( cd "$SRC" && find . -type f -name '*.jsonl' -newer "$CUT" "${QT[@]}" ! -size +"${KMAX}"k -printf '%s %P\0' ) > "$list" 2>/dev/null \
    || ! ( cd "$SRC" && find . -type f -name '*.jsonl' -newer "$CUT" "${QT[@]}" -size +"${KMAX}"k -printf '%s %P\0' ) > "$big" 2>/dev/null \
    || ! ( cd "$SRC" && { [ "$QUIET" -eq 0 ] || find . -type f -name '*.jsonl' -newer "$CUT" -newermt "$QUIET seconds ago" -printf '%P\0'; } ) > "$act" 2>/dev/null; then
   check_line "$CHECK" fail "the walk of the source was incomplete" "$OWNER"; exit $?
@@ -234,27 +262,45 @@ n=$(tr -cd '\0' < "$list" | wc -c) && [[ "$n" =~ ^[0-9]+$ ]] || { check_line "$C
 #    GREW PAST THE LIMIT DURING THE PASS: found by this script's own second walk (find, NUL-ended names), never
 #    read from rsync's text. Whether rsync held such a file back or had copied an earlier, smaller state of it,
 #    what is at the destination is not the whole file: it is reported "not copied in full", never as copied.
-rc=0; sent=0
-if [ "$n" -gt 0 ]; then
-  rsync -a --no-owner --no-group --partial-dir="$PDIR" --no-whole-file --max-size="${MAXMB}M" --timeout=120 --out-format='%i %b %n' --from0 --files-from="$list" -e "$SSH -o BatchMode=yes -o ConnectTimeout=15" -- "$SRC/" "$DEST/" > "$rout" 2>/dev/null; rc=$?
-  sent=$(grep -cE '^[<>]f[^ ]{9} [0-9]+ ' "$rout")
+#    THE PASS BUDGET (lead's ruling of 2026-11-27 20:15): the files go smallest first, in batches of about
+#    TRANSCRIPTS_BATCH_MB (32; one rsync, one connection each). Before a batch is STARTED the time this pass has run
+#    is compared with TRANSCRIPTS_PASS_BUDGET_S (360): once it is spent no further batch is started, the rest is
+#    counted and left for the next pass (warn). Nothing that is running is ever ended by this script: a file in
+#    flight ends by finishing or by rsync's own I/O timeout. The first batch always starts.
+rc=0; sent=0; left=0; vanished=0; batch="$act"; declare -A given=()
+mapfile -d '' -t RECS < <(sort -z -n "$list")
+i=0; started=0
+while [ "$i" -lt "${#RECS[@]}" ]; do
+  if [ "$started" -gt 0 ] && [ "$SECONDS" -ge "$BUDGET" ]; then left=$(( ${#RECS[@]} - i )); break; fi
+  : > "$batch"; bsz=0
+  while [ "$i" -lt "${#RECS[@]}" ]; do
+    rec=${RECS[$i]}; i=$((i + 1)); printf '%s\0' "${rec#* }" >> "$batch"; given["${rec#* }"]=1; bsz=$(( bsz + ${rec%% *} ))
+    [ "$bsz" -lt $(( BATCHMB * 1048576 )) ] || break
+  done
+  rsync -a --no-owner --no-group --partial-dir="$PDIR" --no-whole-file --max-size="${MAXMB}M" --timeout=120 --out-format='%i %b %n' --from0 --files-from="$batch" -e "$SSH -o BatchMode=yes -o ConnectTimeout=15" -- "$SRC/" "$DEST/" > "$rout" 2>/dev/null; brc=$?
+  started=$((started + 1)); sent=$(( sent + $(grep -cE '^[<>]f[^ ]{9} [0-9]+ ' "$rout") ))
+  case "$brc" in 0) ;; 24) vanished=1 ;; *) rc=$brc; break ;; esac
+done
+[ "$rc" -ne 0 ] || [ "$vanished" -eq 0 ] || rc=24
+if [ "$started" -gt 0 ]; then
   declare -A seen=()
   while IFS= read -r -d '' rec; do seen["${rec#* }"]=1; done < "$big"
   if ( cd "$SRC" && find . -type f -name '*.jsonl' -newer "$CUT" -size +"${KMAX}"k -printf '%s %P\0' ) > "$rout" 2>/dev/null; then
     while IFS= read -r -d '' rec; do
-      [ -z "${seen["${rec#* }"]:-}" ] && grep -qzxF -- "./${rec#* }" "$list" || continue      # only what THIS pass was given
+      [ -z "${seen["${rec#* }"]:-}" ] && [ -n "${given["${rec#* }"]:-}" ] || continue      # only what THIS pass handed to rsync
       nlate=$((nlate + 1)); LNAMES="$LNAMES${LNAMES:+, }$(enc "${rec#* }") ($(mb "${rec%% *}") MB)"
     done < <(sort -z -rn "$rout")
   else
     SWBAD="$SWBAD; the second walk for transcripts that grew past the limit was incomplete"
   fi
 fi
+LEFT=""; [ "$left" -eq 0 ] || LEFT="; $left not started, left for the next pass (the pass budget of $BUDGET s was spent)"
 BIG=""; [ "$nover" -eq 0 ] || BIG="; $nover over $MAXMB MB not copied (token item): $NAMES"
 [ "$nlate" -eq 0 ] || BIG="$BIG; $nlate grew past $MAXMB MB during the pass, not copied in full: $LNAMES"
 ACT=""; [ "$nact" -eq 0 ] || ACT="; $nact still being written, left for the next pass: $ANAMES"
 case "$rc" in
-  0)  if [ "$nover" -gt 0 ] || [ "$nlate" -gt 0 ] || [ -n "$SWBAD" ]; then check_line "$CHECK" warn "$n transcripts changed since the cut, $sent copied this pass to $DEST$BIG$ACT$SW$SWBAD" "$OWNER"
+  0)  if [ "$nover" -gt 0 ] || [ "$nlate" -gt 0 ] || [ "$left" -gt 0 ] || [ -n "$SWBAD" ]; then check_line "$CHECK" warn "$n transcripts changed since the cut, $sent copied this pass to $DEST$LEFT$BIG$ACT$SW$SWBAD" "$OWNER"
       else check_line "$CHECK" ok "$n transcripts changed since the cut, all at $DEST ($sent copied this pass)$ACT$SW" "$OWNER"; fi ;;
-  24) check_line "$CHECK" warn "$n listed for $DEST, some vanished mid-pass (next pass retries)$BIG$ACT$SW$SWBAD" "$OWNER" ;;   # a session file rotated away while it was read
+  24) check_line "$CHECK" warn "$n listed for $DEST, some vanished mid-pass (next pass retries)$LEFT$BIG$ACT$SW$SWBAD" "$OWNER" ;;   # a session file rotated away while it was read
   *)  check_line "$CHECK" fail "FAILED: rsync exit $rc to $DEST: $sent transfers finished before it, not counted as copied ($n listed)$BIG$ACT$SW$SWBAD" "$OWNER" ;;
 esac
