@@ -11,6 +11,9 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HOOK="$ROOT/scripts/flow-callout.sh"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
+# NOT in this list, because no test can reach it: the start-time check immediately before each kill (sig). It
+# guards the instant between the reading of the table and the signal; a table that changes inside that instant
+# cannot be staged. The reading itself (live) drops a reused pid, and that IS pinned by the stale-id case.
 # name|sed expression (applied once, must change the copy)
 MUTATIONS=(
   'detail-read-as-silence|s/then "unreadable"/then "silent"/'
@@ -18,7 +21,21 @@ MUTATIONS=(
   'list-unvalidated|s/jq -se '"'"'length == 1 and (\.\[0\] | type == "object"/jq -se '"'"'true or length == 1 and (.[0] | type == "object"/'
   'list-stream-accepted|s/jq -se '"'"'length == 1 and (\.\[0\] | type == "object"/jq -se '"'"'length >= 1 and (.[0] | type == "object"/'
   'detail-stream-accepted|s/if length != 1 or (\.\[0\] | type) != "object"/if length < 1 or (.[0] | type) != "object"/'
-  'tmux-no-kill-escalation|s/timeout -k 1 "/timeout "/'
+  'tmux-read-unbounded|s/if IFS= read -r -t "\$(rem)" -u "\$tfd" tname; then/if IFS= read -r -u "$tfd" tname; then/'
+  'tmux-no-cleanup|s/^      reap_tree "\$tpid" "\$tpst" "\$tgot" || true$/      :/'
+  'tmux-no-kill-after-grace|s/^    sig KILL$/    :/'
+  'tmux-cleanup-unreported|s/^  note "tmux fallback overran its bound: \$n process(es) of its pid tree (root \$root) signalled (\$sent); none left"$/  :/'
+  'tmux-gone-unreported|s/if \[ -z "\$CUR" \]; then note "tmux fallback: nothing left of its process tree (pid \$root): nothing signalled"; return 0; fi/if [ -z "$CUR" ]; then return 0; fi/'
+  'tmux-clean-exit-is-signalled|s/nothing signalled"; return 0; fi$/nothing signalled"; fi/'
+  'reap-failure-exits-0|s/if \[ "\$rc" -eq 0 \] \&\& \[ "\$REAPFAIL" = 1 \]; then/if false; then/'
+  'still-alive-is-no-failure|s/if \[ -n "\$CUR" \]; then REAPFAIL=1; note "tmux fallback overran/if [ -n "$CUR" ]; then note "tmux fallback overran/'
+  'unread-table-is-no-failure|s/unread() { REAPFAIL=1; note/unread() { note/'
+  'unread-table-reads-as-empty|s/^  \[ -n "\${PS\[\$\$\]:-}" \]$/  true/'
+  'kill-set-by-printed-session-id|s/^      reap_tree "\$tpid" "\$tpst" "\$tgot" || true$/      reap_tree "${tsid:-$tpid}" "$(start_of "${tsid:-$tpid}")" "$tgot" || true/'
+  'descendants-not-in-the-tree|s/if \[ -z "\${K\[\$q\]:-}" \] \&\& \[ -n "\${K\[\${PP\[\$q\]}\]:-}" \]; then/if false; then/'
+  'grace-has-a-floor|s/\[ "\$g" -gt 1000 \] \&\& g=1000; \[ "\$g" -lt 0 \] \&\& g=0/[ "$g" -gt 1000 ] \&\& g=1000; [ "$g" -lt 100 ] \&\& g=100/'
+  'wait-ignores-a-spent-budget|s/^    local dl r l; l=\$(left); r=\$1; \[ "\$l" -lt "\$r" \] \&\& r=\$l; dl=/    local dl r l; r=$1; dl=/;s/^      r=\$(( dl - \$(now_ms) )); l=\$(left); \[ "\$l" -lt "\$r" \] \&\& r=\$l$/      r=$(( dl - $(now_ms) ))/'
+  'tmux-partial-line-is-a-name|s/if IFS= read -r -t "\$(rem)" -u "\$tfd" tname; then add "\$tname"; tgot=1; fi/IFS= read -r -t "$(rem)" -u "$tfd" tname; add "$tname"/'
   'row-cap-removed|s/(\$all\[:\$max\]\[\]/($all[:999999][]/'
   'row-cap-unlogged|s/rowcapped=\$(( TOTAL - MAX_ROWS ))/rowcapped=0/'
   'owner-filter-dropped|s/| map(select((\.lane | type) == "string" and/| map(select(true or (.lane | type) == "string" and/'

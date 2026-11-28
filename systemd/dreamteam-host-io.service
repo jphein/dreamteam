@@ -1,0 +1,8 @@
+[Unit]
+Description=dreamteam: CHECK <host>-io (a victim probe: can an interactive process still use this disk?)
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Projects/dreamteam
+ExecStart=/usr/bin/bash %h/Projects/dreamteam/scripts/host-io-check.sh
+# NORMAL priority on purpose, and never in lanes.slice: the probe stands in for the person at the prompt.
+TimeoutStartSec=2min

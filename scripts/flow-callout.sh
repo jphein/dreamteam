@@ -42,13 +42,94 @@
 # the key file. Never point DREAMTEAM_CONFIG, DREAMTEAM_FLOW_LOG or DREAMTEAM_ASK_KEY_FILE at a network mount.
 #
 # Seams (tests/test-flow-callout.sh): ASK_URL · ASK_KEY or DREAMTEAM_ASK_KEY_FILE · ASK_WHO · DREAMTEAM_AGENT_ID ·
-# DREAMTEAM_CONFIG · DREAMTEAM_FLOW_LOG · DREAMTEAM_FLOW_BUDGET · DREAMTEAM_FLOW_MAX_LOGS · curl and tmux from PATH.
+# DREAMTEAM_CONFIG · DREAMTEAM_FLOW_LOG · DREAMTEAM_FLOW_BUDGET · DREAMTEAM_FLOW_MAX_LOGS · DREAMTEAM_FLOW_PROC (the
+# process table the clean-up reads, /proc) · curl and tmux from PATH.
 set -uo pipefail
 T0=$(( $(date +%s%N) / 1000000 ))   # ms; the deadline clock starts before ANY external command (xreview #237 r2: the tmux fallback counts)
 ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 CFG="${DREAMTEAM_CONFIG:-$ROOT/config.json}"
 LOG="${DREAMTEAM_FLOW_LOG:-$HOME/.claude/state/dreamteam/flow-callout.log}"
 . "$ROOT/scripts/lib/agent-id.sh"
+
+# The process table, read by this shell itself (no pgrep, no ps: nothing external that can fail or be slow).
+PROCD="${DREAMTEAM_FLOW_PROC:-/proc}"
+declare -A PP=() PS=() K=()          # pid → parent pid · pid → start time (one reading) · the tree: pid → start time
+# start_of <pid> → its start time (field 22 of <proc>/<pid>/stat), or nothing for a process that is gone or a zombie
+# (a zombie holds nothing and cannot be signalled: it is not "left behind")
+start_of() { local st f; { IFS= read -r st < "$PROCD/$1/stat"; } 2>/dev/null || return 0; st=${st##*) }; read -r -a f <<< "$st"
+             [ "${f[0]:-Z}" = Z ] || printf '%s' "${f[19]:-}"; }
+now_ms() { echo $(( $(date +%s%N) / 1000000 )); }
+# snap: ONE reading of the table into PP and PS. It FAILS when the table cannot be read; the proof that it was
+# read is that this very shell is in it. A failed reading is never an empty one.
+snap() {
+  local d q st f; PP=(); PS=()
+  for d in "$PROCD"/[0-9]*; do
+    q=${d##*/}; { IFS= read -r st < "$d/stat"; } 2>/dev/null || continue
+    st=${st##*) }; read -r -a f <<< "$st"; [ "${f[0]:-Z}" = Z ] && continue
+    [[ "${f[1]:-}" =~ ^[0-9]+$ ]] && [ -n "${f[19]:-}" ] || continue
+    PP[$q]=${f[1]}; PS[$q]=${f[19]}
+  done
+  [ -n "${PS[$$]:-}" ]
+}
+# live: after a snap, bring the tree K up to date and leave its living members in CUR ("pid pid ...").
+#   - a member stays only while that pid still has the start time it was recorded with (a reused pid drops out);
+#   - a process whose PARENT is a living member joins, with its own start time. Nothing else ever joins: not a
+#     process of the same session, not one that merely shares an id with something the call printed.
+live() {
+  local q more=1
+  for q in "${!K[@]}"; do [ "${PS[$q]:-}" = "${K[$q]}" ] || unset "K[$q]"; done
+  while [ "$more" = 1 ]; do more=0
+    for q in "${!PP[@]}"; do
+      if [ -z "${K[$q]:-}" ] && [ -n "${K[${PP[$q]}]:-}" ]; then K[$q]=${PS[$q]}; more=1; fi
+    done
+  done
+  CUR="${!K[*]}"
+}
+# A clean-up that FAILED (or could not be checked) makes the hook exit 1 instead of 0: a non-blocking hook error the
+# harness shows, with the reason in the log. A block (exit 2) stays a block.
+REAPFAIL=0
+trap 'rc=$?; if [ "$rc" -eq 0 ] && [ "$REAPFAIL" = 1 ]; then echo "flow-callout: the tmux fallback could not be cleaned up or checked (see $LOG)" >&2; exit 1; fi; exit "$rc"' EXIT
+# reap_tree <pid this hook started> <its start time> <1 when the answer arrived>
+#   THE KILL SET IS THAT PROCESS AND ITS DESCENDANTS, nothing else (lead's ruling on #292, comment 7227928426):
+#   the root is this hook's own child ($!), known without trusting anything the call printed, and members join
+#   only through a living parent that is already a member (live). Immediately before each signal the pid's start
+#   time is read again and must be the recorded one.
+#   EXACTLY ONE logged line says the outcome on every path. TERM to each member; a grace of min(1 s, what is left
+#   of the budget), and every wait stops when the budget is spent; KILL to what remains; a confirmation under the
+#   same rule. Still alive after that, or a process table that could not be read: REAPFAIL (exit 1).
+#   Known limit: a descendant whose parent had already exited before the first reading is not in the tree and is
+#   neither signalled nor seen.
+reap_tree() {
+  local root=$1 rst=$2 got=$3 n g sent="TERM" q
+  K=(); [ -z "$rst" ] || K[$root]=$rst
+  unread() { REAPFAIL=1; note "tmux fallback: the process table ($PROCD) could not be read: what the call left behind (pid $root) was NOT CHECKED"; }
+  sig() { for q in $CUR; do [ "$(start_of "$q")" = "${K[$q]}" ] && kill "-$1" "$q" 2>/dev/null; done; true; }
+  # wait_gone <cap ms>: read the table until the tree is empty, the cap has passed or the BUDGET IS SPENT (whichever
+  # comes first); returns 1 when a reading failed. The last state of the tree is in CUR.
+  wait_gone() {
+    local dl r l; l=$(left); r=$1; [ "$l" -lt "$r" ] && r=$l; dl=$(( $(now_ms) + r ))
+    while :; do
+      snap || return 1
+      live; [ -n "$CUR" ] || return 0
+      r=$(( dl - $(now_ms) )); l=$(left); [ "$l" -lt "$r" ] && r=$l
+      [ "$r" -gt 0 ] || return 0
+      [ "$r" -gt 30 ] && r=30; sleep "$(secs "$r")"
+    done
+  }
+  if [ "$got" = 1 ]; then wait_gone 150; else wait_gone 0; fi || { unread; return 1; }      # it answered: a client that is just exiting gets a moment
+  if [ -z "$CUR" ]; then note "tmux fallback: nothing left of its process tree (pid $root): nothing signalled"; return 0; fi
+  n=$(set -- $CUR; echo $#)
+  sig TERM
+  g=$(left); [ "$g" -gt 1000 ] && g=1000; [ "$g" -lt 0 ] && g=0
+  wait_gone "$g" || { unread; return 1; }
+  if [ -n "$CUR" ]; then
+    sent="TERM, then KILL after ${g} ms"
+    sig KILL
+    wait_gone 200 || { unread; return 1; }
+  fi
+  if [ -n "$CUR" ]; then REAPFAIL=1; note "tmux fallback overran its bound: $n process(es) of its pid tree (root $root) signalled ($sent); STILL ALIVE: $CUR"; return 1; fi
+  note "tmux fallback overran its bound: $n process(es) of its pid tree (root $root) signalled ($sent); none left"
+}
 
 # note — the one logged line of a fail-open path; never fails the hook
 note() {
@@ -98,10 +179,34 @@ is_lead() { local l; for l in "${leads[@]}"; do [ "$1" = "$l" ] && return 0; don
 add "${ASK_WHO:-}"
 AID="$(dt_agent_id)"; add "${AID%%@*}"
 if [ "${#names[@]}" -eq 0 ] && [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
-  # ms, the same clock as the requests; the TERM grace (-k 1) is paid from the budget, so a tmux that ignores TERM
-  # is still killed inside it (xreview #237 r3)
+  # ms, the same clock as the requests; one second is kept back for the clean-up's grace, so a tmux that ignores
+  # TERM is still killed inside the budget (xreview #237 r3)
   tl=$(( BUDGET * 1000 - ($(( $(date +%s%N) / 1000000 )) - T0) - 1000 )); [ "$tl" -gt 3000 ] && tl=3000
-  [ "$tl" -ge 200 ] && add "$(timeout -k 1 "$(( tl / 1000 )).$(printf '%03d' $(( tl % 1000 )))" tmux display-message -p '#S' 2>/dev/null || true)"
+  # THE CALL IS BOUNDED AND CLEANED UP BY THIS HOOK, not by `timeout` (xreview #292 r1). What `timeout` kills
+  # differs by implementation: GNU signals the process group, uutils 0.10.0 (Ubuntu 26.04) only its direct child,
+  # and with $( ) a wrapper's forked child then held the pipe for its whole life (familiar 2026-11-22: 20 s under
+  # a 2 s budget). So:
+  #   • tmux runs in a SESSION OF ITS OWN (setsid) and prints that session's id first;
+  #   • both lines are read with `read -t` from a process substitution: read gives up at the bound by itself,
+  #     whoever still holds the pipe. A name that did not arrive whole is no identity;
+  #   • then reap_tree: the process this hook started ($!) and its descendants, and only those, get TERM, a
+  #     grace paid from the budget, then KILL; ONE logged line says the outcome on every path (nothing left
+  #     included). A clean-up that failed or could not be checked makes the hook exit 1 (REAPFAIL). The session
+  #     id the call prints is no longer what decides who is signalled: a printed id proves nothing.
+  if [ "$tl" -ge 200 ]; then
+    tdl=$(( $(date +%s%N) / 1000000 + tl )); tname=""; tsid=""; tgot=0; tpid=""; tpst=""
+    rem() { local r=$(( tdl - $(date +%s%N) / 1000000 )); [ "$r" -lt 10 ] && r=10; secs "$r"; }
+    if exec {tfd}< <(setsid bash -c 'echo "$$"; exec tmux display-message -p "#S"' 2>/dev/null); then
+      tpid=$!; tpst=$(start_of "$tpid")
+      if IFS= read -r -t "$(rem)" -u "$tfd" tsid && [[ "$tsid" =~ ^[0-9]{1,9}$ ]]; then
+        if IFS= read -r -t "$(rem)" -u "$tfd" tname; then add "$tname"; tgot=1; fi
+      else tsid=""; fi
+      exec {tfd}<&-
+      [ -n "$tpst" ] || tpst=$(start_of "$tpid")
+      reap_tree "$tpid" "$tpst" "$tgot" || true
+    else note "tmux fallback: the call could not be started: nothing to clean up, no identity from it"
+    fi
+  fi
 fi
 [ "${#names[@]}" -gt 0 ] || exit 0
 
@@ -126,7 +231,22 @@ if [ -z "$KEY" ]; then
   exit 0
 fi
 
-URL="${ASK_URL:-http://127.0.0.1:7810}"; URL="${URL%/}"
+# The plan's address (its host move, 2026-11-27, plan-62 row d18b3d4a: nothing answers on familiar's 127.0.0.1:7810
+# since): ASK_URL, else the one https line in ~/.config/plan-realm-watch/plan-url that the move writes (its rollback
+# removes it; the plan's own ask/flow CLIs read the same file), else loopback. Anything but https://host[:port] in the
+# file is ignored, so the key only ever goes to loopback or that one origin (curl runs without -L: no redirects).
+plan_url_file() {
+  local f="${PLAN_URL_FILE:-$HOME/.config/plan-realm-watch/plan-url}" u port
+  [ -f "$f" ] || return 0
+  u="$(timeout -k 1 2 head -c 301 -- "$f" 2>/dev/null)" || return 0
+  [ "${#u}" -le 300 ] || return 0
+  u="${u#"${u%%[![:space:]]*}"}"; u="${u%"${u##*[![:space:]]}"}"
+  [[ "$u" =~ ^https://[A-Za-z0-9.-]+(:([0-9]{1,5}))?$ ]] || return 0
+  port="${BASH_REMATCH[2]}"
+  if [ -n "$port" ] && { [ "$((10#$port))" -lt 1 ] || [ "$((10#$port))" -gt 65535 ]; }; then return 0; fi
+  printf '%s' "$u"
+}
+URL="${ASK_URL:-$(plan_url_file)}"; URL="${URL:-http://127.0.0.1:7810}"; URL="${URL%/}"
 
 # ── (f) ONE budget for the whole stop (xreview #237 r1): every request's timeout is cut to what is left of it, and
 #        when it is spent the remaining rows are reported as unchecked, never silently skipped. Default 9 s inside the
