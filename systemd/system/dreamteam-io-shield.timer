@@ -1,0 +1,10 @@
+[Unit]
+Description=dreamteam: io-shield at boot and every 5 minutes (a recreated container has a new scope with the default weight)
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

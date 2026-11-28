@@ -1,0 +1,199 @@
+#!/usr/bin/env bash
+# dreamteam — io-shield-accept: run the root helper on THIS host under supervision, and prove what it did and what
+# it did not touch. It exits 0 only when every check below holds; an ACCEPT line is printed only then.
+#
+#   sudo dreamteam-io-shield-accept <uid> throwaway     FIRST, always: the gate for everything else
+#   sudo dreamteam-io-shield-accept <uid> apply         the first production enabling
+#   sudo dreamteam-io-shield-accept <uid> off           every rollback
+#
+# THROWAWAY (xreview #291 r1 finding 7: first use is a throwaway unit, enforced, not advised). Runs
+# `io-shield --throwaway apply` and then `--throwaway off` against /etc/dreamteam/io-shield-throwaway.conf, which
+# can name nothing but lead-throwaway-<name>.scope units (a person starts one first: a scope of sleeps). Both
+# runs must pass every check below; after the off, nothing of ours may be left. ONLY THEN is the acceptance flag
+# written: /var/lib/dreamteam/io-shield.accepted, root's, holding the sha256 of the helper that was run. The
+# helper's production `apply`, the installer's `--enable` and the timer's unit all refuse without that flag, and
+# a helper that has been changed since is a different sha256: it must be accepted again.
+#
+# THE ACCEPTANCE LIST, per host (lead ruling on #282, 2026-11-24). Each named unit runs as <uid> with a negative
+# OOM score that ITS OWN UNIT FILE gives it. The helper must never write to them:
+#
+#     familiar     palace-daemon.service        -500
+#                  qwen3-coder.service          -500
+#                  familiar-loadguard.service   -800
+#                  donkey-llm.service           -100
+#     serialhub    octoprint.service            -900     (the three an earlier version reset on 2026-11-23 23:21)
+#                  ustreamer.service            -900
+#                  ustreamer-builtin.service    -900
+#
+# The table below is that list. A host that is not in it is REFUSED (exit 2) unless $IO_SHIELD_MUST_STAY gives
+# its own list as "unit=score unit=score …" (honoured only when NOT root: as root the table is the list).
+#
+# WHAT IS CHECKED for each run of the helper, in this order; the first failure is exit 1 with a REJECT line:
+#   BEFORE  each named unit has at least one process of <uid> holding EXACTLY its listed score. An absent unit, or
+#           one at another score, is a REJECT before anything runs: there is no baseline to accept against.
+#   RUN     the helper, once; its exit status must be 0.
+#   AFTER   each named unit's processes: the SAME pid AND start time, the SAME cgroup, the SAME score. Every other
+#           negative score the helper had no record of: the same score, or it has exited.
+#   LEADS   apply: every `oomprotect` unit of <uid> in the config holds at least one process with the configured
+#           score AND a ledger record (pid and start time), inside the unit. Zero is a REJECT.
+#           off:   no ledger record may remain for a process still in its lead unit holding our score.
+#
+# AS ROOT THIS SCRIPT IS NOT STEERABLE: every IO_SHIELD_* variable is dropped, PATH is fixed, and the helper it
+# runs is the installed one, /usr/local/sbin/dreamteam-io-shield. The seams are for a caller that is not root (the
+# tests).
+# Exit: 0 ACCEPT · 1 REJECT · 2 refused (unknown host, the helper missing or failing) · 22 bad argument.
+set -uo pipefail
+[ "$#" -eq 2 ] && [[ "$1" =~ ^[0-9]{1,9}$ ]] && { [ "$2" = apply ] || [ "$2" = off ] || [ "$2" = throwaway ]; } || { echo "usage: io-shield-accept <uid> throwaway|apply|off" >&2; exit 22; }
+UIDN=$1; VERB=$2
+if [ "$(id -u)" -eq 0 ]; then
+  for v in $(compgen -v | grep '^IO_SHIELD_' || true); do unset "$v"; done
+  PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH
+fi
+BIN="${IO_SHIELD_BIN:-/usr/local/sbin/dreamteam-io-shield}"
+PROCROOT="${IO_SHIELD_PROC:-/proc}"
+ACCEPTED="${IO_SHIELD_ACCEPTED:-/var/lib/dreamteam/io-shield.accepted}"
+SUF=""; HARGS=()
+if [ "$VERB" = throwaway ]; then SUF="-throwaway"; HARGS=(--throwaway); CONF="${IO_SHIELD_THROWAWAY_CONF:-/etc/dreamteam/io-shield-throwaway.conf}"
+else CONF="${IO_SHIELD_CONF:-/etc/dreamteam/io-shield.conf}"; fi
+LEDGER="${IO_SHIELD_LEDGER:-${IO_SHIELD_RUN_DIR:-/run}/dreamteam-io-shield}$SUF"
+HOSTN="${IO_SHIELD_ACCEPT_HOST:-$(hostname -s 2>/dev/null || hostname)}"
+# THE LIST (the same as in the header; a test compares the two)
+case "$HOSTN" in
+  familiar)  MUST="palace-daemon.service=-500 qwen3-coder.service=-500 familiar-loadguard.service=-800 donkey-llm.service=-100" ;;
+  serialhub) MUST="octoprint.service=-900 ustreamer.service=-900 ustreamer-builtin.service=-900" ;;
+  *)         MUST="" ;;
+esac
+MUST="${IO_SHIELD_MUST_STAY:-$MUST}"
+[ -n "$MUST" ] || { echo "io-shield-accept: host '$HOSTN' has no acceptance list in this script and IO_SHIELD_MUST_STAY is not set: refused (nothing named, nothing to accept against)" >&2; exit 2; }
+for m in $MUST; do [[ "$m" =~ ^[A-Za-z0-9@_.:-]{1,120}=-[0-9]{1,4}$ ]] || { echo "io-shield-accept: '$m' is not unit=<negative score>" >&2; exit 22; }; done
+[ -f "$BIN" ] && [ -x "$BIN" ] || { echo "io-shield-accept: no helper at $BIN (install it first: io-shield-install)" >&2; exit 2; }
+[ -r "$CONF" ] || { echo "io-shield-accept: no readable config at $CONF" >&2; exit 2; }
+T=$(mktemp -d) || exit 2
+trap 'rm -rf "$T"' EXIT
+
+# snap <file>: "pid start score cgroup unit" for every process of the uid that holds a negative score and is NOT
+# one of the helper's own records (same pid and start time in the ledger).
+snap() {
+  python3 -I -c 'import os, sys
+procroot, ledger, uid = sys.argv[1:4]
+for pid in sorted((p for p in os.listdir(procroot) if p.isdigit()), key=int):
+    d = os.path.join(procroot, pid)
+    try:
+        if os.stat(d).st_uid != int(uid):
+            continue
+        score = open(d + "/oom_score_adj").read().strip()
+        if not score.startswith("-"):
+            continue
+        stat = open(d + "/stat").read()
+        start = stat[stat.rindex(")") + 2:].split()[19]
+        cg = open(d + "/cgroup").read().strip().split("\n")[-1].split("::", 1)[-1]
+        try:
+            rec = dict(kv.split("=", 1) for kv in open(os.path.join(ledger, pid)).read().split())
+            if rec.get("start") == start:
+                continue
+        except (OSError, ValueError):
+            pass
+        print(pid, start, score, cg or "/", cg.rstrip("/").split("/")[-1] or "/")
+    except (OSError, ValueError, IndexError):
+        continue' "$PROCROOT" "$LEDGER" "$UIDN" > "$1"
+}
+now_of() {  # now_of <pid> → "start score cgroup" of that pid now, or nothing
+  python3 -I -c 'import sys
+d = sys.argv[1] + "/" + sys.argv[2]
+try:
+    stat = open(d + "/stat").read()
+    print(stat[stat.rindex(")") + 2:].split()[19], open(d + "/oom_score_adj").read().strip(), open(d + "/cgroup").read().strip().split("\n")[-1].split("::", 1)[-1] or "/")
+except (OSError, ValueError, IndexError):
+    pass' "$PROCROOT" "$1"
+}
+reject() { echo "REJECT: $1"; echo "        Do not enable the timer. If a score changed, put it back from its unit's OOMScoreAdjust."; exit 1; }
+
+echo "== host $HOSTN, uid $UIDN, verb $VERB"
+SUMMARY=""
+# one_run <apply|off>: BEFORE, RUN, AFTER, LEADS for one run of the helper
+one_run() {
+  local hv=$1 pid start score cg unit s2 sc2 cg2 u want bad other=0 exited=0 leads=0 nunits=0 n hrc w1 luid lunit lscore _
+  snap "$T/before"
+  echo "== BEFORE ($hv): $(wc -l < "$T/before") process(es) of uid $UIDN hold a negative OOM score the helper has no record of"
+  : > "$T/named"
+  for m in $MUST; do
+    u=${m%%=*}; want=${m#*=}
+    awk -v u="$u" '$5 == u' "$T/before" > "$T/u"
+    [ -s "$T/u" ] || reject "$u is on this host's list and has no process of uid $UIDN with a negative score: ABSENT before the run, so there is no baseline to accept against"
+    bad=$(awk -v w="$want" '$3 != w {print $1 "=" $3}' "$T/u" | tr '\n' ' ')
+    [ -z "$bad" ] || reject "$u should hold $want before the run and holds: $bad"
+    while read -r pid start score cg unit; do echo "baseline   $unit pid $pid start $start $score $cg"; echo "$pid $start $score $cg $unit" >> "$T/named"; done < "$T/u"
+  done
+  echo "== RUN: $BIN ${HARGS[*]:+${HARGS[*]} }$hv"
+  "$BIN" "${HARGS[@]}" "$hv" > "$T/helper.out" 2> "$T/helper.err"; hrc=$?
+  sed 's/^/   /' "$T/helper.out"; sed 's/^/   stderr: /' "$T/helper.err"
+  [ "$hrc" -eq 0 ] || { echo "io-shield-accept: the helper exited $hrc" >&2; exit 2; }
+
+  echo "== AFTER ($hv)"
+  while read -r pid start score cg unit; do
+    read -r s2 sc2 cg2 <<< "$(now_of "$pid")"
+    if [ -z "${s2:-}" ] || [ "$s2" != "$start" ]; then reject "$unit pid $pid is GONE or REPLACED after the run (it was $score in $cg): a named service must be the same process, not a restarted one"; fi
+    [ "$sc2" = "$score" ] || reject "$unit pid $pid: score CHANGED $score → $sc2"
+    [ "$cg2" = "$cg" ] || reject "$unit pid $pid: cgroup CHANGED $cg → $cg2"
+    echo "untouched  $unit pid $pid $score (same process, same cgroup)"
+  done < "$T/named"
+  while read -r pid start score cg unit; do
+    grep -q "^$pid $start " "$T/named" && continue
+    read -r s2 sc2 cg2 <<< "$(now_of "$pid")"
+    if [ -z "${s2:-}" ] || [ "$s2" != "$start" ]; then exited=$((exited + 1)); echo "exited     $unit pid $pid $score (not a named unit)"; continue; fi
+    [ "$sc2" = "$score" ] || reject "$unit pid $pid (not a named unit, but a score the helper had no record of): CHANGED $score → $sc2"
+    other=$((other + 1))
+  done < "$T/before"
+  echo "also untouched: $other other pre-existing negative score(s); $exited exited meanwhile"
+
+  echo "== LEADS ($hv)"
+  while read -r w1 luid lunit lscore _; do
+    [ "$w1" = oomprotect ] && [ "$luid" = "$UIDN" ] || continue
+    nunits=$((nunits + 1))
+    n=$(python3 -I -c 'import os, sys
+procroot, ledger, uid, unit, score = sys.argv[1:6]
+want = "/user.slice/user-%s.slice/user@%s.service/app.slice/%s" % (uid, uid, unit)
+n = 0
+try: names = [x for x in os.listdir(ledger) if x.isdigit()]
+except OSError: names = []
+for pid in names:
+    try:
+        rec = dict(kv.split("=", 1) for kv in open(os.path.join(ledger, pid)).read().split())
+        d = os.path.join(procroot, pid)
+        stat = open(d + "/stat").read()
+        cg = open(d + "/cgroup").read().strip().split("\n")[-1].split("::", 1)[-1]
+        if (rec.get("start") == stat[stat.rindex(")") + 2:].split()[19] and rec.get("unit") == unit
+                and open(d + "/oom_score_adj").read().strip() == score and (cg == want or cg.startswith(want + "/"))):
+            n += 1
+    except (OSError, ValueError, IndexError):
+        continue
+print(n)' "$PROCROOT" "$LEDGER" "$UIDN" "$lunit" "$lscore")
+    echo "lead unit  $lunit: $n process(es) in it hold $lscore with a ledger record of ours"
+    if [ "$hv" = apply ]; then [ "$n" -ge 1 ] || reject "ZERO protected processes in $lunit after apply: the lead is not in that unit, or was not scored; nothing to accept"; fi
+    if [ "$hv" = off ]; then [ "$n" -eq 0 ] || reject "$n process(es) in $lunit still hold our score with a record after off: the undo did not happen"; fi
+    leads=$((leads + n))
+  done < "$CONF"
+  [ "$nunits" -ge 1 ] || reject "the config names no oomprotect unit for uid $UIDN: there is no lead to protect, nothing to accept"
+  SUMMARY="$(wc -l < "$T/named") named process(es) of $(echo $MUST | wc -w) listed unit(s) the same process, cgroup and score; $other other negative score(s) unchanged; $([ "$hv" = apply ] && echo "$leads lead process(es) scored and recorded" || echo "no recorded score left in a lead unit")"
+}
+
+if [ "$VERB" != throwaway ]; then
+  one_run "$VERB"
+  echo "ACCEPT ($VERB on $HOSTN): $SUMMARY"
+  exit 0
+fi
+# throwaway: a whole apply and a whole off, then nothing of ours left, then the flag
+rm -f -- "$ACCEPTED" 2>/dev/null || true          # a flag from an earlier acceptance does not survive a failed one
+one_run apply; A1=$SUMMARY
+one_run off
+if [ -d "$LEDGER" ]; then
+  rest=$(find "$LEDGER" -mindepth 1 ! -name left ! -name '.*.tmp' 2>/dev/null | head -5 | tr '\n' ' ')
+  [ -z "$rest" ] || reject "after the throwaway off the ledger still holds: $rest"
+fi
+sha=$(sha256sum "$BIN" | cut -d' ' -f1); [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || { echo "io-shield-accept: could not hash $BIN" >&2; exit 2; }
+mkdir -p "$(dirname "$ACCEPTED")" && [ ! -L "$ACCEPTED" ] && umask 077 \
+  && printf 'sha256=%s\nhost=%s\nuid=%s\nat=%s\n' "$sha" "$HOSTN" "$UIDN" "$(date -Iseconds)" > "$ACCEPTED.tmp.$$" && mv -f "$ACCEPTED.tmp.$$" "$ACCEPTED" \
+  || { echo "io-shield-accept: the run passed but the flag $ACCEPTED could not be written" >&2; exit 2; }
+echo "ACCEPT (throwaway on $HOSTN): apply: $A1; off: $SUMMARY"
+echo "        flag written: $ACCEPTED (sha256 ${sha:0:16}… of $BIN). Production apply and the timer are now allowed for THIS helper."
+exit 0

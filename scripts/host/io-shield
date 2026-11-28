@@ -1,0 +1,711 @@
+#!/usr/bin/python3 -I
+"""dreamteam — io-shield: make I/O weights real on this host, give the known hogs a low one, and give the fleet
+lead's own scope the kernel OOM score a user cannot give itself.
+
+A SYSTEM tool (root). The copy of record is here; the installed copy is /usr/local/sbin/dreamteam-io-shield, put
+there by scripts/host/io-shield-install and by nothing else (systemd/system/README.md).
+
+WHY (Flow rows 7e039111, f72945bc; measured 2026-11-21/23).
+  1. An interactive session froze while "idle class, nice 15" jobs ran. The reader was not the job: a palace test
+     asks Postgres, and Postgres (its own cgroup, normal class) read 60 MB/s for one SELECT. A client's nice level
+     stops at the socket.
+  2. No weight was in force anywhere: a cgroup's IOWeight= does nothing until io.cost is enabled for the device,
+     and the default io.cost settings barely help. On an NVMe, a victim against 4 readers and 1 writer:
+         alone                                   fsync p99   4.5 ms
+         hogs, no control                        fsync p99 453   ms
+         io.cost with latency targets, 10 : 100  fsync p99   7.7 ms   (hogs still 267 MB/s read)
+  3. A user process cannot lower its own oom_score_adj. Root can.
+
+USAGE   io-shield [--throwaway] apply|off|on|status
+CONFIG  /etc/dreamteam/io-shield.conf (host data, never in this repo), one line each:
+  device <name> [rlat=<µs>] [wlat=<µs>] [min=<pct>] [max=<pct>]    io.cost on /sys/block/<name>, latency targets
+  unit <name>.service <weight>        IOWeight (1-10000) on that SERVICE, at runtime only. Only *.service is
+                                      accepted: a slice, a scope (a lane's, the lead's) and user@<uid>.service are
+                                      refused by the shape of the name, before anything is done.
+  docker <container> <weight>         the same for that container's scope, docker-<full id>.scope
+  oomprotect <uid> lead-<name>.scope <score>     every process of <uid> in EXACTLY
+        <cgroup root>/user.slice/user-<uid>.slice/user@<uid>.service/app.slice/lead-<name>.scope  (and below)
+        whose score is not already negative gets <score> (-1000..0). No mark, attribute, other unit name or
+        parent slice earns it.
+  Any other line, or a bad value, stops the run before anything is written (exit 22).
+
+THE LEDGER (default /run/dreamteam-io-shield, root only, 0700, gone at reboot like everything it speaks of).
+EVERYTHING this tool changes is recorded there FIRST, durably (written whole, fsync, rename, fsync of the
+directory), and `off` undoes ONLY what is recorded:
+  <pid>               start=<starttime> unit=<lead unit> score=<n> prev=<n> uid=<n>      an OOM score we wrote
+  unit.<unit name>    ours=<weight> prev=<weight or unset>                                an IOWeight we set
+  dev.<maj>_<min>     prev=<the device's io.cost.qos line before us, or none>             io.cost we enabled
+  left/<pid>.<start>  a score record RETIRED: its process left its lead unit holding our score (see below)
+A unit or device named in the config that has no record is NOT touched by `off` (an `off` without an `apply`
+writes nothing but the stamp). A previous non-default weight or qos line is put back, not discarded.
+FAIL CLOSED. The ledger is read whole and strictly before ANY change: an entry that is not a regular file of
+ours, not one canonical newline-terminated line, or of an unknown name stops the run (exit 1) with nothing
+written anywhere. So does a ledger directory that is a symlink, not ours, or writable by others. So does any
+read, write or delete that fails with anything but "it is gone" (EACCES, EIO, ...): the record is kept, the run
+stops before the next change. Only ENOENT / ESRCH mean a process has ended.
+
+THE UNDO OF A SCORE IS NARROWER THAN THE WRITE. A score is written back in one case only: `off`, the same process
+(pid and start time), still holding the score we wrote, its cgroup STILL the lead unit of its record. A recorded
+process found anywhere else is not written, under /system.slice first of all: its record is retired to left/ and
+`status` names it. A negative score this tool has no record of is never written to, wherever the process lives.
+  The placement is read again immediately before every write, through the same /proc/<pid> descriptor, and once
+  more after a new score: a process that left meanwhile has its fresh record retired at once. WHAT THAT IS NOT:
+  an atomic check-and-write. The kernel has none; a process moved by its owner between the last read and the
+  write (two system calls) is written once. It then shows as "left" and is never written again. Closing that
+  window needs lanes under their own uid, not a check here; the same goes for a same-uid process that puts
+  itself into the lead's cgroup.
+
+ONE LOCK (/run/dreamteam-io-shield.lock) for apply, off and on, the timer's run and a run by hand alike; a run
+that cannot have it in time does nothing (exit 75). status takes none.
+
+ROOT RUNS ARE NOT STEERABLE. As root every path above is fixed, PATH is /usr/sbin:/usr/bin:/sbin:/bin and every
+IO_SHIELD_* variable is ignored. The seams exist only for a caller that is NOT root (the tests), which can reach
+nothing that needs root.
+
+FIRST USE IS A THROWAWAY UNIT, BY CONSTRUCTION. Production `apply` refuses (exit 3) unless
+/var/lib/dreamteam/io-shield.accepted exists, is root's, and holds the sha256 of THIS file. Only
+`io-shield-accept <uid> throwaway` writes it, after a full apply-and-off on a throwaway lead unit with every
+named service untouched. `--throwaway` reads /etc/dreamteam/io-shield-throwaway.conf, which may hold nothing but
+`oomprotect <uid> lead-throwaway-<name>.scope <score>` lines, and keeps its own ledger, lock and stamp
+(/run/dreamteam-io-shield-throwaway*). A production config may not name a lead-throwaway-* unit.
+
+Exit: 0 done · 1 something failed or could not be trusted (nothing further was changed) · 2 not root, or no
+config · 3 not accepted on this host yet · 22 bad argument or config line · 75 the lock stayed held.
+"""
+import errno
+import fcntl
+import hashlib
+import os
+import re
+import subprocess
+import sys
+import time
+
+ME = "io-shield"
+GONE = (errno.ENOENT, errno.ESRCH, errno.ENOTDIR)
+LEADRE = re.compile(r"^lead-[A-Za-z0-9_-]{1,80}\.scope$")
+THROWRE = re.compile(r"^lead-throwaway-[a-z0-9]{1,40}\.scope$")
+SERVICERE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@_.:-]{0,200}\.service$")
+DOCKERRE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,200}$")
+DOCKUNIT = re.compile(r"^docker-[0-9a-f]{64}\.scope$")
+SCORE_LINE = re.compile(r"^start=([0-9]{1,20}) unit=(lead-[A-Za-z0-9_-]{1,80}\.scope) score=(0|-[0-9]{1,4}) prev=(-?[0-9]{1,4}) uid=([0-9]{1,9})\n$")
+UNIT_LINE = re.compile(r"^ours=([0-9]{1,5}) prev=([0-9]{1,5}|unset)\n$")
+DEV_LINE = re.compile(r"^prev=(none|[0-9]+:[0-9]+ [ -~]{1,300})\n$")
+
+
+class Stop(Exception):
+    """Something failed or could not be trusted: say it, change nothing further, exit 1."""
+
+
+def err(msg):
+    sys.stderr.write("%s: %s\n" % (ME, msg))
+
+
+def die(code, msg):
+    err(msg)
+    sys.exit(code)
+
+
+# ── where things are. As root: fixed. Not root (tests): the seams.
+ARGS = sys.argv[1:]
+THROW = bool(ARGS) and ARGS[0] == "--throwaway"
+if THROW:
+    ARGS = ARGS[1:]
+if len(ARGS) != 1 or ARGS[0] not in ("apply", "off", "on", "status"):
+    die(22, "usage: io-shield [--throwaway] apply|off|on|status")
+MODE = ARGS[0]
+ROOT = os.geteuid() == 0
+if ROOT:
+    E = {}
+    os.environ.clear()
+    os.environ.update({"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C"})
+else:
+    E = {k: v for k, v in os.environ.items() if k.startswith("IO_SHIELD_")}
+SUF = "-throwaway" if THROW else ""
+RUN = E.get("IO_SHIELD_RUN_DIR", "/run")
+CONF = E.get("IO_SHIELD_THROWAWAY_CONF" if THROW else "IO_SHIELD_CONF", "/etc/dreamteam/io-shield%s.conf" % SUF)
+QOS = E.get("IO_SHIELD_QOS_FILE", "/sys/fs/cgroup/io.cost.qos")
+SYSBLOCK = E.get("IO_SHIELD_SYSBLOCK", "/sys/block")
+CGROOT = E.get("IO_SHIELD_CGROUP_ROOT", "/sys/fs/cgroup")
+PROC = E.get("IO_SHIELD_PROC", "/proc")
+LEDGER = E.get("IO_SHIELD_LEDGER", RUN + "/dreamteam-io-shield") + SUF
+STAMP = RUN + "/dreamteam-io-shield%s.off" % SUF
+LOCKF = RUN + "/dreamteam-io-shield%s.lock" % SUF
+ACCEPTED = E.get("IO_SHIELD_ACCEPTED", "/var/lib/dreamteam/io-shield.accepted")
+LEFT = os.path.join(LEDGER, "left")
+try:
+    LOCKWAIT = int(E.get("IO_SHIELD_LOCK_WAIT", "60"))
+    if not 0 <= LOCKWAIT <= 999:
+        LOCKWAIT = 60
+except ValueError:
+    LOCKWAIT = 60
+
+if not (os.path.isfile(CONF) and os.access(CONF, os.R_OK)):
+    die(2, "no readable config at %s" % CONF)
+if MODE != "status" and not ROOT and E.get("IO_SHIELD_ASSUME_ROOT") != "1":
+    die(2, "%s needs root" % MODE)
+
+
+# ── the config: read whole, refused whole
+def bad(n, msg):
+    die(22, "%s line %d: %s" % (CONF, n, msg))
+
+
+DEVS, UNITS, DOCK, OOM = [], [], [], []
+for n, line in enumerate(open(CONF, encoding="utf-8", errors="replace").read().split("\n"), 1):
+    w = line.split()
+    if not w or w[0].startswith("#"):
+        continue
+    if THROW and w[0] != "oomprotect":
+        bad(n, "a throwaway config holds only oomprotect lines (got '%s')" % w[0])
+    if w[0] == "device":
+        if len(w) < 2 or not re.match(r"^[a-z0-9]{1,32}$", w[1]):
+            bad(n, "device needs a plain block device name")
+        v = {"rlat": 2000, "wlat": 5000, "min": 25, "max": 100}
+        for kv in w[2:]:
+            k, _, x = kv.partition("=")
+            if not re.match(r"^[0-9]{1,7}$", x):
+                bad(n, "'%s' is not key=<number>" % kv)
+            if k not in v:
+                bad(n, "unknown key '%s' (rlat wlat min max)" % k)
+            v[k] = int(x)
+        if not (1 <= v["min"] <= v["max"] <= 10000 and v["rlat"] >= 1 and v["wlat"] >= 1):
+            bad(n, "need 1 <= min <= max <= 10000 and latencies of at least 1 µs")
+        DEVS.append((w[1], "ctrl=user rpct=95.00 rlat=%d wpct=95.00 wlat=%d min=%d.00 max=%d.00" % (v["rlat"], v["wlat"], v["min"], v["max"])))
+    elif w[0] in ("unit", "docker"):
+        if len(w) != 3 or not re.match(r"^[0-9]{1,7}$", w[2]) or not 1 <= int(w[2]) <= 10000:
+            bad(n, "%s needs <name> <weight 1-10000>" % w[0])
+        if w[0] == "unit":
+            # BY THE SHAPE OF THE NAME: a service, and never the user manager itself. system.slice, any other slice,
+            # lead-<x>.scope and a lane's scope cannot be written as a *.service name.
+            if not SERVICERE.match(w[1]) or re.match(r"^user@", w[1]) or w[1].startswith("systemd-"):
+                bad(n, "'%s' is not a service this tool may weight (a plain <name>.service; never a slice, a scope, user@<uid>.service or systemd-*)" % w[1])
+            UNITS.append((w[1], w[2]))
+        else:
+            if not DOCKERRE.match(w[1]):
+                bad(n, "'%s' is not a plain name" % w[1])
+            DOCK.append((w[1], w[2]))
+    elif w[0] == "oomprotect":
+        ok = len(w) == 4 and re.match(r"^[0-9]{1,9}$", w[1]) and LEADRE.match(w[2]) and re.match(r"^(0|-[0-9]{1,4})$", w[3]) and int(w[3]) >= -1000
+        if not ok:
+            bad(n, "oomprotect needs <uid> <lead-NAME.scope> <score -1000..0>")
+        if THROW and not THROWRE.match(w[2]):
+            bad(n, "a throwaway config names only lead-throwaway-<name>.scope units (got '%s')" % w[2])
+        if not THROW and w[2].startswith("lead-throwaway-"):
+            bad(n, "'%s' is a throwaway unit name: it belongs in the throwaway config, never here" % w[2])
+        OOM.append((w[1], w[2], w[3]))
+    else:
+        bad(n, "unknown word '%s' (device, unit, docker, oomprotect)" % w[0])
+
+
+# ── commands
+def run(*cmd):
+    """(exit status, stdout). The command is found through PATH: fixed for root, the caller's otherwise."""
+    try:
+        r = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, pass_fds=())
+        return r.returncode, r.stdout
+    except OSError:
+        return 127, ""
+
+
+def devno(name):
+    try:
+        d = open(os.path.join(SYSBLOCK, name, "dev")).read().strip()
+    except OSError:
+        return None
+    return d if re.match(r"^[0-9]+:[0-9]+$", d) else None
+
+
+def docker_unit(name):
+    rc, out = run("docker", "inspect", "-f", "{{.Id}}", name)
+    out = out.strip()
+    return "docker-%s.scope" % out if rc == 0 and re.match(r"^[0-9a-f]{64}$", out) else None
+
+
+def unit_state(unit):
+    """(LoadState, IOWeight) from ONE systemctl call. A call that fails is not "not loaded": it stops the run."""
+    rc, out = run("systemctl", "show", unit, "-p", "LoadState", "-p", "IOWeight")
+    kv = dict(l.split("=", 1) for l in out.split("\n") if "=" in l)
+    if rc != 0 or "LoadState" not in kv:
+        raise Stop("systemctl show %s failed (exit %d): its state is unknown, nothing set on it" % (unit, rc))
+    return kv["LoadState"], kv.get("IOWeight", "")
+
+
+# ── the ledger
+def wr_durable(path, text):
+    """The whole text, on disk, under its final name, or an exception: never a partial file under that name."""
+    d = os.path.dirname(path)
+    tmp = os.path.join(d, ".%s.tmp" % os.path.basename(path))
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    data = text.encode()
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        done = 0
+        while done < len(data):
+            done += os.write(fd, data[done:])
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
+    dfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+
+def rm_record(path):
+    """Gone already is fine. Any other failure stops the run: a record we cannot remove is a record we still hold."""
+    try:
+        os.unlink(path)
+    except OSError as e:
+        if e.errno not in GONE:
+            raise Stop("cannot remove the record %s (%s): stopping" % (path, e.strerror))
+
+
+def ledger_dir(create):
+    """True when there is a ledger of ours to read; False when there is none (and none was asked for).
+    A ledger that is there and cannot be trusted stops the run."""
+    if os.path.islink(LEDGER):
+        raise Stop("the ledger %s is a symlink: not trusted, nothing done" % LEDGER)
+    if not os.path.lexists(LEDGER):
+        if not create:
+            return False
+        os.makedirs(LEDGER, mode=0o700)
+    st = os.lstat(LEDGER)
+    if not os.path.isdir(LEDGER) or st.st_uid != os.geteuid() or st.st_mode & 0o022:
+        raise Stop("the ledger %s is not a directory of ours that only we can write: not trusted, nothing done" % LEDGER)
+    return True
+
+
+def load_ledger():
+    """({pid: score record}, {unit: (ours, prev)}, {maj:min: prev line or None}). STRICT: every entry is one of the
+    known names, a regular file of ours, one canonical line; anything else stops the run."""
+    scores, units, devs = {}, {}, {}
+    for n in sorted(os.listdir(LEDGER)):
+        p = os.path.join(LEDGER, n)
+        if n == "left":
+            if os.path.islink(p) or not os.path.isdir(p):
+                raise Stop("%s is not a directory: the ledger is damaged, nothing done" % p)
+            continue
+        if n.startswith(".") and n.endswith(".tmp"):
+            continue                                     # an interrupted publish: never renamed, so never a record
+        st = os.lstat(p)
+        if os.path.islink(p) or not os.path.isfile(p) or st.st_uid != os.geteuid():
+            raise Stop("ledger entry %s is not a regular file of ours: the ledger is damaged, nothing done" % p)
+        try:
+            text = open(p, encoding="utf-8").read()
+        except (OSError, UnicodeDecodeError) as e:
+            raise Stop("ledger entry %s cannot be read (%s): nothing done" % (p, e))
+        if n.isdigit():
+            m = SCORE_LINE.match(text)
+            if m:
+                scores[n] = {"start": m.group(1), "unit": m.group(2), "score": m.group(3), "prev": m.group(4), "uid": m.group(5)}
+        elif n.startswith("unit."):
+            m = UNIT_LINE.match(text) if (SERVICERE.match(n[5:]) or DOCKUNIT.match(n[5:])) else None
+            if m:
+                units[n[5:]] = (m.group(1), m.group(2))
+        elif n.startswith("dev."):
+            m = DEV_LINE.match(text) if re.match(r"^[0-9]+_[0-9]+$", n[4:]) else None
+            if m:
+                devs[n[4:].replace("_", ":")] = None if m.group(1) == "none" else m.group(1)
+        else:
+            m = None
+        if not m:
+            raise Stop("ledger entry %s is not a whole record of a known kind (half-written or foreign): the ledger is damaged, nothing done" % p)
+    return scores, units, devs
+
+
+# ── processes: one directory descriptor on /proc/<pid>; everything read and written goes through it
+def rd(fd, name):
+    f = os.open(name, os.O_RDONLY, dir_fd=fd)
+    try:
+        return os.read(f, 65536).decode("utf-8", "replace")
+    finally:
+        os.close(f)
+
+
+def wr_score(fd, value):
+    f = os.open("oom_score_adj", os.O_WRONLY | os.O_TRUNC, dir_fd=fd)
+    try:
+        os.write(f, (value + "\n").encode())
+    finally:
+        os.close(f)
+
+
+def place(fd):
+    return rd(fd, "cgroup").strip().split("\n")[-1].split("::", 1)[-1]
+
+
+def hold(pid, uid):
+    """(fd, starttime, cgroup, score) of a live process of <uid>; None when it is GONE or is another user's.
+    Any other failure (EACCES, EIO, ...) is not absence: it raises Stop. The caller closes fd."""
+    try:
+        fd = os.open(os.path.join(PROC, pid), os.O_RDONLY | os.O_DIRECTORY)
+    except OSError as e:
+        if e.errno in GONE:
+            return None
+        raise Stop("cannot look at process %s (%s): it is not known to be gone, stopping" % (pid, e.strerror))
+    try:
+        if os.fstat(fd).st_uid != int(uid):
+            os.close(fd)
+            return None
+        stat = rd(fd, "stat")
+        return fd, stat[stat.rindex(")") + 2:].split()[19], place(fd), rd(fd, "oom_score_adj").strip()
+    except OSError as e:
+        os.close(fd)
+        if e.errno in GONE:
+            return None
+        raise Stop("cannot read process %s (%s): it is not known to be gone, stopping" % (pid, e.strerror))
+    except (ValueError, IndexError):
+        os.close(fd)
+        raise Stop("process %s: its stat line could not be parsed, stopping" % pid)
+
+
+def unit_path(uid, unit):
+    return "/user.slice/user-%s.slice/user@%s.service/app.slice/%s" % (uid, uid, unit)
+
+
+def still_in(cg, uid, unit):
+    """Is this cgroup the lead unit (or below it)? Never under /system.slice, never for a name that is not a lead
+    unit name, never when that unit's directory is not a real directory."""
+    if cg.startswith("/system.slice") or not LEADRE.match(unit or ""):
+        return False
+    r = unit_path(uid, unit)
+    d = CGROOT + r
+    return os.path.isdir(d) and not os.path.islink(d) and (cg == r or cg.startswith(r + "/"))
+
+
+def retire(pid, r):
+    """The record goes aside, durably, for a person; the process is not written."""
+    if os.path.islink(LEFT):
+        raise Stop("%s is a symlink: stopping" % LEFT)
+    os.makedirs(LEFT, mode=0o700, exist_ok=True)
+    try:
+        os.replace(os.path.join(LEDGER, pid), os.path.join(LEFT, "%s.%s" % (pid, r["start"])))
+    except OSError as e:
+        raise Stop("cannot retire the record of %s (%s): it is kept, stopping" % (pid, e.strerror))
+
+
+def left_entries():
+    try:
+        return sorted(os.listdir(LEFT)) if os.path.isdir(LEFT) and not os.path.islink(LEFT) else []
+    except OSError as e:
+        raise Stop("cannot list %s (%s): stopping" % (LEFT, e.strerror))
+
+
+def sweep_left():
+    """Forget the retired records whose process has ended (pid AND start time)."""
+    for n in left_entries():
+        pid, _, start = n.partition(".")
+        alive = False
+        if pid.isdigit():
+            try:
+                stat = open(os.path.join(PROC, pid, "stat")).read()
+                alive = stat[stat.rindex(")") + 2:].split()[19] == start
+            except OSError as e:
+                if e.errno not in GONE:
+                    raise Stop("cannot read process %s (%s): its retired record is kept, stopping" % (pid, e.strerror))
+            except (ValueError, IndexError):
+                raise Stop("process %s: its stat line could not be parsed, stopping" % pid)
+        if not alive:
+            rm_record(os.path.join(LEFT, n))
+
+
+def score_records(recs, reset, only=None):
+    """The records. A write happens in exactly one case: reset, the same process, our score, STILL in its lead unit
+    at the moment before the write. Returns (undone, retired)."""
+    undone = retired = 0
+    for pid, r in recs.items():
+        if only and (r["uid"], r["unit"]) != only:
+            continue
+        h = hold(pid, r["uid"])
+        if h is None:
+            rm_record(os.path.join(LEDGER, pid))         # gone: nothing to undo, nobody written
+            continue
+        fd, start, cg, cur = h
+        try:
+            if start != r["start"] or cur != r["score"]:
+                rm_record(os.path.join(LEDGER, pid))     # another process has that number now, or someone changed the score: not ours
+            elif not still_in(cg, r["uid"], r["unit"]):
+                retire(pid, r); retired += 1             # it left its lead unit holding our score: not written
+            elif reset:
+                if not still_in(place(fd), r["uid"], r["unit"]):       # read again, immediately before the write
+                    retire(pid, r); retired += 1
+                else:
+                    wr_score(fd, r["prev"]); undone += 1
+                    rm_record(os.path.join(LEDGER, pid))
+        except OSError as e:
+            if e.errno in GONE:
+                rm_record(os.path.join(LEDGER, pid))
+            else:
+                raise Stop("undo for %s failed (%s): its record is kept, stopping" % (pid, e.strerror))
+        finally:
+            os.close(fd)
+    return undone, retired
+
+
+def score_unit(uid, unit, score, recs):
+    """Score the processes in the lead unit: only a score that is not already negative, the record first.
+    Returns (scored, left as found, retired)."""
+    rel = unit_path(uid, unit)
+    unit_dir = CGROOT + rel
+    scored = asfound = retired = 0
+    if not (os.path.isdir(unit_dir) and not os.path.islink(unit_dir)):
+        return 0, 0, 0
+    inside = lambda cg: cg == rel or cg.startswith(rel + "/")
+    for sub, _, _ in os.walk(unit_dir):
+        try:
+            pids = open(os.path.join(sub, "cgroup.procs")).read().split()
+        except OSError as e:
+            if e.errno in GONE:
+                continue
+            raise Stop("cannot read %s/cgroup.procs (%s): stopping" % (sub, e.strerror))
+        for pid in pids:
+            h = hold(pid, uid) if pid.isdigit() else None
+            if h is None:
+                continue
+            fd, start, cg, cur = h
+            try:
+                if not inside(cg):
+                    continue                             # listed there a moment ago, not there now
+                if pid in recs and recs[pid]["start"] == start:
+                    continue                             # ours already
+                if cur.startswith("-"):
+                    asfound += 1
+                    continue                             # a negative score we did not write: not ours to touch
+                rec = {"start": start, "unit": unit, "score": score, "prev": cur, "uid": uid}
+                path = os.path.join(LEDGER, pid)
+                wr_durable(path, "start=%s unit=%s score=%s prev=%s uid=%s\n" % (start, unit, score, cur, uid))
+                if not inside(place(fd)):                # read again, immediately before the write
+                    rm_record(path)
+                    continue
+                try:
+                    wr_score(fd, score)
+                except OSError:
+                    rm_record(path)                      # no score was written: no record of one may remain
+                    raise
+                scored += 1
+                if not inside(place(fd)):                # it left while we wrote: it holds our score elsewhere now
+                    retire(pid, rec); retired += 1; scored -= 1
+            except OSError as e:
+                if e.errno not in GONE:
+                    raise Stop("score for %s failed (%s): stopping" % (pid, e.strerror))
+            finally:
+                os.close(fd)
+    return scored, asfound, retired
+
+
+def qos_lines():
+    try:
+        return [l for l in open(QOS).read().split("\n") if l.strip()]
+    except OSError as e:
+        raise Stop("cannot read %s (%s)" % (QOS, e.strerror))
+
+
+def qos_write(line):
+    with open(QOS, "w") as f:
+        f.write(line + "\n")
+
+
+def accepted():
+    """The acceptance flag: root's, a regular file nobody else can write, holding the sha256 of THIS file."""
+    try:
+        st = os.lstat(ACCEPTED)                           # the entry itself: a symlink is never followed
+        if (st.st_mode & 0o170000) != 0o100000 or st.st_uid != os.geteuid() or st.st_mode & 0o022:
+            return False
+        mine = hashlib.sha256(open(os.path.abspath(__file__), "rb").read()).hexdigest()
+        return ("sha256=%s" % mine) in open(ACCEPTED).read().split("\n")
+    except OSError:
+        return False
+
+
+# ── status: read-only, no lock, never changes the ledger
+def status():
+    try:
+        print("io.cost.qos: %s" % ";".join(open(QOS).read().split("\n")))
+    except OSError:
+        print("io.cost.qos: ")
+    if os.path.lexists(STAMP):
+        print("OFF: %s exists, apply does nothing until 'io-shield on' or a reboot" % STAMP)
+    if not THROW and not accepted():
+        print("NOT ACCEPTED on this host: apply refuses until 'io-shield-accept <uid> throwaway' has passed for this helper (%s)" % ACCEPTED)
+    scores, units, devs = {}, {}, {}
+    trusted = True
+    try:
+        if ledger_dir(False):
+            scores, units, devs = load_ledger()
+    except (Stop, OSError) as e:
+        trusted = False
+        print("LEDGER NOT TRUSTED: %s" % e)
+    for u, w in UNITS:
+        rc, out = run("systemctl", "show", u, "-p", "IOWeight", "--value")
+        print("unit %s: want %s, IOWeight=%s%s" % (u, w, out.strip(), " (recorded as ours)" if u in units else ""))
+    for c, w in DOCK:
+        u = docker_unit(c)
+        if u:
+            rc, out = run("systemctl", "show", u, "-p", "IOWeight", "--value")
+            print("docker %s: want %s, %s IOWeight=%s%s" % (c, w, u, out.strip(), " (recorded as ours)" if u in units else ""))
+        else:
+            print("docker %s: want %s, not running" % (c, w))
+    for uid, unit, score in OOM:
+        ins, gone = [], []
+        unit_dir = CGROOT + unit_path(uid, unit)
+        try:
+            if os.path.isdir(unit_dir) and not os.path.islink(unit_dir):
+                for sub, _, _ in os.walk(unit_dir):
+                    try:
+                        pids = open(os.path.join(sub, "cgroup.procs")).read().split()
+                    except OSError:
+                        continue
+                    for pid in pids:
+                        h = hold(pid, uid) if pid.isdigit() else None
+                        if h:
+                            os.close(h[0])
+                            ours = pid in scores and scores[pid]["start"] == h[1]
+                            ins.append("%s=%s%s" % (pid, h[3], "" if ours else "(not ours)"))
+            if trusted:
+                for n in left_entries():
+                    pid, _, start = n.partition(".")
+                    h = hold(pid, uid) if pid.isdigit() else None
+                    if h:
+                        if h[1] == start:
+                            gone.append("%s=%s(%s)" % (pid, h[3], h[2].rstrip("/").split("/")[-1] or "/"))
+                        os.close(h[0])
+        except Stop as e:
+            print("oomprotect uid %s unit %s: want %s; COULD NOT BE READ: %s" % (uid, unit, score, e))
+            continue
+        print("oomprotect uid %s unit %s: want %s; in:%s; recorded:%s; left the unit holding our score, NOT written:%s" % (
+            uid, unit, score, " ".join(ins) or "none", " ".join("%s(%s)" % (p, r["unit"]) for p, r in scores.items() if r["uid"] == uid) or "none", " ".join(gone) or "none"))
+    return 0
+
+
+# ── the verbs that change something: one lock, the ledger read whole first, stop at the first thing that fails
+def changing():
+    rc = 0
+    if MODE == "on":
+        try:
+            os.unlink(STAMP)
+        except FileNotFoundError:
+            pass
+        print("on: the stamp is gone; the next apply applies")
+        return 0
+    if MODE == "apply":
+        if os.path.lexists(STAMP):
+            print("off (%s exists): nothing applied" % STAMP)
+            return 0
+        if not THROW and not accepted():
+            err("NOT ACCEPTED on this host: %s is missing, not root's, or not for this helper. Run 'io-shield-accept <uid> throwaway' first; nothing applied" % ACCEPTED)
+            return 3
+        ledger_dir(True)
+    scores, units, devs = load_ledger() if ledger_dir(False) else ({}, {}, {})          # STRICT, before any change
+    if MODE == "off":
+        with open(STAMP, "w"):
+            pass
+        print("stamp written: %s (apply does nothing until 'io-shield on' or a reboot)" % STAMP)
+        for mm, prev in devs.items():                    # ONLY what we recorded
+            qos_write(prev if prev else "%s enable=0" % mm)
+            rm_record(os.path.join(LEDGER, "dev.%s" % mm.replace(":", "_")))
+            print("io.cost off on %s%s" % (mm, " (the line it had before us is back)" if prev else ""))
+        for d, _ in DEVS:
+            mm = devno(d)
+            if mm and mm not in devs:
+                print("note: io.cost on %s (%s) was not enabled by this tool (no record): not written" % (d, mm))
+        for u, (ours, prev) in units.items():            # ONLY what we recorded
+            state, cur = unit_state(u)
+            if state == "loaded":
+                if run("systemctl", "set-property", "--runtime", u, "IOWeight=")[0] != 0:
+                    raise Stop("set-property failed for %s: its record is kept, stopping" % u)
+                if prev != "unset" and unit_state(u)[1] != prev:
+                    if run("systemctl", "set-property", "--runtime", u, "IOWeight=%s" % prev)[0] != 0:
+                        raise Stop("could not put IOWeight=%s back on %s: its record is kept, stopping" % (prev, u))
+                print("IOWeight=%s on %s (what it was before us)" % ("<default>" if prev == "unset" else prev, u))
+            else:
+                print("note: %s is not loaded now; its runtime setting went with it" % u)
+            rm_record(os.path.join(LEDGER, "unit.%s" % u))
+        named = [u for u, _ in UNITS] + [x for x in (docker_unit(c) for c, _ in DOCK) if x]
+        for u in named:
+            if u not in units:
+                print("note: %s has no record of ours: not written" % u)
+        for uid in sorted({r["uid"] for r in scores.values()} | {o[0] for o in OOM}):        # every record, whatever the config says now
+            undone, retired = score_records({p: r for p, r in scores.items() if r["uid"] == uid}, True)
+            print("oom scores of uid %s: %d of OUR recorded score(s), each still in its lead unit, put back to what they were; %d recorded process(es) had LEFT their unit holding our score and were NOT written (status names them); nothing else is touched" % (
+                uid, undone, retired))
+        if ledger_dir(False):
+            sweep_left()
+        return 0
+    # apply
+    have = {l.split()[0]: l for l in qos_lines()} if DEVS else {}
+    for d, q in DEVS:
+        mm = devno(d)
+        if not mm:
+            err("no device %s here" % d); rc = 1
+            continue
+        if mm not in devs:                               # the record FIRST: what the device had before us
+            prev = have.get(mm)
+            wr_durable(os.path.join(LEDGER, "dev.%s" % mm.replace(":", "_")), "prev=%s\n" % (prev if prev and "enable=1" in prev.split() else "none"))
+            devs[mm] = prev
+        qos_write("%s enable=1 %s" % (mm, q))
+        print("io.cost on %s (%s): %s" % (d, mm, q))
+    todo = [(u, w, u) for u, w in UNITS]
+    for c, w in DOCK:
+        u = docker_unit(c)
+        if u:
+            todo.append((u, w, "container %s" % c))
+        else:
+            print("note: container %s is not there now; the next run sets it" % c)
+    for u, w, label in todo:
+        state, cur = unit_state(u)
+        if state != "loaded":
+            print("note: %s is not loaded now; the next run sets it" % label)
+            continue
+        new = u not in units
+        if new:                                          # the record FIRST: the weight it had before us
+            wr_durable(os.path.join(LEDGER, "unit.%s" % u), "ours=%s prev=%s\n" % (w, cur if re.match(r"^[0-9]{1,5}$", cur) else "unset"))
+        if run("systemctl", "set-property", "--runtime", u, "IOWeight=%s" % w)[0] != 0:
+            if new:
+                rm_record(os.path.join(LEDGER, "unit.%s" % u))       # nothing was set: no record of a setting may remain
+            raise Stop("set-property failed for %s: stopping" % label)
+        units[u] = (w, "unset")
+        print("IOWeight=%s on %s" % (w, label))
+    for uid, unit, score in OOM:
+        _, retired = score_records(scores, False, (uid, unit))
+        scores = load_ledger()[0]
+        scored, asfound, ret2 = score_unit(uid, unit, score, scores)
+        print("oomprotect uid %s unit %s: %d process(es) scored %s and recorded; %d in the unit left as found (a negative score we did not write); %d of ours have LEFT the unit holding our score and were NOT written (status names them)" % (
+            uid, unit, scored, score, asfound, retired + ret2))
+    sweep_left()
+    return rc
+
+
+def main():
+    if MODE == "status":
+        return status()
+    try:
+        lock = os.open(LOCKF, os.O_WRONLY | os.O_CREAT | os.O_CLOEXEC, 0o600)        # CLOEXEC: nothing we start holds it
+    except OSError as e:
+        die(1, "cannot open the lock %s (%s)" % (LOCKF, e.strerror))
+    end = time.monotonic() + LOCKWAIT
+    while True:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError:
+            if time.monotonic() >= end:
+                die(75, "another io-shield run holds %s (waited %d s): nothing done" % (LOCKF, LOCKWAIT))
+            time.sleep(0.05)
+    try:
+        return changing()
+    except Stop as e:
+        err(str(e))
+        return 1
+    except OSError as e:
+        err("%s: %s; stopped, nothing further changed" % (e.filename or "a write", e.strerror))
+        return 1
+
+
+sys.stdout.reconfigure(line_buffering=True)
+sys.exit(main())
