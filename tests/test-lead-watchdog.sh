@@ -25,6 +25,11 @@ here=$(cd "$(dirname "$0")/.." && pwd)
 WD="$here/scripts/lead-watchdog.sh"
 LA="$here/scripts/lead-launch.sh"
 T=$(mktemp -d "${TMPDIR:-/var/tmp}/lead-wd.XXXXXX")
+# STANDALONE (Flow row df7eeb5f): no tmux server this suite starts, its own or the watchdog's, may read the caller's
+# tmux configuration. A ~/.tmux.conf with `base-index 1` and `pane-base-index 1` (katana) moves every pane address
+# the suite uses: a direct run there on 2026-11-27 read 105 ok, 22 failed, while the same tree under tests/run.sh
+# (which gives each suite a private HOME) read 127 ok. So the suite takes a private HOME itself.
+export HOME="$T/tmuxhome" XDG_CONFIG_HOME="$T/tmuxhome/.config"; mkdir -p "$XDG_CONFIG_HOME"
 reap_stubs() {  # end stub claudes of THIS run only: a pidfd first, then the command line must name our temp dir
     python3 -I - "$T" <<'PY' 2>/dev/null || true
 import os, signal, sys
