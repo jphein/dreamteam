@@ -2,6 +2,8 @@
 Description=dreamteam: io-shield (io.cost with latency targets on the configured devices, low IOWeight on the known hogs)
 Documentation=https://github.com/jphein/dreamteam/blob/main/systemd/system/README.md
 ConditionPathExists=/etc/dreamteam/io-shield.conf
+# written only by a passed `dreamteam-io-shield-accept <uid> throwaway`; the helper checks its content too
+ConditionPathExists=/var/lib/dreamteam/io-shield.accepted
 After=docker.service
 
 [Service]

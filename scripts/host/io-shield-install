@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# dreamteam — io-shield-install: the ONE way the root helper gets onto a host, and the gate on its timer.
+#
+#   sudo scripts/host/io-shield-install <user>            copy the helper, the acceptance script, the two system
+#                                                         units and the sudoers file. The timer is NOT enabled.
+#   sudo scripts/host/io-shield-install <user> --enable   the same, then enable the timer, ONLY when the
+#                                                         acceptance flag is there for the helper just installed.
+#
+# THE GATE (xreview #291 r1 finding 7). `--enable` refuses (exit 3) unless /var/lib/dreamteam/io-shield.accepted
+# exists, is a regular file of root's that nobody else can write, and holds the sha256 of the installed helper.
+# Only `dreamteam-io-shield-accept <uid> throwaway` writes that flag, after a full apply-and-off on a throwaway
+# lead unit. So the order on a host is: install, throwaway acceptance, install --enable. The same flag is checked
+# again by the helper's own `apply` and by the service unit (ConditionPathExists), so a timer enabled by hand
+# does nothing either.
+# A helper that differs from the accepted one (an update) is not accepted: this script then DISABLES the timer
+# and says so; the throwaway acceptance is run again for the new helper.
+#
+# What it writes, and nothing else:
+#   /usr/local/sbin/dreamteam-io-shield            0755 root   from scripts/host/io-shield
+#   /usr/local/sbin/dreamteam-io-shield-accept     0755 root   from scripts/host/io-shield-accept
+#   /etc/systemd/system/dreamteam-io-shield.{service,timer}   0644
+#   /etc/sudoers.d/dreamteam-io-shield             0440 root   from systemd/system/sudoers.d/…in, with <user>;
+#                                                              installed only when `visudo -cf` accepts it
+# It does not write a config, start a run, or touch a score. As root every IO_SHIELD_* variable is dropped and
+# PATH is fixed; IO_SHIELD_INSTALL_ROOT (a directory to install under) is for a caller that is not root (tests).
+# Exit: 0 done · 1 a copy or systemctl failed · 2 not root, or visudo refused the file · 3 --enable without a
+# valid acceptance flag (the timer is left disabled) · 22 bad argument.
+set -uo pipefail
+[ "$#" -ge 1 ] && [ "$#" -le 2 ] && [[ "$1" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] && { [ "$#" -eq 1 ] || [ "$2" = --enable ]; } \
+  || { echo "usage: io-shield-install <user> [--enable]" >&2; exit 22; }
+WHO=$1; ENABLE=0; [ "$#" -eq 2 ] && ENABLE=1
+P=""
+if [ "$(id -u)" -eq 0 ]; then
+  for v in $(compgen -v | grep '^IO_SHIELD_' || true); do unset "$v"; done
+  PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH
+else
+  [ "${IO_SHIELD_ASSUME_ROOT:-}" = 1 ] && [ -n "${IO_SHIELD_INSTALL_ROOT:-}" ] || { echo "io-shield-install: needs root" >&2; exit 2; }
+  P=$IO_SHIELD_INSTALL_ROOT
+fi
+SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ACCEPTED="$P/var/lib/dreamteam/io-shield.accepted"
+HELPER="$P/usr/local/sbin/dreamteam-io-shield"
+TIMER=dreamteam-io-shield.timer
+rc=0
+command -v visudo >/dev/null 2>&1 || { echo "io-shield-install: visudo is needed to check the sudoers file; nothing installed" >&2; exit 2; }
+T=$(mktemp -d) || exit 1
+trap 'rm -rf "$T"' EXIT
+# the sudoers file is checked BEFORE anything is installed: a file sudo would reject can lock a host out of sudo
+sed "s/@USER@/$WHO/g" "$SRC/systemd/system/sudoers.d/dreamteam-io-shield.in" > "$T/sudoers" || exit 1
+if grep -q '@USER@' "$T/sudoers" || ! visudo -cf "$T/sudoers" > "$T/visudo.out" 2>&1; then
+  echo "io-shield-install: visudo does not accept the sudoers file; nothing installed: $(head -n 2 "$T/visudo.out" 2>/dev/null)" >&2; exit 2
+fi
+put() { # put <mode> <source> <destination>
+  mkdir -p "$(dirname "$3")" && install -m "$1" "$2" "$3.new.$$" && mv -f "$3.new.$$" "$3" && echo "installed $3 ($1)" || { echo "io-shield-install: could not install $3" >&2; rc=1; }
+}
+put 0755 "$SRC/scripts/host/io-shield" "$HELPER"
+put 0755 "$SRC/scripts/host/io-shield-accept" "$P/usr/local/sbin/dreamteam-io-shield-accept"
+put 0644 "$SRC/systemd/system/dreamteam-io-shield.service" "$P/etc/systemd/system/dreamteam-io-shield.service"
+put 0644 "$SRC/systemd/system/$TIMER" "$P/etc/systemd/system/$TIMER"
+put 0440 "$T/sudoers" "$P/etc/sudoers.d/dreamteam-io-shield"
+[ "$rc" -eq 0 ] || exit 1
+systemctl daemon-reload || { echo "io-shield-install: daemon-reload failed" >&2; exit 1; }
+
+# the gate: is the flag there, root's, and for THIS helper?
+flag_ok() {
+  [ -f "$ACCEPTED" ] && [ ! -L "$ACCEPTED" ] || return 1
+  [ "$(stat -c %u "$ACCEPTED" 2>/dev/null)" = "$(id -u)" ] || return 1
+  case "$(stat -c %A "$ACCEPTED" 2>/dev/null)" in ?????w????|????????w?) return 1 ;; esac
+  local sha; sha=$(sha256sum "$HELPER" 2>/dev/null | cut -d' ' -f1); [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || return 1
+  grep -qxF "sha256=$sha" "$ACCEPTED"
+}
+if flag_ok; then
+  echo "acceptance flag: present, and it is for the helper just installed"
+  if [ "$ENABLE" -eq 1 ]; then
+    systemctl enable --now "$TIMER" && echo "enabled $TIMER" || { echo "io-shield-install: could not enable $TIMER" >&2; exit 1; }
+  else
+    echo "the timer is NOT enabled by this run (add --enable)"
+  fi
+  exit 0
+fi
+# no valid flag: the timer must not run this helper
+systemctl disable --now "$TIMER" > /dev/null 2>&1 && echo "disabled $TIMER: the installed helper is not the accepted one" || true
+echo "NOT ACCEPTED: $ACCEPTED is missing, not root's, or for another helper. Next: start a throwaway lead scope as the user, then"
+echo "    sudo dreamteam-io-shield-accept <uid> throwaway"
+echo "and only then: sudo scripts/host/io-shield-install $WHO --enable"
+if [ "$ENABLE" -eq 1 ]; then echo "io-shield-install: --enable refused: no acceptance of this helper on this host; the timer is left disabled" >&2; exit 3; fi
+exit 0

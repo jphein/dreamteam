@@ -25,8 +25,9 @@ ID=7d65ba827db467c06a6c9432b76d9bef1b9aa4255035aee5a0e7d593d1d399a4
 stub docker 'echo "docker $*" >> "'"$LOG"'"; [ "$1" = inspect ] && [ "${4:-}" = mempalace-db ] && { echo '"$ID"'; exit 0; }; exit 1'
 stub systemctl 'echo "systemctl $*" >> "'"$LOG"'"
 case "$*" in
-  *"show nosuch.service -p LoadState"*) echo not-found ;;
-  *"-p LoadState"*) echo loaded ;;
+  *"show failing.service -p LoadState"*) exit 1 ;;
+  *"show nosuch.service -p LoadState"*) printf "LoadState=not-found\nIOWeight=[not set]\n" ;;
+  *"-p LoadState"*) printf "LoadState=loaded\nIOWeight=%s\n" "$(cat "'"$T"'/wnow/$2" 2>/dev/null || echo "[not set]")" ;;
   *"set-property --runtime broken.service"*) exit 1 ;;
   *"-p IOWeight"*) echo 20 ;;
   *"--user is-active --quiet"*) [ -e "'"$T"'/scope-up" ] ;;
@@ -37,10 +38,14 @@ case "$*" in
   *"--user daemon-reload"*) [ ! -e "'"$T"'/reload-fails" ] ;;
 esac'
 mkdir -p "$T/run0"
-run_sh() { rm -f "$T/run0/dreamteam-io-shield.off"; IO_SHIELD_CONF="$T/conf" IO_SHIELD_QOS_FILE="$T/qos" IO_SHIELD_SYSBLOCK="$T/sys" IO_SHIELD_RUN_DIR="$T/run0" IO_SHIELD_ASSUME_ROOT=1 PATH="$B:$PATH" bash "$SH" "$@" > "$T/out" 2> "$T/err"; }
+run_sh() { rm -f "$T/run0/dreamteam-io-shield.off"; IO_SHIELD_CONF="$T/conf" IO_SHIELD_QOS_FILE="$T/qos" IO_SHIELD_SYSBLOCK="$T/sys" IO_SHIELD_RUN_DIR="$T/run0" IO_SHIELD_ASSUME_ROOT=1 PATH="$B:$PATH" python3 -I "$SH" "$@" > "$T/out" 2> "$T/err"; }
 
 echo "── io-shield ────────────────────────────────────────────────────"
-ok "passes bash -n" 'bash -n "$SH"'
+# production apply needs the acceptance flag for THIS helper (its sha256); the tests hold one, and test its absence below
+export IO_SHIELD_ACCEPTED="$T/accepted"
+accept_flag() { printf 'sha256=%s\n' "$(sha256sum "$SH" | cut -d' ' -f1)" > "$T/accepted"; chmod 600 "$T/accepted"; }
+accept_flag
+ok "the helper compiles (python3 -I), and is no shell script any more" 'python3 -I -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$SH" && head -n 1 "$SH" | grep -qx "#!/usr/bin/python3 -I"'
 printf '# familiar\ndevice nvme0n1 rlat=2000 wlat=5000 min=25 max=100\n\nunit syncthing@jp.service 20\ndocker mempalace-db 20\nunit nosuch.service 30\ndocker gone 30\n' > "$T/conf"
 : > "$T/qos"; : > "$LOG"; run_sh apply; rc=$?
 ok "apply: exit 0" '[ "$rc" -eq 0 ]'
@@ -67,11 +72,11 @@ for bad in 'device nvme0n1 rlat=abc' 'device nvme0n1 speed=9' 'device ../nvme0n1
   else fail "bad line '$bad': rc $rc, qos $(cat "$T/qos"), log $(cat "$LOG")"; fi
 done
 printf 'device nvme0n1\n' > "$T/conf"
-IO_SHIELD_CONF="$T/conf" IO_SHIELD_QOS_FILE="$T/qos" IO_SHIELD_SYSBLOCK="$T/sys" PATH="$B:$PATH" bash "$SH" apply > /dev/null 2>&1; rc=$?
+IO_SHIELD_CONF="$T/conf" IO_SHIELD_QOS_FILE="$T/qos" IO_SHIELD_SYSBLOCK="$T/sys" PATH="$B:$PATH" python3 -I "$SH" apply > /dev/null 2>&1; rc=$?
 if [ "$(id -u)" -ne 0 ]; then ok "apply without root is exit 2" '[ "$rc" -eq 2 ]'; fi
-IO_SHIELD_CONF="$T/absent" IO_SHIELD_ASSUME_ROOT=1 bash "$SH" apply > /dev/null 2>&1; ok "no config is exit 2" '[ "$?" -eq 2 ]'
-bash "$SH" > /dev/null 2>&1; ok "no argument is exit 22" '[ "$?" -eq 22 ]'
-bash "$SH" bogus > /dev/null 2>&1; ok "an unknown verb is exit 22" '[ "$?" -eq 22 ]'
+IO_SHIELD_CONF="$T/absent" IO_SHIELD_ASSUME_ROOT=1 python3 -I "$SH" apply > /dev/null 2>&1; ok "no config is exit 2" '[ "$?" -eq 2 ]'
+python3 -I "$SH" > /dev/null 2>&1; ok "no argument is exit 22" '[ "$?" -eq 22 ]'
+python3 -I "$SH" bogus > /dev/null 2>&1; ok "an unknown verb is exit 22" '[ "$?" -eq 22 ]'
 
 UM="user.slice/user-$(id -u).slice/user@$(id -u).service"
 
@@ -109,7 +114,7 @@ fixture() {
   printf '900\n901\n903\n904\n' > "$LD/cgroup.procs"; echo 902 > "$LD/sub/cgroup.procs"; printf '100\n101\n302\n' > "$XD/cgroup.procs"
   sleep 0.02   # so that a later write has a later mtime
 }
-run_op() { IO_SHIELD_CONF="$T/conf" IO_SHIELD_QOS_FILE="$T/qos" IO_SHIELD_SYSBLOCK="$T/sys" IO_SHIELD_CGROUP_ROOT="$T/cg" IO_SHIELD_PROC="$PR" IO_SHIELD_RUN_DIR="$T/run" IO_SHIELD_ASSUME_ROOT=1 PATH="$B:$PATH" bash "$SH" "$@" > "$T/out" 2> "$T/err"; }
+run_op() { IO_SHIELD_THROWAWAY_CONF="$T/tconf" IO_SHIELD_CONF="$T/conf" IO_SHIELD_QOS_FILE="$T/qos" IO_SHIELD_SYSBLOCK="$T/sys" IO_SHIELD_CGROUP_ROOT="$T/cg" IO_SHIELD_PROC="$PR" IO_SHIELD_RUN_DIR="$T/run" IO_SHIELD_ASSUME_ROOT=1 PATH="$B:$PATH" python3 -I "$SH" "$@" > "$T/out" 2> "$T/err"; }
 moved() { echo "0::$2" > "$PR/$1/cgroup"; }   # the process now sits in another cgroup (its score file is not touched)
 printf 'oomprotect %s lead-spire.scope -500\n' "$(id -u)" > "$T/conf"
 
@@ -182,27 +187,27 @@ ok "status takes no lock: it answers while the lock is held" '[ "$rc" -eq 0 ] &&
 wait "$lh" 2>/dev/null
 # a run that WAITS: nothing is written while the lock is held, everything after
 fixture; ( exec 7>"$LK"; flock 7; sleep 2 ) & lh=$!; sleep 0.4
-( IO_SHIELD_LOCK_WAIT=20 IO_SHIELD_CONF="$T/conf" IO_SHIELD_QOS_FILE="$T/qos" IO_SHIELD_SYSBLOCK="$T/sys" IO_SHIELD_CGROUP_ROOT="$T/cg" IO_SHIELD_PROC="$PR" IO_SHIELD_RUN_DIR="$T/run" IO_SHIELD_ASSUME_ROOT=1 PATH="$B:$PATH" bash "$SH" apply > "$T/out.w" 2>&1 ) & ap=$!
+( IO_SHIELD_LOCK_WAIT=20 IO_SHIELD_CONF="$T/conf" IO_SHIELD_QOS_FILE="$T/qos" IO_SHIELD_SYSBLOCK="$T/sys" IO_SHIELD_CGROUP_ROOT="$T/cg" IO_SHIELD_PROC="$PR" IO_SHIELD_RUN_DIR="$T/run" IO_SHIELD_ASSUME_ROOT=1 PATH="$B:$PATH" python3 -I "$SH" apply > "$T/out.w" 2>&1 ) & ap=$!
 sleep 0.8; mid=$(scores 900 901 902); wait "$lh" 2>/dev/null; wait "$ap"; rc=$?
 ok "a run that waits for the lock has written NOTHING while it is held, and applies once it is free" '[ "$mid" = "0 200 0 " ] && [ "$rc" -eq 0 ] && [ "$(scores 900 901 902)" = "-500 -500 -500 " ]'
 # two applies and an off at the same moment: whatever the order, the end state is one of the two serial ones, and
 # no score is left behind without a record (the failure the lock exists for)
 for round in 1 2 3; do
   fixture
-  for v in apply apply off; do ( IO_SHIELD_CONF="$T/conf" IO_SHIELD_QOS_FILE="$T/qos" IO_SHIELD_SYSBLOCK="$T/sys" IO_SHIELD_CGROUP_ROOT="$T/cg" IO_SHIELD_PROC="$PR" IO_SHIELD_RUN_DIR="$T/run" IO_SHIELD_ASSUME_ROOT=1 PATH="$B:$PATH" bash "$SH" "$v" > /dev/null 2>&1 ) & done; wait
+  for v in apply apply off; do ( IO_SHIELD_CONF="$T/conf" IO_SHIELD_QOS_FILE="$T/qos" IO_SHIELD_SYSBLOCK="$T/sys" IO_SHIELD_CGROUP_ROOT="$T/cg" IO_SHIELD_PROC="$PR" IO_SHIELD_RUN_DIR="$T/run" IO_SHIELD_ASSUME_ROOT=1 PATH="$B:$PATH" python3 -I "$SH" "$v" > /dev/null 2>&1 ) & done; wait
   orphan=0; for p in 900 901 902; do if [ "$(cat "$PR/$p/oom_score_adj")" = -500 ] && [ ! -e "$LG/$p" ]; then orphan=$((orphan + 1)); fi; done
   st="$(scores 900 901 902)"
   if [ "$orphan" -eq 0 ] && { [ "$st" = "0 200 0 " ] || [ "$st" = "-500 -500 -500 " ]; }; then pass "overlapping apply, apply and off (round $round): a serial end state ($st), and no score without its record"
   else fail "overlap round $round: scores '$st', $orphan score(s) without a record"; fi
 done
-ok "the helper's children do not get the lock's descriptor (the verbs run as run_mode 9>&-)" 'grep -q "^run_mode 9>&-" "$SH"'
+ok "the lock's descriptor is close-on-exec: nothing the helper starts holds it" 'grep -q "os.open(LOCKF, os.O_WRONLY | os.O_CREAT | os.O_CLOEXEC" "$SH"'
 
 echo "── the ledger is not something a user can plant ─────────────────"
 fixture; mkdir -p -m 700 "$T/elsewhere"; chmod 700 "$T/elsewhere"; rm -rf "$T/elsewhere"/*; ln -s "$T/elsewhere" "$LG"; before=$(sig 900 901 902 $STAY); run_op apply
-ok "a ledger path that is a SYMLINK is not trusted: nothing is scored, nothing undone" '[ "$(sig 900 901 902 $STAY)" = "$before" ] && [ -z "$(ls "$T/elsewhere")" ]'
+rc=$?; ok "a ledger path that is a SYMLINK is not trusted: exit 1, nothing is scored, nothing undone" '[ "$rc" -eq 1 ] && [ "$(sig 900 901 902 $STAY)" = "$before" ] && [ -z "$(ls "$T/elsewhere")" ]'
 rm -f "$LG"
 fixture; mkdir -p "$LG"; chmod 777 "$LG"; before=$(sig 900 901 902 $STAY); run_op apply
-ok "a ledger directory that others can write is not trusted: nothing is scored, nothing recorded" '[ "$(sig 900 901 902 $STAY)" = "$before" ] && [ -z "$(ls "$LG")" ]'
+rc=$?; ok "a ledger directory that others can write is not trusted: exit 1, nothing is scored, nothing recorded" '[ "$rc" -eq 1 ] && [ "$(sig 900 901 902 $STAY)" = "$before" ] && [ -z "$(ls "$LG")" ]'
 fixture; run_op apply; printf 'start=5000100 unit=lead-spire.scope score=0 prev=-999 uid=%s\n' "$(id -u)" > "$T/planted"; ln -s "$T/planted" "$LG/100"; echo garbage > "$LG/101"
 printf 'start=5000302 unit=lead-spire.scope score=-500 prev=77 uid=%s\n' "$(( $(id -u) + 1 ))" > "$LG/302"; before=$(sig $STAY); run_op apply; run_op off
 ok "a record that is a symlink, one that is garbage, and one for another uid are ignored: those processes are not written" '[ "$(sig $STAY)" = "$before" ]'
@@ -213,7 +218,7 @@ fixture; run_op apply; printf 'start=5000904 unit=lead-spire.scope score=-500 pr
 ok "a record carrying ANOTHER uid matching a process inside the lead unit (904, its own -500): not acted on" '[ "$(sig $STAY)" = "$before" ]'
 if [ "$(id -u)" -ne 0 ]; then
   fixture; chmod 444 "$PR/901/oom_score_adj"; run_op apply; rc=$?
-  ok "a score that cannot be written: exit 1, NO record is left for it (a record without its score is a later false undo), the others are scored" '[ "$rc" -eq 1 ] && [ ! -e "$LG/901" ] && [ "$(scores 900 901 902)" = "-500 200 -500 " ]'
+  ok "a score that cannot be written: exit 1, NO record is left for it (a record without its score is a later false undo), and the run STOPS there (the next process is not scored)" '[ "$rc" -eq 1 ] && [ ! -e "$LG/901" ] && [ "$(scores 900 901 902)" = "-500 200 0 " ] && [ ! -e "$LG/902" ]'
 fi
 # a PLANTED record that looks right, for a process in a unit that is not a lead unit: off must not write it
 fixture; mkdir -p -m 700 "$LG"; printf 'start=5000302 unit=tmux-spawn-x.scope score=-500 prev=0 uid=%s\n' "$(id -u)" > "$LG/302"; before=$(sig $STAY); run_op off
@@ -227,8 +232,8 @@ ok "a lane's scope, a unit whose name only STARTS like it, the same name under a
 if python3 -I -c 'import os, sys; os.setxattr(sys.argv[1], "user.oomd_avoid", b"1")' "$XD" 2>/dev/null; then
   run_op apply; ok "a lane that MARKS its own scope (user.oomd_avoid) earns nothing" '[ "$(scores 100 101)" = "0 0 " ]'
 fi
-ok "no attribute is read anywhere in the tool, and no blanket reset is left in it" '! grep -q "getxattr\|oomd_avoid" "$SH" && ! grep -q "startswith(mine)\|wr(fd, \"0\")" "$SH"'
-ok "the helper has exactly ONE place that writes a score back, and it is behind still_in()" '[ "$(grep -c "wr(fd, r\[\"prev\"\])" "$SH")" = 1 ] && grep -B3 "wr(fd, r\[\"prev\"\])" "$SH" | grep -q "elif not still_in(cg, r.get(\"unit\")):"'
+ok "no attribute is read anywhere in the tool, and no blanket reset is left in it" '! grep -q "getxattr\|oomd_avoid" "$SH" && ! grep -q "startswith(mine)\|wr_score(fd, \"0\")" "$SH"'
+ok "the helper has exactly ONE place that writes a score back, and it is behind still_in()" '[ "$(grep -c "wr_score(fd, r\[\"prev\"\])" "$SH")" = 1 ] && grep -B4 "wr_score(fd, r\[\"prev\"\])" "$SH" | grep -q "if not still_in(place(fd), r\[\"uid\"\], r\[\"unit\"\]):"'
 fixture; mv "$LD" "$LD.away"; ln -s "$LD.away" "$LD"; before=$(sig 900 901 902 $STAY); run_op apply; rm -f "$LD"; mv "$LD.away" "$LD"
 ok "the unit path being a symlink (to a directory listing processes whose own cgroup IS the unit): nobody is scored" '[ "$(sig 900 901 902 $STAY)" = "$before" ] && [ ! -e "$LG/900" ]'
 fixture; run_op apply; mv "$LD" "$LD.away"; ln -s "$LD.away" "$LD"; s=$(sig 900 901 902 $STAY); run_op off; rm -f "$LD"; mv "$LD.away" "$LD"
@@ -255,7 +260,7 @@ done
 echo "── io-shield-accept: fails on an absent service, a restart, a change, or zero leads ──"
 AC="$ROOT/scripts/host/io-shield-accept"
 printf 'oomprotect %s lead-spire.scope -500\n' "$(id -u)" > "$T/conf"
-run_ac() { local host=$1; shift; IO_SHIELD_ACCEPT_HOST="$host" IO_SHIELD_CONF="$T/conf" IO_SHIELD_QOS_FILE="$T/qos" IO_SHIELD_SYSBLOCK="$T/sys" IO_SHIELD_CGROUP_ROOT="$T/cg" IO_SHIELD_PROC="$PR" IO_SHIELD_RUN_DIR="$T/run" IO_SHIELD_ASSUME_ROOT=1 IO_SHIELD_BIN="${ACBIN:-$SH}" PATH="$B:$PATH" bash "$AC" "$@" > "$T/out" 2> "$T/err"; }
+run_ac() { local host=$1; shift; IO_SHIELD_ACCEPT_HOST="$host" IO_SHIELD_THROWAWAY_CONF="$T/tconf" IO_SHIELD_CONF="$T/conf" IO_SHIELD_QOS_FILE="$T/qos" IO_SHIELD_SYSBLOCK="$T/sys" IO_SHIELD_CGROUP_ROOT="$T/cg" IO_SHIELD_PROC="$PR" IO_SHIELD_RUN_DIR="$T/run" IO_SHIELD_ASSUME_ROOT=1 IO_SHIELD_BIN="${ACBIN:-$SH}" PATH="$B:$PATH" bash "$AC" "$@" > "$T/out" 2> "$T/err"; }
 ok "the list in the script's table is the list in its header (familiar's four and serialhub's three, with their scores)" '[ "$(sed -n "/^  familiar)/s/.*MUST=\"\(.*\)\" ;;/\1/p" "$AC")" = "palace-daemon.service=-500 qwen3-coder.service=-500 familiar-loadguard.service=-800 donkey-llm.service=-100" ] && [ "$(sed -n "/^  serialhub)/s/.*MUST=\"\(.*\)\" ;;/\1/p" "$AC")" = "octoprint.service=-900 ustreamer.service=-900 ustreamer-builtin.service=-900" ] && for u in "palace-daemon.service        -500" "qwen3-coder.service          -500" "familiar-loadguard.service   -800" "donkey-llm.service           -100"; do grep -q "^#  *\(familiar  *\)\?$u" "$AC" || exit 1; done'
 fixture; run_ac familiar "$(id -u)" apply; rc=$?
 ok "familiar, apply: exit 0, each of its four services reported the same process, cgroup and score" '[ "$rc" -eq 0 ] && for u in "palace-daemon.service pid 310 -500" "qwen3-coder.service pid 311 -500" "familiar-loadguard.service pid 312 -800" "donkey-llm.service pid 313 -100"; do grep -q "^untouched  $u (same process, same cgroup)" "$T/out" || exit 1; done'
@@ -272,7 +277,7 @@ fixture; run_ac katana "$(id -u)" apply; rc=$?
 ok "a host with no list: refused (exit 2), nothing run" '[ "$rc" -eq 2 ] && grep -q "has no acceptance list" "$T/err" && [ "$(scores 900)" = "0 " ]'
 fixture; IO_SHIELD_MUST_STAY="octoprint.service=-900" run_ac katana "$(id -u)" apply; rc=$?
 ok "…with IO_SHIELD_MUST_STAY naming one: accepted against that list" '[ "$rc" -eq 0 ] && grep -q "^untouched  octoprint.service pid 314 -900" "$T/out"'
-mkevil() { printf '#!/usr/bin/env bash\n%s\n' "$1" > "$T/evil-shield"; }
+mkevil() { printf '#!/usr/bin/env bash\n%s\n' "$1" > "$T/evil-shield"; chmod +x "$T/evil-shield"; }
 mkevil "echo 0 > \"$PR/310/oom_score_adj\""; fixture; ACBIN="$T/evil-shield" run_ac familiar "$(id -u)" apply; rc=$?
 ok "not vacuous: a helper that RESETS palace-daemon is exit 1 and named" '[ "$rc" -eq 1 ] && grep -q "^REJECT: palace-daemon.service pid 310: score CHANGED -500 → 0" "$T/out"'
 mkevil "echo \"310 (new one) S 1 310 310 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 8888888 0 0\" > \"$PR/310/stat\""; fixture; ACBIN="$T/evil-shield" run_ac familiar "$(id -u)" apply; rc=$?
@@ -298,6 +303,153 @@ ok "a helper that fails: exit 2, no ACCEPT" '[ "$rc" -eq 2 ] && ! grep -q "^ACCE
 bash "$AC" > /dev/null 2>&1; ok "io-shield-accept without arguments: exit 22" '[ "$?" -eq 22 ]'
 bash "$AC" "$(id -u)" status > /dev/null 2>&1; ok "io-shield-accept with another verb: exit 22" '[ "$?" -eq 22 ]'
 
+
+echo "── xreview #291 r1, finding by finding ──────────────────────────"
+ME=$(id -u); OP="oomprotect $ME lead-spire.scope -500"
+setconf() { printf '%s\n' "$@" > "$T/conf"; }
+mkdir -p "$T/wnow"
+# 1. unit weights and io.cost are in the ledger, record first; off undoes ONLY what is recorded
+fixture; setconf "device nvme0n1" "unit foreign.service 20" "docker mempalace-db 20" "$OP"; echo "259:0 enable=1 ctrl=user rpct=50.00 rlat=9000 wpct=50.00 wlat=9000 min=10.00 max=100.00" > "$T/qos"; cp "$T/qos" "$T/qos.b"; : > "$LOG"; run_op off; rc=$?
+ok "off WITHOUT a prior apply: a configured unit, container and device are NOT written (no set-property, io.cost.qos byte-identical), and it says so" '[ "$rc" -eq 0 ] && ! grep -q "set-property" "$LOG" && cmp -s "$T/qos" "$T/qos.b" && grep -q "foreign.service has no record of ours: not written" "$T/out" && grep -q "was not enabled by this tool (no record): not written" "$T/out"'
+run_op on; echo 55 > "$T/wnow/foreign.service"; : > "$LOG"; run_op apply; rc=$?
+ok "apply: a record for the unit, the container and the device BEFORE each is set: our weight, what it had before" '[ "$rc" -eq 0 ] && grep -qx "ours=20 prev=55" "$LG/unit.foreign.service" && grep -qx "ours=20 prev=unset" "$LG/unit.docker-$ID.scope" && grep -qx "prev=259:0 enable=1 ctrl=user rpct=50.00 rlat=9000 wpct=50.00 wlat=9000 min=10.00 max=100.00" "$LG/dev.259_0"'
+echo "[not set]" > "$T/wnow/foreign.service"; : > "$LOG"; run_op off; rc=$?
+ok "off: the recorded unit gets its PREVIOUS weight back (55), not just the default; the records are gone" '[ "$rc" -eq 0 ] && grep -qxF "systemctl set-property --runtime foreign.service IOWeight=" "$LOG" && grep -qxF "systemctl set-property --runtime foreign.service IOWeight=55" "$LOG" && [ ! -e "$LG/unit.foreign.service" ] && [ ! -e "$LG/dev.259_0" ]'
+ok "off: the device gets the io.cost.qos line it had BEFORE us, not a blanket enable=0" 'cmp -s "$T/qos" "$T/qos.b"'
+rm -f "$T/wnow/foreign.service"; run_op on; : > "$T/qos"; run_op apply; setconf "$OP"; : > "$LOG"; run_op off
+ok "off undoes what is RECORDED even when the config no longer names it" 'grep -qxF "systemctl set-property --runtime foreign.service IOWeight=" "$LOG" && grep -qxF "259:0 enable=0" "$T/qos"'
+fixture; run_op on; setconf "unit broken.service 20" "unit foreign.service 20"; : > "$LOG"; run_op apply; rc=$?
+ok "a set-property that fails: exit 1, NO record of a setting that was not made, and the run stops (the next unit is not set)" '[ "$rc" -eq 1 ] && [ ! -e "$LG/unit.broken.service" ] && ! grep -q "foreign.service" "$LOG"'
+# 2. the unit validator refuses the forbidden targets by the shape of the name, before ANY action
+for badu in system.slice user.slice lead-spire.scope lane-alpha-12345678.scope dreamteam-proj.scope "user@$ME.service" systemd-journald.service lanes.slice; do
+  fixture; run_op on; setconf "device nvme0n1" "unit $badu 20" "$OP"; : > "$T/qos"; : > "$LOG"; before=$(sig 900 901 902 $STAY); run_op apply; a=$?; run_op off; b=$?
+  if [ "$a" -eq 22 ] && [ "$b" -eq 22 ] && [ ! -s "$T/qos" ] && ! grep -q "set-property" "$LOG" && [ "$(sig 900 901 902 $STAY)" = "$before" ] && [ ! -e "$LG" ]; then pass "unit $badu: refused (22) by apply AND off, before anything: the earlier device line is not applied, no score, no ledger"
+  else fail "unit $badu: apply $a off $b qos [$(cat "$T/qos")] log [$(cat "$LOG")]"; fi
+done
+# 3. root runs are not steerable; the sudoers grant is in the diff and narrow
+ok "as root the helper drops the environment and fixes PATH; the IO_SHIELD_* seams exist only in the not-root branch" 'grep -q "^    os.environ.clear()$" "$SH" && grep -q "/usr/sbin:/usr/bin:/sbin:/bin" "$SH" && [ "$(grep -c "os.environ" "$SH")" -eq 3 ] && grep -A3 "^if ROOT:$" "$SH" | grep -q "E = {}"'
+SU="$ROOT/systemd/system/sudoers.d/dreamteam-io-shield.in"; sed 's/@USER@/someone/g' "$SU" > "$T/sudoers"
+if command -v visudo > /dev/null 2>&1; then
+  if visudo -cf "$T/sudoers" > /dev/null 2>&1; then pass "the sudoers file parses (visudo -cf)"; else fail "visudo rejects the sudoers file"; fi
+  printf 'someone ALL=(root) NOPASSWD /bin/true\n' > "$T/sudoers.bad"; if visudo -cf "$T/sudoers.bad" > /dev/null 2>&1; then fail "visudo accepted a broken file: the check is vacuous"; else pass "…and visudo rejects a broken one (the check is not vacuous)"; fi
+fi
+ok "the grant is exactly the two read-only verbs of this one helper, to one user; apply, off and on are not in it" '[ "$(grep -v "^#" "$T/sudoers" | grep -c "NOPASSWD")" -eq 1 ] && grep -qx "someone ALL=(root) NOPASSWD: DT_IO_SHIELD" "$T/sudoers" && grep -qx "Cmnd_Alias DT_IO_SHIELD = /usr/local/sbin/dreamteam-io-shield status, /usr/local/sbin/dreamteam-io-shield --throwaway status" "$T/sudoers" && ! grep -v "^#" "$T/sudoers" | grep -qw "apply\|off\|on\|ALL$"'
+ok "…with the environment reset, no setenv, and a fixed path" 'grep -qx "Defaults!DT_IO_SHIELD env_reset, !setenv, secure_path=\"/usr/sbin:/usr/bin:/sbin:/bin\"" "$T/sudoers"'
+# 4. the ledger: durable publication, and a damaged ledger stops the run before anything
+setconf "$OP"
+damaged() { # damaged <label> <command that damages the ledger after an apply>
+  fixture; run_op on; run_op apply; eval "$2"; all=$(sig 900 901 902 $STAY); snap=$(ls -la "$LG" | md5sum); run_op off; a=$?
+  if [ "$a" -eq 1 ] && [ "$(sig 900 901 902 $STAY)" = "$all" ] && [ ! -e "$T/run/dreamteam-io-shield.off" ] && [ "$(ls -la "$LG" | md5sum)" = "$snap" ] && grep -q "ledger" "$T/err"; then pass "damaged ledger ($1): off exits 1, writes NO score back (not even the intact records'), no stamp, the ledger untouched"
+  else fail "damaged ledger ($1): rc $a scores $(scores 900 901 902) stamp $(ls "$T/run" | tr '\n' ' ') err [$(head -c 150 "$T/err")]"; fi
+  run_op apply; a=$?
+  if [ "$a" -eq 1 ] && [ "$(sig 900 901 902 $STAY)" = "$all" ]; then pass "damaged ledger ($1): apply exits 1 too, nobody scored"; else fail "damaged ledger ($1): apply rc $a"; fi
+}
+damaged "a HALF-WRITTEN record" 'printf "start=5000900 unit=lead-spi" > "$LG/900"'
+damaged "a record without its newline" 'printf "start=5000900 unit=lead-spire.scope score=-500 prev=0 uid=%s" "$ME" > "$LG/900"'
+damaged "a record with a field too many" 'printf "start=5000900 unit=lead-spire.scope score=-500 prev=0 uid=%s extra=1\n" "$ME" > "$LG/900"'
+damaged "an empty record" ': > "$LG/901"'
+damaged "an entry of an unknown name" 'echo hello > "$LG/notes"'
+damaged "a record that is a symlink" 'printf "start=5000903 unit=lead-spire.scope score=-900 prev=0 uid=%s\n" "$ME" > "$T/planted"; ln -s "$T/planted" "$LG/903"'
+damaged "a directory where a record should be" 'mkdir "$LG/905"'
+damaged "left/ replaced by a file" ': > "$LG/left"'
+damaged "a half-written unit record" 'printf "ours=20 pre" > "$LG/unit.foreign.service"'
+fixture; run_op on; run_op apply; echo junk > "$LG/.900.tmp"; run_op off; rc=$?
+ok "a leftover temp file of an interrupted publish is no record and no damage: off runs" '[ "$rc" -eq 0 ] && [ "$(scores 900 901 902)" = "0 200 0 " ]'
+if command -v strace > /dev/null 2>&1 && strace -o /dev/null true 2> /dev/null; then
+  fixture; run_op on
+  IO_SHIELD_CONF="$T/conf" IO_SHIELD_QOS_FILE="$T/qos" IO_SHIELD_SYSBLOCK="$T/sys" IO_SHIELD_CGROUP_ROOT="$T/cg" IO_SHIELD_PROC="$PR" IO_SHIELD_RUN_DIR="$T/run" IO_SHIELD_ASSUME_ROOT=1 PATH="$B:$PATH" strace -f -o "$T/strace" -e trace=fsync,renameat,rename,renameat2,write python3 -I "$SH" apply > /dev/null 2>&1
+  # for each of the three records: the record's bytes written, fsync of the file, the rename, fsync of the directory, and only THEN the score
+  seq=$(grep -E 'fsync\(|rename|write\([0-9]+, "(start=|-500)' "$T/strace" | sed -E 's/^[0-9]+ +//; s/\(.*//' | tr '\n' ' ')
+  ok "publication is durable, in this order for every record: write, fsync(file), rename, fsync(directory), and only then the score ($(grep -c 'fsync(' "$T/strace") fsyncs for 3 records)" '[ "$(grep -c "fsync(" "$T/strace")" -eq 6 ] && [ "$seq" = "write fsync rename fsync write write fsync rename fsync write write fsync rename fsync write " ]'
+fi
+# 5. EACCES / EIO are not absence: the record is kept and the run stops before the next change
+if [ "$ME" -ne 0 ]; then
+  fixture; run_op on; run_op apply; chmod 000 "$PR/901"; run_op off; rc=$?; chmod 755 "$PR/901"
+  ok "a recorded process that cannot be LOOKED AT (EACCES): exit 1, its record KEPT (it is not 'gone'), and the run stops: the next record is not undone" '[ "$rc" -eq 1 ] && [ -e "$LG/901" ] && [ "$(scores 900 901 902)" = "0 -500 -500 " ] && [ -e "$LG/902" ] && grep -q "not known to be gone" "$T/err"'
+  fixture; run_op on; run_op apply; chmod 000 "$PR/901/oom_score_adj"; run_op off; rc=$?; chmod 644 "$PR/901/oom_score_adj"
+  ok "a recorded process whose score cannot be READ: exit 1, record kept, run stopped" '[ "$rc" -eq 1 ] && [ -e "$LG/901" ] && [ -e "$LG/902" ]'
+  fixture; run_op on; run_op apply; chmod 500 "$LG"; run_op off; rc=$?; chmod 700 "$LG"
+  ok "a record that cannot be DELETED: exit 1 and the run stops at once (no further score is written back)" '[ "$rc" -eq 1 ] && [ "$(scores 901 902)" = "-500 -500 " ] && grep -q "cannot remove the record" "$T/err"'
+  fixture; run_op on; chmod 000 "$PR/901"; run_op apply; rc=$?; chmod 755 "$PR/901"
+  ok "apply: a process in the unit that cannot be looked at stops the run (exit 1); it is not skipped as absent" '[ "$rc" -eq 1 ] && [ ! -e "$LG/902" ]'
+fi
+fixture; run_op on; setconf "unit failing.service 20" "unit foreign.service 20"; : > "$LOG"; run_op apply; rc=$?
+ok "a systemctl show that FAILS is not 'not loaded': exit 1, nothing set on that unit or on the next" '[ "$rc" -eq 1 ] && ! grep -q "set-property" "$LOG" && ! grep -q "is not loaded now" "$T/out" && grep -q "its state is unknown" "$T/err"'
+setconf "$OP"
+# 6. the placement is read again immediately before the write (and once after a new score)
+seqcg() { rm -f "$PR/$1/cgroup"; mkfifo "$PR/$1/cgroup"; shift; ( for c in "$@"; do echo "0::$c" > "$FIFO_OF"; sleep 0.1; done ) & SEQ=$!; }      # the pause: the reader of one answer has closed before the next is offered (a FIFO with no open end drops what is in it)
+IN="/$UM/app.slice/lead-spire.scope"
+fixture; run_op on; run_op apply; FIFO_OF="$PR/901/cgroup" seqcg 901 "$IN" "/system.slice/adopted.service"; s=$(sig 901); run_op off; rc=$?; kill "$SEQ" 2>/dev/null; wait "$SEQ" 2>/dev/null
+ok "off: a process that is in its lead unit at the first look and under /system.slice at the look just before the write is NOT written; its record is retired" '[ "$rc" -eq 0 ] && [ "$(sig 901)" = "$s" ] && [ -f "$LG/left/901.5000901" ] && [ "$(scores 900 902)" = "0 0 " ]'
+fixture; run_op on; FIFO_OF="$PR/901/cgroup" seqcg 901 "$IN" "/$UM/app.slice/tmux-spawn-x.scope"; s=$(sig 901); run_op apply; rc=$?; kill "$SEQ" 2>/dev/null; wait "$SEQ" 2>/dev/null
+ok "apply: a process that leaves between the first look and the look just before the write is NOT scored, and no record of it remains" '[ "$rc" -eq 0 ] && [ "$(sig 901)" = "$s" ] && [ ! -e "$LG/901" ] && [ "$(scores 900 902)" = "-500 -500 " ]'
+fixture; run_op on; FIFO_OF="$PR/901/cgroup" seqcg 901 "$IN" "$IN" "/system.slice/adopted.service"; run_op apply; rc=$?; kill "$SEQ" 2>/dev/null; wait "$SEQ" 2>/dev/null
+ok "apply: a process that leaves DURING the write is found at the look after it: its record is retired at once and the run says so (2 scored, 1 left)" '[ "$rc" -eq 0 ] && [ ! -e "$LG/901" ] && [ -f "$LG/left/901.5000901" ] && grep -q "2 process(es) scored -500 and recorded; 2 in the unit left as found (a negative score we did not write); 1 of ours have LEFT" "$T/out"'
+ok "the header does not claim an atomic check-and-write: it states the window" 'grep -q "WHAT THAT IS NOT:" "$SH" && grep -q "an atomic check-and-write" "$SH"'
+# 7. first use is a throwaway unit, by construction
+fixture; run_op on; rm -f "$T/accepted"; : > "$LOG"; before=$(sig 900 901 902 $STAY); run_op apply; rc=$?
+ok "production apply WITHOUT the acceptance flag: exit 3, nothing scored, no ledger, nothing set" '[ "$rc" -eq 3 ] && [ "$(sig 900 901 902 $STAY)" = "$before" ] && [ ! -e "$LG" ] && [ ! -s "$LOG" ] && grep -q "NOT ACCEPTED on this host" "$T/err"'
+printf 'sha256=%s\n' "$(printf x | sha256sum | cut -d" " -f1)" > "$T/accepted"; chmod 600 "$T/accepted"; run_op apply; rc=$?
+ok "…with a flag for ANOTHER helper (another sha256): exit 3" '[ "$rc" -eq 3 ] && [ ! -e "$LG" ]'
+accept_flag; chmod 666 "$T/accepted"; run_op apply; rc=$?; ok "…with a flag others can write: exit 3" '[ "$rc" -eq 3 ] && [ ! -e "$LG" ]'
+accept_flag; mv "$T/accepted" "$T/accepted.real"; ln -s "$T/accepted.real" "$T/accepted"; run_op apply; rc=$?; rm -f "$T/accepted" "$T/accepted.real"
+ok "…with a flag that is a symlink: exit 3" '[ "$rc" -eq 3 ] && [ ! -e "$LG" ]'
+run_op status; rc=$?; ok "status says the host is not accepted; off and on need no flag" '[ "$rc" -eq 0 ] && grep -q "^NOT ACCEPTED on this host" "$T/out"'
+TD="$T/cg/$UM/app.slice/lead-throwaway-a1.scope"; mkdir -p "$TD"; TLG="$T/run/dreamteam-io-shield-throwaway"
+tfix() { fixture; rm -rf "$TLG" "$T/run/dreamteam-io-shield-throwaway.off"; fp 950 "/$UM/app.slice/lead-throwaway-a1.scope" 0; fp 951 "/$UM/app.slice/lead-throwaway-a1.scope" 0; printf '950\n951\n' > "$TD/cgroup.procs"; printf 'oomprotect %s lead-throwaway-a1.scope -500\n' "$ME" > "$T/tconf"; }
+tfix; before=$(sig 900 901 902 $STAY); run_op --throwaway apply; rc=$?
+ok "--throwaway apply needs NO flag: it scores the throwaway unit only, in its OWN ledger; the production unit and ledger are untouched" '[ "$rc" -eq 0 ] && [ "$(scores 950 951)" = "-500 -500 " ] && [ -e "$TLG/950" ] && [ ! -e "$LG" ] && [ "$(sig 900 901 902 $STAY)" = "$before" ]'
+run_op --throwaway off; rc=$?
+ok "--throwaway off undoes it, with its own stamp" '[ "$rc" -eq 0 ] && [ "$(scores 950 951)" = "0 0 " ] && [ -e "$T/run/dreamteam-io-shield-throwaway.off" ] && [ ! -e "$T/run/dreamteam-io-shield.off" ]'
+for badt in "oomprotect $ME lead-spire.scope -500" "device nvme0n1" "unit foreign.service 20" "docker mempalace-db 20" "oomprotect $ME lead-throwaway-.scope -500" "oomprotect $ME lead-throwaway-A.scope -500"; do
+  tfix; printf '%s\n' "$badt" > "$T/tconf"; : > "$T/qos"; : > "$LOG"; before=$(sig 900 901 902 950 951 $STAY); run_op --throwaway apply; rc=$?
+  if [ "$rc" -eq 22 ] && [ "$(sig 900 901 902 950 951 $STAY)" = "$before" ] && [ ! -s "$T/qos" ] && [ ! -s "$LOG" ]; then pass "a throwaway config may hold nothing but lead-throwaway-<name>.scope lines: refused: $badt"; else fail "throwaway config '$badt': rc $rc"; fi
+done
+tfix; setconf "oomprotect $ME lead-throwaway-a1.scope -500"; accept_flag; run_op apply; rc=$?; setconf "$OP"
+ok "a PRODUCTION config may not name a throwaway unit: refused (22)" '[ "$rc" -eq 22 ] && [ "$(scores 950)" = "0 " ]'
+# io-shield-accept throwaway: the only writer of the flag
+tfix; rm -f "$T/accepted"; run_ac familiar "$ME" throwaway; rc=$?
+ok "io-shield-accept throwaway: a whole apply and a whole off on the throwaway unit, the four services untouched in both, exit 0" '[ "$rc" -eq 0 ] && [ "$(grep -c "^untouched  palace-daemon.service pid 310 -500" "$T/out")" -eq 2 ] && grep -q "^lead unit  lead-throwaway-a1.scope: 2 process(es) in it hold -500" "$T/out" && grep -q "^ACCEPT (throwaway on familiar)" "$T/out" && [ "$(scores 950 951)" = "0 0 " ]'
+ok "…and ONLY THEN the flag: the sha256 of the helper that was run, 0600" 'grep -qx "sha256=$(sha256sum "$SH" | cut -d" " -f1)" "$T/accepted" && [ "$(stat -c %a "$T/accepted")" = 600 ]'
+run_op on; run_op apply; rc=$?; ok "…after which production apply is allowed" '[ "$rc" -eq 0 ] && [ "$(scores 900)" = "-500 " ]'
+tfix; rm -rf "$PR/312"; run_ac familiar "$ME" throwaway; rc=$?
+ok "accept throwaway with a named service ABSENT: exit 1, the helper not run, NO flag (the earlier flag is removed too)" '[ "$rc" -eq 1 ] && ! grep -q "== RUN" "$T/out" && [ ! -e "$T/accepted" ]'
+mkevil 'case "$*" in *apply*) exec python3 -I "'"$SH"'" "$@" ;; *) exit 0 ;; esac'; tfix; ACBIN="$T/evil-shield" run_ac familiar "$ME" throwaway; rc=$?
+ok "accept throwaway where the off undoes nothing: exit 1, NO flag" '[ "$rc" -eq 1 ] && grep -q "still hold our score with a record after off" "$T/out" && [ ! -e "$T/accepted" ]'
+mkevil 'case "$*" in *apply*) exec python3 -I "'"$SH"'" "$@" ;; *) echo 0 > "'"$PR"'/950/oom_score_adj"; echo 0 > "'"$PR"'/951/oom_score_adj"; exit 0 ;; esac'; tfix; ACBIN="$T/evil-shield" run_ac familiar "$ME" throwaway; rc=$?
+ok "accept throwaway where the off resets the scores but leaves its records in the ledger: exit 1, NO flag" '[ "$rc" -eq 1 ] && grep -q "after the throwaway off the ledger still holds" "$T/out" && [ -e "$TLG/950" ] && [ ! -e "$T/accepted" ]'
+mkevil 'exit 0'; tfix; ACBIN="$T/evil-shield" run_ac familiar "$ME" throwaway; rc=$?
+ok "accept throwaway where nobody was scored: exit 1 (zero leads), NO flag" '[ "$rc" -eq 1 ] && grep -q "ZERO protected processes" "$T/out" && [ ! -e "$T/accepted" ]'
+ok "as root the acceptance script drops IO_SHIELD_* and fixes PATH (it then runs the INSTALLED helper only)" 'grep -q "for v in \$(compgen -v | grep .^IO_SHIELD_. || true); do unset \"\$v\"; done" "$AC" && grep -q "PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH" "$AC"'
+accept_flag; setconf "$OP"
+# the installer: the one way onto a host, and the gate on the timer
+IN_="$ROOT/scripts/host/io-shield-install"; IR="$T/iroot"
+run_in() { IO_SHIELD_ASSUME_ROOT=1 IO_SHIELD_INSTALL_ROOT="$IR" PATH="${INPATH:+$INPATH:}$B:$PATH" bash "$IN_" "$@" > "$T/out" 2> "$T/err"; }
+iflag() { mkdir -p "$IR/var/lib/dreamteam"; printf 'sha256=%s\nhost=x\n' "$(sha256sum "${1:-$IR/usr/local/sbin/dreamteam-io-shield}" | cut -d" " -f1)" > "$IR/var/lib/dreamteam/io-shield.accepted"; chmod 600 "$IR/var/lib/dreamteam/io-shield.accepted"; }
+if command -v visudo > /dev/null 2>&1; then
+  rm -rf "$IR"; : > "$LOG"; run_in someone; rc=$?
+  ok "install: the helper, the acceptance script (0755), the two units (0644) and the sudoers file (0440, the user's name in it)" '[ "$rc" -eq 0 ] && cmp -s "$SH" "$IR/usr/local/sbin/dreamteam-io-shield" && [ "$(stat -c %a "$IR/usr/local/sbin/dreamteam-io-shield")" = 755 ] && cmp -s "$AC" "$IR/usr/local/sbin/dreamteam-io-shield-accept" && [ -f "$IR/etc/systemd/system/dreamteam-io-shield.timer" ] && [ "$(stat -c %a "$IR/etc/sudoers.d/dreamteam-io-shield")" = 440 ] && grep -qx "someone ALL=(root) NOPASSWD: DT_IO_SHIELD" "$IR/etc/sudoers.d/dreamteam-io-shield"'
+  ok "install WITHOUT an acceptance: the timer is not enabled; it is DISABLED, and the next step is named" '! grep -q "systemctl enable" "$LOG" && grep -qxF "systemctl disable --now dreamteam-io-shield.timer" "$LOG" && grep -q "dreamteam-io-shield-accept <uid> throwaway" "$T/out"'
+  : > "$LOG"; run_in someone --enable; rc=$?
+  ok "install --enable without the flag: REFUSED (exit 3), no enable" '[ "$rc" -eq 3 ] && ! grep -q "systemctl enable" "$LOG"'
+  iflag "$AC"; : > "$LOG"; run_in someone --enable; rc=$?
+  ok "install --enable with a flag for ANOTHER helper: refused (3), the timer disabled" '[ "$rc" -eq 3 ] && ! grep -q "systemctl enable" "$LOG" && grep -qxF "systemctl disable --now dreamteam-io-shield.timer" "$LOG"'
+  iflag; chmod 666 "$IR/var/lib/dreamteam/io-shield.accepted"; : > "$LOG"; run_in someone --enable; rc=$?
+  ok "install --enable with a flag others can write: refused (3)" '[ "$rc" -eq 3 ] && ! grep -q "systemctl enable" "$LOG"'
+  iflag; mv "$IR/var/lib/dreamteam/io-shield.accepted" "$T/fl"; ln -s "$T/fl" "$IR/var/lib/dreamteam/io-shield.accepted"; : > "$LOG"; run_in someone --enable; rc=$?; rm -f "$IR/var/lib/dreamteam/io-shield.accepted"
+  ok "install --enable with a flag that is a symlink: refused (3)" '[ "$rc" -eq 3 ] && ! grep -q "systemctl enable" "$LOG"'
+  iflag; : > "$LOG"; run_in someone; rc=$?
+  ok "install with a valid flag but no --enable: the timer is left as it is" '[ "$rc" -eq 0 ] && ! grep -q "systemctl enable\|systemctl disable" "$LOG"'
+  : > "$LOG"; run_in someone --enable; rc=$?
+  ok "install --enable with the flag for the installed helper: the timer is enabled" '[ "$rc" -eq 0 ] && grep -qxF "systemctl enable --now dreamteam-io-shield.timer" "$LOG"'
+  mkdir -p "$T/novisudo"; printf '#!/bin/sh\nexit 1\n' > "$T/novisudo/visudo"; chmod +x "$T/novisudo/visudo"; rm -rf "$IR"; INPATH="$T/novisudo" run_in someone; rc=$?
+  ok "a sudoers file visudo does not accept: exit 2 and NOTHING is installed" '[ "$rc" -eq 2 ] && [ ! -e "$IR/usr/local/sbin/dreamteam-io-shield" ] && [ ! -e "$IR/etc/sudoers.d/dreamteam-io-shield" ]'
+fi
+for badw in "" "Some One" "root;id" "../x"; do IO_SHIELD_ASSUME_ROOT=1 IO_SHIELD_INSTALL_ROOT="$IR" bash "$IN_" $badw > /dev/null 2>&1; [ "$?" -eq 22 ] && pass "installer: bad user name refused: '${badw}'" || fail "installer accepted user '$badw'"; done
+if [ "$ME" -ne 0 ]; then bash "$IN_" someone > /dev/null 2>&1; ok "installer without root: exit 2" '[ "$?" -eq 2 ]'; fi
+ok "the timer's service needs BOTH the config and the acceptance flag" 'grep -qx "ConditionPathExists=/etc/dreamteam/io-shield.conf" "$ROOT/systemd/system/dreamteam-io-shield.service" && grep -qx "ConditionPathExists=/var/lib/dreamteam/io-shield.accepted" "$ROOT/systemd/system/dreamteam-io-shield.service"'
+ok "the installer parses" 'bash -n "$IN_"'
+
 echo "── units ────────────────────────────────────────────────────────"
 DD="$ROOT/systemd/system/user@.service.d/20-delegate-io.conf"
 ok "the user@ drop-in adds io and keeps the vendor's three controllers" 'grep -qx "Delegate=pids memory cpu io" "$DD" && grep -qx "\[Service\]" "$DD"'
@@ -309,7 +461,7 @@ if command -v systemd-analyze > /dev/null 2>&1; then
   if systemd-analyze verify "$V"/dreamteam-io-shield.timer > "$T/v.out" 2>&1; then pass "systemd-analyze accepts the two system unit files"
   else fail "unit files rejected: $(grep -v '^$' "$T/v.out" | head -3)"; fi
 fi
-for f in "$SH" "$AC"; do
+for f in "$AC"; do
   body=$(awk "/python3 -I -c '/{on=1; next} on && /^[^#]*' \"\\$/{on=0} on" "$f")
   if [ -n "$body" ] && ! grep -q "'" <<<"$body"; then pass "no apostrophe inside the python embedded in $(basename "$f") (it would end the shell's quoted block)"; else fail "an apostrophe (or no body found) in the embedded python of $(basename "$f")"; fi
 done

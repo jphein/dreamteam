@@ -1,0 +1,13 @@
+# dreamteam io-shield: the ONLY thing this file grants. Installed as /etc/sudoers.d/dreamteam-io-shield by
+# scripts/host/io-shield-install, which puts the login user's name where @USER@ stands and refuses to install a
+# file that `visudo -cf` does not accept.
+#
+# What the fleet's user may run as root without a password: the helper's two READ-ONLY verbs, with exactly these
+# arguments, nothing appended, no environment carried in (the helper ignores IO_SHIELD_* as root anyway) and a
+# fixed PATH.
+# NOT granted, on purpose: apply, off and on. The system timer runs apply; a rollback or a first enabling is a
+# person's act, with their own sudo, through dreamteam-io-shield-accept. A lane gets no way to change a score,
+# a weight or io.cost through this file.
+Cmnd_Alias DT_IO_SHIELD = /usr/local/sbin/dreamteam-io-shield status, /usr/local/sbin/dreamteam-io-shield --throwaway status
+Defaults!DT_IO_SHIELD env_reset, !setenv, secure_path="/usr/sbin:/usr/bin:/sbin:/bin"
+@USER@ ALL=(root) NOPASSWD: DT_IO_SHIELD
