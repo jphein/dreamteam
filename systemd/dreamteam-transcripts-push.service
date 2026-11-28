@@ -5,4 +5,4 @@ Type=oneshot
 ExecStart=/usr/bin/bash %h/Projects/dreamteam/scripts/transcripts-push.sh
 Nice=15
 IOSchedulingClass=idle
-TimeoutStartSec=8min
+TimeoutStartSec=45min
